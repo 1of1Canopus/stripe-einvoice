@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.housedevinci</groupId>
+    <artifactId>stripe-einvoice-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>stripe-einvoice-spring-boot-starter</artifactId>
+  <name>Stripe E-Invoice :: Spring Boot Starter</name>
+  <description>Auto-configuration: validated properties, the series seeding and PostgreSQL probe at startup, the persistence-mapping guard that refuses a host entity or view mapped over the issuance tables, and the privileged void service</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.housedevinci</groupId>
+      <artifactId>stripe-einvoice-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <!--
+      JDBC, not JPA. The allocator, the reader and the chain verifier are plain JDBC on the host's
+      DataSource (numbering design, deviation 1): with no entity of ours mapped there is no dirty
+      checking, no first- or second-level cache, no derived query and no projection to protect.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+
+    <!--
+      Optional, and deliberately so: Hibernate is needed only by the persistence-mapping guard,
+      which refuses to start when a host entity, a secondary/join/collection table, an @Subselect
+      or a database view maps over einvoice_issuance or einvoice_series (numbering design, N-03).
+      A host with no JPA at all has nothing to guard, and must not be forced to take Hibernate as a
+      transitive dependency to use this starter. The guard is @ConditionalOnClass on the
+      EntityManagerFactory type.
+    -->
+    <dependency>
+      <groupId>org.hibernate.orm</groupId>
+      <artifactId>hibernate-core</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-actuator</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-health</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-configuration-processor</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-testcontainers</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <!--
+      Same fix as agent-guard's M7:
+      the project's own LICENSE and NOTICE, copied into META-INF/ of the published jar.
+      FSL-1.1-ALv2's Redistribution clause requires a copy of (or a link to) the Terms and
+      Conditions to accompany redistributed copies; NOTICE travels with it by the same
+      convention Apache-2.0 SS4(d) used. This is a separate concern from the deferred
+      THIRD-PARTY-NOTICES.txt embedding.
+    -->
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <resource>
+        <directory>${maven.multiModuleProjectDirectory}</directory>
+        <targetPath>META-INF</targetPath>
+        <includes>
+          <include>LICENSE</include>
+          <include>NOTICE</include>
+        </includes>
+      </resource>
+    </resources>
+  </build>
+</project>

@@ -1,0 +1,29 @@
+-- The database role this module should run as, and nothing more.
+--
+-- The append-only triggers refuse UPDATE, DELETE and TRUNCATE for every role, but a role that OWNS
+-- a table can run ALTER TABLE ... DISABLE TRIGGER and walk past all of them. So the triggers are
+-- the second line here, not the first: the first is that the runtime role does not own these
+-- tables. The startup check WARNs at every boot when it does.
+--
+-- Run the CREATE TABLE half (the bundled schema) as a migration/owner role, then:
+
+CREATE ROLE einvoice_runtime LOGIN PASSWORD 'set-me-from-the-environment';
+
+GRANT SELECT, INSERT ON einvoice_series, einvoice_issuance,
+                        einvoice_issuance_event, einvoice_issuance_anchor
+  TO einvoice_runtime;
+
+-- UPDATE is needed on three of the four, and the triggers bound what an UPDATE may change:
+--   einvoice_series           the counter, and only by +1
+--   einvoice_issuance         the state, the document hash and key (write-once), the void reason
+--   einvoice_issuance_anchor  the head, and only forward by one row
+GRANT UPDATE ON einvoice_series, einvoice_issuance, einvoice_issuance_anchor
+  TO einvoice_runtime;
+
+-- The surrogate row ids. These sequences number rows, never invoices.
+GRANT USAGE ON SEQUENCE einvoice_issuance_id_seq, einvoice_issuance_event_seq_seq
+  TO einvoice_runtime;
+
+-- Deliberately NOT granted: DELETE, TRUNCATE, and any DDL. There is no code path in this module
+-- that needs them, and a legal ledger that can be deleted by the application that writes it proves
+-- nothing about what it once held.

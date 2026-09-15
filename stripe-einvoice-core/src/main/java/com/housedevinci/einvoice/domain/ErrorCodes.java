@@ -1,0 +1,81 @@
+package com.housedevinci.einvoice.domain;
+
+/**
+ * Every stable error code this module can raise. A code outlives a message: it is what a host
+ * application branches on, what an operator greps for, and what the docs index.
+ *
+ * <p>{@code DEI-1xx} is the numbering series and its dispositions (this module's first pull
+ * request). {@code DEI-2xx} is the issuance unit of work, {@code DEI-3xx} the mapper and the
+ * writers; they arrive with their own designs and are deliberately absent here rather than declared
+ * empty.
+ */
+public final class ErrorCodes {
+
+  /** A configuration value is missing, malformed, or outside its declared bound. */
+  public static final String CONFIG = "DEI-100";
+
+  /** A value handed to a domain type is not one this module will put on a legal document. */
+  public static final String INVALID = "DEI-101";
+
+  /** The database is unreachable. An outage, never a business outcome. */
+  public static final String STORE_UNAVAILABLE = "DEI-102";
+
+  /** The server behind the DataSource is not PostgreSQL. */
+  public static final String UNSUPPORTED_DATABASE = "DEI-103";
+
+  /** No series row and no configured definition for this (seller, series, mode). */
+  public static final String SERIES_NOT_CONFIGURED = "DEI-110";
+
+  /** Another transaction claimed this Stripe invoice first; re-read and use its number. */
+  public static final String ISSUANCE_ALREADY_CLAIMED = "DEI-111";
+
+  /** The counter reached the last number the configured width can render. */
+  public static final String SERIES_EXHAUSTED = "DEI-112";
+
+  /** A state transition outside the set the enum and the database trigger both declare. */
+  public static final String ILLEGAL_TRANSITION = "DEI-113";
+
+  /** The issuance this operation names does not exist. */
+  public static final String ISSUANCE_NOT_FOUND = "DEI-114";
+
+  /** A host entity, view or cache mapping reaches one of this module's tables. */
+  public static final String PERSISTENCE_MAPPING_REFUSED = "DEI-115";
+
+  /** The issuance chain did not verify. */
+  public static final String CHAIN_BROKEN = "DEI-116";
+
+  /**
+   * An allocation gave up waiting for the series row's lock (SQLState {@code 55P03}), distinct from
+   * a general store outage: the database answered, another allocation is simply ahead of this one
+   * (D1-05).
+   */
+  public static final String ALLOCATION_TIMEOUT = "DEI-117";
+
+  /**
+   * A caller handed the store a connection in auto-commit mode as if it owned a transaction
+   * (D1-04). Refused before any statement runs: each statement would commit on its own, so the
+   * caller's rollback would keep the number.
+   */
+  public static final String HOST_AUTOCOMMIT = "DEI-118";
+
+  /**
+   * An allocation was called inside a read-only transaction. A caller's annotation, not an outage,
+   * and it is refused before the series row lock is taken rather than surfacing as SQLState 25006.
+   */
+  public static final String HOST_TRANSACTION_READ_ONLY = "DEI-119";
+
+  /**
+   * A transaction that already holds the issuance chain's advisory lock asked for the series
+   * counter's row lock. Nothing in this module takes the two in that order; two transactions doing
+   * it in opposite orders deadlock (T-02).
+   */
+  public static final String LOCK_ORDER_VIOLATION = "DEI-120";
+
+  /**
+   * A caller-owned transaction that already failed inside the store after it had written. Nothing
+   * further runs on it; it must be rolled back.
+   */
+  public static final String UNIT_OF_WORK_POISONED = "DEI-121";
+
+  private ErrorCodes() {}
+}
