@@ -32,6 +32,10 @@ GRANT USAGE ON SEQUENCE einvoice_issuance_id_seq, einvoice_issuance_event_seq_se
 -- honour and turn this module into a permanent copy of every buyer's details.
 GRANT SELECT, INSERT, UPDATE, DELETE ON einvoice_inbound_event TO einvoice_runtime;
 
+-- The findings list is operator-facing working state, not evidence: a finding is refreshed by
+-- every sweep, acknowledged with a reason, and purged with the events it refers to.
+GRANT SELECT, INSERT, UPDATE, DELETE ON einvoice_finding TO einvoice_runtime;
+
 -- Deliberately NOT granted: DELETE and TRUNCATE on the four ledger tables, and any DDL anywhere.
 -- There is no code path in this module that needs them, and a legal ledger that can be deleted by
 -- the application that writes it proves nothing about what it once held.

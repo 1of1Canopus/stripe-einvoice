@@ -824,6 +824,35 @@ public final class JdbcIssuanceStore
     }
   }
 
+  static final String IN_SERIES =
+      "SELECT "
+          + SELECT_ISSUANCE_COLUMNS
+          + " FROM einvoice_issuance"
+          + " WHERE seller_id = ? AND series = ? AND fiscal_year = ? AND mode = ?"
+          + " ORDER BY counter DESC LIMIT ?";
+
+  @Override
+  public List<Issuance> inSeries(SeriesKey key, int limit) {
+    return unitOfWork.inReadUnit(
+        unit -> {
+          List<Issuance> rows = new ArrayList<>();
+          try (PreparedStatement ps = unit.connection().prepareStatement(IN_SERIES)) {
+            int i = 1;
+            ps.setString(i++, key.sellerId());
+            ps.setString(i++, key.series());
+            ps.setInt(i++, key.fiscalYear());
+            ps.setString(i++, key.mode().wire());
+            ps.setInt(i, Math.max(1, limit));
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                rows.add(readIssuance(rs));
+              }
+            }
+          }
+          return List.copyOf(rows);
+        });
+  }
+
   @Override
   public SeriesReport seriesReport(SeriesKey key) {
     return unitOfWork.inReadUnit(

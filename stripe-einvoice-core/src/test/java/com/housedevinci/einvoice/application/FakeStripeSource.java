@@ -48,6 +48,19 @@ public final class FakeStripeSource implements StripeInvoiceSource {
   }
 
   @Override
+  public java.util.List<String> finalisedInvoiceIds(java.time.Instant from, java.time.Instant to) {
+    if (failure != null) {
+      throw failure;
+    }
+    return invoices.values().stream()
+        .filter(SourceInvoice::finalised)
+        .filter(
+            invoice -> !invoice.finalizedAt().isBefore(from) && !invoice.finalizedAt().isAfter(to))
+        .map(SourceInvoice::id)
+        .toList();
+  }
+
+  @Override
   public String pinnedApiVersion() {
     return PINNED;
   }

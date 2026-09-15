@@ -18,8 +18,11 @@ public final class EInvoiceTables {
    */
   public static final String INBOUND_EVENT = "einvoice_inbound_event";
 
+  /** The compliance findings list. Operator-facing, purgeable, and guarded like the rest. */
+  public static final String FINDING = "einvoice_finding";
+
   public static final List<String> ALL =
-      List.of(SERIES, ISSUANCE, ISSUANCE_EVENT, ISSUANCE_ANCHOR, INBOUND_EVENT);
+      List.of(SERIES, ISSUANCE, ISSUANCE_EVENT, ISSUANCE_ANCHOR, INBOUND_EVENT, FINDING);
 
   private EInvoiceTables() {}
 

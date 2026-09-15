@@ -472,6 +472,11 @@ public final class IssuanceUnitOfWork {
         number.map(LegalNumber::value).orElse(null));
   }
 
+  /** The configuration this unit of work runs under, for the sweep and the startup log. */
+  public Configuration configuration() {
+    return configuration;
+  }
+
   /** Every event the sweeper should re-pick, oldest first (I-08, I-10). */
   public List<InboundEvent> due(Duration retryCeiling, int limit) {
     return inbound.due(clock.instant(), retryCeiling, limit);

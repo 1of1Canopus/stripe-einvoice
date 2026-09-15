@@ -107,6 +107,31 @@ CREATE INDEX IF NOT EXISTS einvoice_inbound_object
   ON einvoice_inbound_event (seller_id, mode, object_id);
 
 -- ---------------------------------------------------------------------------
+-- The compliance findings list (I-04): what an operator must act on, that is not an outage.
+--
+-- Deliberately not on the health indicator. A void that needs a credit note, a terminal mapping
+-- failure or an allocation open for a week are business conditions with no automatic remedy, and a
+-- health contributor that lands in the readiness or liveness group would let a three-week-old
+-- accounting condition take the host application out of the load balancer.
+--
+-- Upserted on (seller, mode, code, subject), so a sweep that runs every fifteen minutes refreshes
+-- one row rather than adding one. An acknowledgement records a decision and never deletes.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS einvoice_finding (
+  seller_id       varchar(64)  NOT NULL,
+  mode            varchar(4)   NOT NULL,
+  code            varchar(16)  NOT NULL,
+  subject_id      varchar(512) NOT NULL,
+  first_seen      timestamptz  NOT NULL,
+  last_seen       timestamptz  NOT NULL,
+  acknowledged_at timestamptz,
+  ack_reason      varchar(500) NOT NULL DEFAULT '',   -- screened free text, never a buyer field
+  PRIMARY KEY (seller_id, mode, code, subject_id)
+);
+CREATE INDEX IF NOT EXISTS einvoice_finding_open
+  ON einvoice_finding (seller_id, mode, acknowledged_at, first_seen);
+
+-- ---------------------------------------------------------------------------
 -- The chained issuance log: one row per disposition, append-only, hash-chained.
 --
 -- Separate from einvoice_issuance on purpose. A chain over a row with a mutable state column

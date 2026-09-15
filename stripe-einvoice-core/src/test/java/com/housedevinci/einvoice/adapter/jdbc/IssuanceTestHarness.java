@@ -135,6 +135,34 @@ public final class IssuanceTestHarness {
     return eventId;
   }
 
+  private final JdbcFindingStore findings =
+      new JdbcFindingStore(JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()));
+
+  public JdbcFindingStore findings() {
+    return findings;
+  }
+
+  /** The free-core sweep, wired over the same stores the unit of work writes to. */
+  public com.housedevinci.einvoice.application.ReconciliationSweep sweep(
+      com.housedevinci.einvoice.application.ReconciliationSweep.Settings settings) {
+    return new com.housedevinci.einvoice.application.ReconciliationSweep(
+        source, store, inbound, archive, findings, clock, settings, unitOfWork().configuration());
+  }
+
+  /** Rows in the findings table for one subject, acknowledged or not. */
+  public long findingRows(String subjectId) {
+    return PostgresSupport.scalar(
+        "SELECT count(*) FROM einvoice_finding WHERE seller_id = '"
+            + sellerId
+            + "' AND subject_id = '"
+            + subjectId
+            + "'");
+  }
+
+  public List<com.housedevinci.einvoice.domain.ComplianceFinding> openFindings() {
+    return findings.open(sellerId, Mode.LIVE, 100);
+  }
+
   public FakeStripeSource source() {
     return source;
   }

@@ -56,6 +56,11 @@ public final class InMemoryArchiveStore implements ArchiveStore {
     objects.put(key, bytes.clone());
   }
 
+  /** Loses an object without telling anyone, for the archive-missing direction of the sweep. */
+  public void forget(String key) {
+    objects.remove(key);
+  }
+
   public int size() {
     return objects.size();
   }

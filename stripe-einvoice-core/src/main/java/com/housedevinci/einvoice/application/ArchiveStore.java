@@ -59,6 +59,16 @@ public interface ArchiveStore {
   /** The stored bytes, for the integrity check and for an auditor read. */
   Optional<byte[]> get(ArchiveKey key);
 
+  /**
+   * True when an object exists at the key.
+   *
+   * <p>The default reads the bytes, which is correct everywhere and wasteful on a remote store;
+   * implementations that can ask the question directly (a HEAD, a stat) override it.
+   */
+  default boolean exists(ArchiveKey key) {
+    return get(key).isPresent();
+  }
+
   /** Keys under a prefix, for reconciliation's orphan-object direction. Bounded by the caller. */
   List<String> list(String prefix, int limit);
 

@@ -159,5 +159,23 @@ public final class ErrorCodes {
   /** A document renderer failed on input that mapping had already accepted. */
   public static final String RENDER_FAILED = "DEI-261";
 
+  /** A finalised Stripe invoice has no issuance row at all. The finding D-09 exists for. */
+  public static final String RECON_MISSING_ISSUANCE = "DEI-270";
+
+  /** An {@code ISSUED} row names an archive object that is not there. */
+  public static final String RECON_ARCHIVE_MISSING = "DEI-271";
+
+  /** An archived document no longer hashes to what its row recorded. */
+  public static final String RECON_ARCHIVE_DRIFT = "DEI-275";
+
+  /** An archive object that no {@code ISSUED} row predicted. Alerted, never deleted. */
+  public static final String RECON_ORPHAN_OBJECT = "DEI-272";
+
+  /** A number allocated and open past {@code einvoice.issuance.alert-after}. */
+  public static final String RECON_STUCK_ISSUANCE = "DEI-273";
+
+  /** Reconciliation has not completed within two intervals. No result is never "healthy". */
+  public static final String RECON_STALE = "DEI-274";
+
   private ErrorCodes() {}
 }
