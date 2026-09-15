@@ -104,19 +104,60 @@ public final class IssuanceTestHarness {
         validator,
         archive,
         clock,
-        new IssuanceUnitOfWork.Configuration(
-            sellerId,
-            "",
-            Mode.LIVE,
-            "DEFAULT",
-            true,
-            taxZone,
-            apiVersion,
-            "fr-2026.1",
-            Duration.ofMinutes(1),
-            Duration.ofHours(1),
-            closedYearCutoff,
-            false));
+        configurationFor("DEFAULT", apiVersion));
+  }
+
+  /**
+   * A unit of work with a substitute allocator, everything else unchanged - for a probe that needs
+   * P1 to fail in a way the real series never fails in (D2-01).
+   */
+  public IssuanceUnitOfWork unitOfWorkWithAllocator(
+      com.housedevinci.einvoice.application.NumberAllocator allocator) {
+    return new IssuanceUnitOfWork(
+        inbound,
+        source,
+        allocator,
+        store,
+        store,
+        renderer,
+        validator,
+        archive,
+        clock,
+        configurationFor("DEFAULT", pinnedApiVersion));
+  }
+
+  /**
+   * A unit of work whose series is not the one configured on the store, so the allocator refuses
+   * with {@code SERIES_NOT_CONFIGURED} - the shape every P1 refusal has (D2-01).
+   */
+  public IssuanceUnitOfWork unitOfWorkWithSeries(String series) {
+    return new IssuanceUnitOfWork(
+        inbound,
+        source,
+        store,
+        store,
+        store,
+        renderer,
+        validator,
+        archive,
+        clock,
+        configurationFor(series, pinnedApiVersion));
+  }
+
+  private IssuanceUnitOfWork.Configuration configurationFor(String series, String apiVersion) {
+    return new IssuanceUnitOfWork.Configuration(
+        sellerId,
+        "",
+        Mode.LIVE,
+        series,
+        true,
+        taxZone,
+        apiVersion,
+        "fr-2026.1",
+        Duration.ofMinutes(1),
+        Duration.ofHours(1),
+        closedYearCutoff,
+        false);
   }
 
   /** Records one verified event exactly as the endpoint would, and returns its id. */

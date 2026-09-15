@@ -9,6 +9,7 @@ import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.EventIdentity;
 import com.housedevinci.einvoice.domain.Hashes;
+import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
 import com.housedevinci.einvoice.domain.Issuance;
 import java.nio.charset.StandardCharsets;
@@ -206,6 +207,62 @@ class CipherProbeIssuanceTest {
         .isEqualTo(InboundState.REFUSED_ACCOUNT);
     assertThat(harness.numberedRows()).isZero();
     assertThat(harness.source().fetches()).isZero();
+  }
+
+  // D2-01a
+  @Test
+  void probe_every_event_that_stops_carries_a_recorded_state_and_code() throws Exception {
+    // invoice.finalized and invoice.paid arrive together in the normal case, so four events for
+    // one invoice, processed concurrently, is the shape of a real claim race - not an edge case.
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    harness.source().with(TestInvoices.finalised("in_recorded"));
+    List<String> events =
+        List.of(
+            harness.receive("invoice.finalized", "in_recorded"),
+            harness.receive("invoice.finalized", "in_recorded"),
+            harness.receive("invoice.paid", "in_recorded"),
+            harness.receive("invoice.paid", "in_recorded"));
+
+    List<Callable<Void>> work =
+        events.stream()
+            .<Callable<Void>>map(
+                id ->
+                    () -> {
+                      try {
+                        harness.unitOfWork().process(id);
+                      } catch (EInvoiceException ignored) {
+                        // The row is what is asserted, not what this call returned or threw.
+                      }
+                      return null;
+                    })
+            .toList();
+    try (ExecutorService pool = Executors.newFixedThreadPool(4)) {
+      for (Future<Void> outcome : pool.invokeAll(work)) {
+        outcome.get();
+      }
+    }
+
+    for (String id : events) {
+      assertThat(harness.inbound().find(id).orElseThrow().state())
+          .describedAs(
+              "every event that stops must carry a recorded state and code; a loser left MAPPED"
+                  + " with attempts 0 is never re-picked correctly by the retry ceiling")
+          .isNotEqualTo(InboundState.MAPPED);
+    }
+  }
+
+  // D2-01b
+  @Test
+  void probe_an_allocator_refusal_is_recorded_on_the_inbound_row() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    harness.source().with(TestInvoices.finalised("in_unconfigured"));
+    String eventId = harness.receive("invoice.finalized", "in_unconfigured");
+
+    harness.unitOfWorkWithSeries("NOT-CONFIGURED").process(eventId);
+
+    InboundEvent row = harness.inbound().find(eventId).orElseThrow();
+    assertThat(row.lastCode()).describedAs("the allocator's refusal code").isNotEmpty();
+    assertThat(row.attempts()).describedAs("so the retry ceiling is reachable").isPositive();
   }
 
   @Test

@@ -277,6 +277,59 @@ class IssuanceUnitOfWorkTest {
   }
 
   @Test
+  void a_repeated_store_failure_at_p1_advances_the_attempt_counter_so_the_ceiling_is_reachable() {
+    // D2-01: a phase that throws and records nothing leaves attempts at 0 for ever, and the retry
+    // ceiling `retryableTerminal` exists to enforce is never reached. Three failures, three
+    // recorded attempts, then success once the store recovers.
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    harness.source().with(TestInvoices.finalised("in_flaky_store"));
+    String eventId = harness.receive("invoice.finalized", "in_flaky_store");
+    FlakyAllocator allocator = new FlakyAllocator(harness.store(), 3, ErrorCodes.STORE_UNAVAILABLE);
+    IssuanceUnitOfWork unitOfWork = harness.unitOfWorkWithAllocator(allocator);
+
+    int previousAttempts = harness.inbound().find(eventId).orElseThrow().attempts();
+    for (int attempt = 1; attempt <= 3; attempt++) {
+      IssuanceUnitOfWork.Outcome outcome = unitOfWork.process(eventId);
+      assertThat(outcome.state()).isEqualTo(InboundState.FAILED_ISSUANCE);
+      assertThat(outcome.code()).isEqualTo(ErrorCodes.STORE_UNAVAILABLE);
+      int attempts = harness.inbound().find(eventId).orElseThrow().attempts();
+      assertThat(attempts)
+          .describedAs(
+              "run %d must record more attempts than the last, or the ceiling in"
+                  + " retryableTerminal is never reached",
+              attempt)
+          .isGreaterThan(previousAttempts);
+      previousAttempts = attempts;
+    }
+
+    assertThat(unitOfWork.process(eventId).state()).isEqualTo(InboundState.COMPLETED);
+    assertThat(harness.numberedRows()).isEqualTo(1);
+  }
+
+  /** Fails P1 a fixed number of times with a store-outage-shaped code, then delegates. */
+  private static final class FlakyAllocator implements NumberAllocator {
+
+    private final NumberAllocator delegate;
+    private final String code;
+    private int remainingFailures;
+
+    FlakyAllocator(NumberAllocator delegate, int failures, String code) {
+      this.delegate = delegate;
+      this.remainingFailures = failures;
+      this.code = code;
+    }
+
+    @Override
+    public Issuance allocate(AllocationRequest request) {
+      if (remainingFailures > 0) {
+        remainingFailures--;
+        throw new EInvoiceException(code, "simulated store outage");
+      }
+      return delegate.allocate(request);
+    }
+  }
+
+  @Test
   void an_invoice_voided_before_we_ever_issued_is_recorded_and_dropped() {
     IssuanceTestHarness harness = IssuanceTestHarness.create();
     harness.source().with(TestInvoices.finalised("in_void", "Buyer Cooperative", "void"));

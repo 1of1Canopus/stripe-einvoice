@@ -223,16 +223,42 @@ public final class IssuanceUnitOfWork {
     inbound.transition(eventId, InboundState.MAPPED, "", clock.instant(), null);
 
     // P1: the number. Every refusal that depends on data has already happened, so a number is
-    // consumed only for an invoice this module has decided it can document.
-    Issuance issuance =
-        allocator.allocate(
-            new AllocationRequest(
-                seriesKey(issueDate),
-                invoice.id(),
-                invoice.accountId(),
-                invoice.number(),
-                invoice.finalizedAt(),
-                configuration.rulePackVersion()));
+    // consumed only for an invoice this module has decided it can document. Wrapped like every
+    // other phase (D2-01): unwrapped, a refusal here left the row MAPPED with attempts 0 and no
+    // code, so the sweeper re-picked it immediately, for ever, and the retry ceiling was never
+    // reached.
+    Issuance issuance;
+    try {
+      issuance =
+          allocator.allocate(
+              new AllocationRequest(
+                  seriesKey(issueDate),
+                  invoice.id(),
+                  invoice.accountId(),
+                  invoice.number(),
+                  invoice.finalizedAt(),
+                  configuration.rulePackVersion()));
+    } catch (EInvoiceException e) {
+      if (ErrorCodes.ISSUANCE_ALREADY_CLAIMED.equals(e.code())) {
+        // The loser of a claim race is not a failure at all - it is a duplicate. The invoice is
+        // finalized and paid together in the normal case, so this is the common shape, not an
+        // edge case: two events, one winner, and the loser's job is done as soon as it can see
+        // that. Re-read the winner's row rather than guess at its number.
+        Optional<Issuance> winner =
+            reader.findBySource(configuration.sellerId(), configuration.mode(), invoice.id());
+        return fail(
+            event,
+            InboundState.COMPLETED,
+            ErrorCodes.ISSUANCE_ALREADY_CLAIMED,
+            null,
+            winner.map(Issuance::legalNumber).orElse(null));
+      }
+      // A backoff for the codes that can improve with time; none for the codes that cannot,
+      // because a series that is not configured or has run out of numbers stays that way until an
+      // operator acts, and reattempting it every sweep is the unbounded loop this fix removes.
+      Duration retryIn = retryableAllocationFailure(e.code()) ? backoffFor(event) : null;
+      return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
+    }
 
     DocumentInput input =
         new DocumentInput(
@@ -301,9 +327,15 @@ public final class IssuanceUnitOfWork {
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
     }
 
-    // P4: the document exists.
-    Issuance issued =
-        writer.markIssued(configuration.sellerId(), configuration.mode(), invoice.id());
+    // P4: the document exists. Wrapped like P3 (D2-01): a crash or a store failure here falls
+    // back to P3 on retry - the row is still ARCHIVING, byte-identical - so this is retryable
+    // exactly like an archive failure is.
+    Issuance issued;
+    try {
+      issued = writer.markIssued(configuration.sellerId(), configuration.mode(), invoice.id());
+    } catch (EInvoiceException e) {
+      return fail(event, InboundState.FAILED_ISSUANCE, e.code(), backoffFor(event));
+    }
     inbound.transition(event.eventId(), InboundState.COMPLETED, "", clock.instant(), null);
     return new Outcome(event.eventId(), InboundState.COMPLETED, "", issued.legalNumber().value());
   }
@@ -446,6 +478,16 @@ public final class IssuanceUnitOfWork {
     return backoff.compareTo(configuration.maxRetryBackoff()) > 0
         ? configuration.maxRetryBackoff()
         : backoff;
+  }
+
+  /**
+   * D2-01. Only the allocator failures that can plausibly improve with time get a backoff: a store
+   * outage or a lock-timeout are transient. A series that is not configured or has run out of
+   * numbers is an operator decision, not a delay - reattempting it every sweep is exactly the
+   * unbounded loop this finding removes.
+   */
+  private static boolean retryableAllocationFailure(String code) {
+    return ErrorCodes.STORE_UNAVAILABLE.equals(code) || ErrorCodes.ALLOCATION_TIMEOUT.equals(code);
   }
 
   private Outcome park(InboundEvent event) {
