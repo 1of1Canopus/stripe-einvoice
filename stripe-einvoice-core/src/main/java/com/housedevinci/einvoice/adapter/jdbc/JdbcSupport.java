@@ -60,8 +60,44 @@ public final class JdbcSupport {
     return t == null ? null : t.toInstant();
   }
 
-  /** Runs the bundled PostgreSQL schema; idempotent, and serialised by its own advisory lock. */
+  private static final String SCHEMA_FULLY_PRESENT =
+      "SELECT to_regclass('einvoice_series') IS NOT NULL"
+          + " AND to_regclass('einvoice_issuance') IS NOT NULL"
+          + " AND to_regclass('einvoice_issuance_event') IS NOT NULL"
+          + " AND to_regclass('einvoice_issuance_anchor') IS NOT NULL"
+          + " AND EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'einvoice_series_guard')"
+          + " AND EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'einvoice_issuance_guard')"
+          + " AND EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'einvoice_append_only')"
+          + " AND EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'einvoice_anchor_monotonic')"
+          + " AND EXISTS (SELECT 1 FROM pg_trigger"
+          + "   WHERE tgname = 'einvoice_series_guard'"
+          + "     AND tgrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_series'))"
+          + " AND EXISTS (SELECT 1 FROM pg_trigger"
+          + "   WHERE tgname = 'einvoice_issuance_guard'"
+          + "     AND tgrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_issuance'))"
+          + " AND EXISTS (SELECT 1 FROM pg_trigger"
+          + "   WHERE tgname = 'einvoice_issuance_anchor_monotonic'"
+          + "     AND tgrelid ="
+          + "       to_regclass(quote_ident(current_schema()) || '.einvoice_issuance_anchor'))";
+
+  /**
+   * Runs the bundled PostgreSQL schema; idempotent, and serialised by its own advisory lock.
+   *
+   * <p><b>D1-10.</b> {@code einvoice.initialize-schema} defaults to {@code true}, and the
+   * documented runtime role has no {@code CREATE} on the schema - by design, since that role must
+   * not be able to alter its own guards. {@code CREATE TABLE IF NOT EXISTS} and {@code CREATE OR
+   * REPLACE FUNCTION} both still require {@code CREATE} on the schema in PostgreSQL even when the
+   * object already exists: the privilege is checked before the "if not exists"/"or replace" test
+   * runs. So this reads before it writes: when every table, function and trigger this module owns
+   * is already present, the DDL script never runs at all, and a fully migrated database needs no
+   * privilege past {@code SELECT}/{@code INSERT}/{@code UPDATE} to start. A first bootstrap - where
+   * something really is missing - still needs an owner-capable role, and a permission failure there
+   * is reported by name rather than as a generic outage.
+   */
   public static void initializeSchema(DataSource ds) {
+    if (schemaFullyPresent(ds)) {
+      return;
+    }
     String sql;
     try (InputStream in =
         JdbcSupport.class.getResourceAsStream("/com/housedevinci/einvoice/schema-postgresql.sql")) {
@@ -72,13 +108,38 @@ public final class JdbcSupport {
     } catch (IOException e) {
       throw new IllegalStateException("cannot read schema", e);
     }
-    inTransaction(
+    try {
+      inTransaction(
+          ds,
+          c -> {
+            try (Statement st = c.createStatement()) {
+              st.execute(sql);
+            }
+            return null;
+          });
+    } catch (EInvoiceException e) {
+      if (e.getCause() instanceof SQLException se && "42501".equals(se.getSQLState())) {
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG,
+            "einvoice.initialize-schema=true but this database role has no CREATE privilege on the"
+                + " schema (SQLState 42501). Either run the bundled schema once as an owner-capable"
+                + " role and then run this application with only the grants in"
+                + " docs/schema-grants.sql, or set einvoice.initialize-schema=false once the schema"
+                + " is installed.",
+            se);
+      }
+      throw e;
+    }
+  }
+
+  private static boolean schemaFullyPresent(DataSource ds) {
+    return withConnection(
         ds,
         c -> {
-          try (Statement st = c.createStatement()) {
-            st.execute(sql);
+          try (Statement st = c.createStatement();
+              var rs = st.executeQuery(SCHEMA_FULLY_PRESENT)) {
+            return rs.next() && rs.getBoolean(1);
           }
-          return null;
         });
   }
 
