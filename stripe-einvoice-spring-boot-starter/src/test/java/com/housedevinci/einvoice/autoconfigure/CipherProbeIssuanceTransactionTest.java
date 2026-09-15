@@ -60,7 +60,11 @@ class CipherProbeIssuanceTransactionTest {
             "einvoice.seller.id=" + seller,
             "einvoice.seller.tax-zone=Europe/Paris",
             "einvoice.numbering.prefix=INV-{fiscalYear}-",
-            "einvoice.chain.unkeyed=true",
+            // One keyed chain for every starter test that boots a context: the trail is one per
+            // database, its anchor records whether it is keyed, and a context configured the other
+            // way is refused on append.
+            "einvoice.chain.hmac-secret=ZWludm9pY2UtdGVzdC1jaGFpbi1zZWNyZXQtMDAwMSE=",
+            "einvoice.chain.hmac-key-id=k1",
             "einvoice.archive.type=filesystem",
             "einvoice.archive.root="
                 + System.getProperty("java.io.tmpdir")

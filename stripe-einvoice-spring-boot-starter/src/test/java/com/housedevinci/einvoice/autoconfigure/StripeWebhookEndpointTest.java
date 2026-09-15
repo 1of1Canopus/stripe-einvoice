@@ -30,6 +30,11 @@ import org.springframework.web.client.RestClient;
 /**
  * The edge, over real HTTP, against a real PostgreSQL.
  *
+ * <p>The chain configuration matches every other starter test that appends a disposition, and that
+ * is not incidental: a hash chain is one trail for the whole database, its anchor records whether
+ * that trail is keyed, and a second application configured the other way is refused on append. The
+ * shared container is one database.
+ *
  * <p>The contract under test is I-01's: 400 only for "not provably from Stripe", 200 for everything
  * with a valid signature - including the refusals - and 503 only when the record could not be made
  * durable.
@@ -41,7 +46,8 @@ import org.springframework.web.client.RestClient;
       "einvoice.seller.id=" + IssuanceTestApp.SELLER,
       "einvoice.seller.tax-zone=Europe/Paris",
       "einvoice.numbering.prefix=INV-{fiscalYear}-",
-      "einvoice.chain.unkeyed=true",
+      "einvoice.chain.hmac-secret=ZWludm9pY2UtdGVzdC1jaGFpbi1zZWNyZXQtMDAwMSE=",
+      "einvoice.chain.hmac-key-id=k1",
       "einvoice.archive.type=filesystem",
       "einvoice.archive.root=${java.io.tmpdir}/einvoice-endpoint-test",
       "einvoice.stripe.webhook-secrets.primary=whsec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
