@@ -265,6 +265,29 @@ class CipherProbeIssuanceTest {
     assertThat(row.attempts()).describedAs("so the retry ceiling is reachable").isPositive();
   }
 
+  // D2-03
+  @Test
+  void probe_a_version_skewed_event_is_re_picked_by_the_sweeper_after_the_pin_moves() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    String skewedVersion = "2019-01-01.old";
+    String eventId = harness.receive("invoice.finalized", "in_skew", skewedVersion, true, "");
+
+    harness.unitOfWork().process(eventId);
+
+    assertThat(harness.inbound().find(eventId).orElseThrow().state())
+        .isEqualTo(InboundState.REFUSED_VERSION_SKEW);
+    assertThat(harness.due())
+        .describedAs("still skewed against the pin this application runs under")
+        .extracting(InboundEvent::eventId)
+        .doesNotContain(eventId);
+    assertThat(harness.due(skewedVersion))
+        .describedAs(
+            "the operator updated einvoice.stripe.api-version to match what this event actually"
+                + " carried, and the sweeper must re-pick exactly this row")
+        .extracting(InboundEvent::eventId)
+        .contains(eventId);
+  }
+
   @Test
   void probe_the_strict_reader_refuses_a_body_two_readers_could_disagree_about() {
     assertThatThrownBy(

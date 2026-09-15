@@ -114,7 +114,11 @@ attribute: an API version off the pin, a test-mode event in a live application, 
 resolves to no seller. That is deliberate. Stripe treats a 400 as a failed delivery and disables
 endpoints that keep failing, and a version skew hits every event on the account at once, so a
 refusal that answered 400 could take the whole intake offline and lose the events that would have
-worked. Those rows keep their bodies and replay once the pin is updated.
+worked. Those rows keep their bodies, and the sweeper's due query re-picks exactly the
+`REFUSED_VERSION_SKEW` rows whose own recorded API version now equals the pin this application
+starts under, driving them through the same path (D2-03). `REFUSED_MODE` and `REFUSED_ACCOUNT` are
+never re-picked automatically: an upgrade does not cure either, and re-running one silently would
+be worse than leaving it for an operator.
 
 ## Personal data on the intake path
 

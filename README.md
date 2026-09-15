@@ -56,7 +56,9 @@ skew, a test-mode event in a live application, an account that resolves to no co
 is a terminal state on that row with its own error code, not a 400. Stripe treats a 400 as a failed
 delivery and disables endpoints that keep failing, and a version skew applies to every event on the
 account at once: a control that refuses one bad event must not be able to stop the whole intake.
-Once the pin is updated, the recorded events replay through the same path.
+Once the pin is updated to match what an event actually carried, the sweeper re-picks that
+recorded row and it replays through the same path; `REFUSED_MODE` and `REFUSED_ACCOUNT` are never
+re-picked automatically, because neither is cured by an upgrade.
 
 | Property | How |
 |---|---|
@@ -145,7 +147,7 @@ authorization.
 |---|---|
 | Is anything wrong right now? | `GET /actuator/health/einvoice` - operational conditions only: a silent sweeper, a stale reconciliation, a chain that does not verify. It is deliberately outside `readiness` and `liveness`, so a business condition can never take your application out of the load balancer |
 | What needs a human? | `GET /actuator/einvoicefindings` - open compliance findings with their codes and subjects. Acknowledge one through `IssuanceFindingService`, with a reason that is recorded; the finding is never deleted |
-| Stripe moved its API version | The refused events are on `einvoice_inbound_event` with their bodies. Update the pin, restart, and the sweeper replays them through the same path |
+| Stripe moved its API version | The refused events are on `einvoice_inbound_event` with their bodies. Update the pin to match, restart, and the sweeper's due query re-picks exactly the rows whose recorded version now equals it, and replays them through the same path |
 | A document failed validation | The number stays allocated with the failing rule id recorded beside the event. An operator voids it through `IssuanceVoidService` with a reason, and the series report explains the hole |
 
 Run the sample:

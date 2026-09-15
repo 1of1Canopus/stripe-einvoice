@@ -519,8 +519,8 @@ public final class IssuanceUnitOfWork {
     return configuration;
   }
 
-  /** Every event the sweeper should re-pick, oldest first (I-08, I-10). */
+  /** Every event the sweeper should re-pick, oldest first (I-08, I-10, D2-03). */
   public List<InboundEvent> due(Duration retryCeiling, int limit) {
-    return inbound.due(clock.instant(), retryCeiling, limit);
+    return inbound.due(clock.instant(), retryCeiling, limit, configuration.pinnedApiVersion());
   }
 }

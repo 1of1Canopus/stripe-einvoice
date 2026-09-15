@@ -76,6 +76,10 @@ public final class JdbcInboundEventStore implements InboundEventStore {
           // "due now", which is what the same column means for a row that is still running.
           + " OR (state IN ('FAILED_FETCH','FAILED_ISSUANCE') AND received_at > ?"
           + "   AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?)"
+          // D2-03: a version-skew refusal a configuration change has actually cured. REFUSED_MODE
+          // and REFUSED_ACCOUNT are deliberately absent - neither is cured by an upgrade, and
+          // re-running either silently would be worse than leaving it for an operator.
+          + " OR (state = 'REFUSED_VERSION_SKEW' AND api_version = ?)"
           + " ORDER BY received_at LIMIT ?";
 
   private final JdbcUnitOfWork unitOfWork;
@@ -217,7 +221,8 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   }
 
   @Override
-  public List<InboundEvent> due(Instant now, Duration retryCeiling, int limit) {
+  public List<InboundEvent> due(
+      Instant now, Duration retryCeiling, int limit, String pinnedApiVersion) {
     return unitOfWork.inReadUnit(
         unit -> {
           List<InboundEvent> due = new ArrayList<>();
@@ -225,7 +230,8 @@ public final class JdbcInboundEventStore implements InboundEventStore {
             ps.setObject(1, ts(now));
             ps.setObject(2, ts(now.minus(retryCeiling)));
             ps.setObject(3, ts(now));
-            ps.setInt(4, Math.max(1, limit));
+            ps.setString(4, pinnedApiVersion == null ? "" : pinnedApiVersion);
+            ps.setInt(5, Math.max(1, limit));
             try (ResultSet rs = ps.executeQuery()) {
               while (rs.next()) {
                 due.add(read(rs));

@@ -57,10 +57,14 @@ public interface InboundEventStore {
   InboundEvent bindSeller(String eventId, String sellerId, Instant now);
 
   /**
-   * Events the sweeper should pick up: anything not terminal, and any retryable terminal whose
-   * next-attempt time has come and which is still inside the retry ceiling (I-08, I-10).
+   * Events the sweeper should pick up: anything not terminal, any retryable terminal whose
+   * next-attempt time has come and which is still inside the retry ceiling (I-08, I-10), and a
+   * {@code REFUSED_VERSION_SKEW} row whose recorded {@code api_version} now equals {@code
+   * pinnedApiVersion} - a configuration change has cured exactly that row, and none of the ones
+   * still refused (D2-03). {@code REFUSED_MODE} and {@code REFUSED_ACCOUNT} are never re-picked
+   * here: an upgrade does not cure either.
    */
-  List<InboundEvent> due(Instant now, Duration retryCeiling, int limit);
+  List<InboundEvent> due(Instant now, Duration retryCeiling, int limit, String pinnedApiVersion);
 
   /** Rows that never reached a terminal state and are older than the retention ceiling (I-07). */
   int purgeOlderThan(Instant cutoff, int limit);

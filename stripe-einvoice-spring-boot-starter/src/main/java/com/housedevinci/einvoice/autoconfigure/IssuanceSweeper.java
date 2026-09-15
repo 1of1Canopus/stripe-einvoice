@@ -96,7 +96,8 @@ public final class IssuanceSweeper implements InitializingBean, DisposableBean {
   }
 
   /**
-   * Re-picks every event that is due: running, parked, or a retryable terminal inside the ceiling.
+   * Re-picks every event that is due: running, parked, a retryable terminal inside the ceiling, or
+   * a version-skew refusal the currently configured pin has cured (D2-03).
    */
   public int sweepOnce() {
     try {
@@ -104,7 +105,8 @@ public final class IssuanceSweeper implements InitializingBean, DisposableBean {
           inbound.due(
               clock.instant(),
               properties.getIssuance().getRetryCeiling(),
-              properties.getIssuance().getQueueCapacity());
+              properties.getIssuance().getQueueCapacity(),
+              unitOfWork.configuration().pinnedApiVersion());
       for (InboundEvent event : due) {
         worker.submit(event.eventId());
       }

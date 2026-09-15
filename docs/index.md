@@ -141,7 +141,11 @@ once. The refused events are on `einvoice_inbound_event` with their bodies intac
 
 1. Upgrade the module (the pin is the SDK's own version and is refused if configuration names
    another).
-2. Restart. The sweeper re-picks the refused rows and drives them through the same path.
+2. Restart. The sweeper's due query re-picks exactly the `REFUSED_VERSION_SKEW` rows whose own
+   recorded `api_version` now equals the pin this application starts under, and drives them through
+   the same path. `REFUSED_MODE` and `REFUSED_ACCOUNT` are never re-picked this way - neither is
+   cured by an upgrade, and re-running either silently would be worse than leaving it for an
+   operator to look at.
 3. Watch the findings list empty out.
 
 ## Reconciliation, health and findings

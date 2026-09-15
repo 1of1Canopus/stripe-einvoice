@@ -251,7 +251,13 @@ class CipherProbeIssuanceStarterTest {
               // up. Nothing was dropped on the floor.
               assertThat(worker.rejectedCount()).isPositive();
               List<String> due =
-                  inbound.due(NOW.plus(Duration.ofMinutes(5)), Duration.ofHours(72), 1000).stream()
+                  inbound
+                      .due(
+                          NOW.plus(Duration.ofMinutes(5)),
+                          Duration.ofHours(72),
+                          1000,
+                          IssuanceTestApp.PINNED_VERSION)
+                      .stream()
                       .map(InboundEvent::eventId)
                       .toList();
               assertThat(due).containsAll(rejectedOf(events, inbound));

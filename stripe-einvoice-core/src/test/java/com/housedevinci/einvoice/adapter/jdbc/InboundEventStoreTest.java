@@ -124,7 +124,9 @@ class InboundEventStoreTest {
     store.transition(completed, InboundState.COMPLETED, "", NOW, null);
 
     List<String> due =
-        store.due(NOW.plus(Duration.ofMinutes(10)), Duration.ofHours(72), 100).stream()
+        store
+            .due(NOW.plus(Duration.ofMinutes(10)), Duration.ofHours(72), 100, "2026-03-31.clover")
+            .stream()
             .map(InboundEvent::eventId)
             .toList();
     assertThat(due).contains(running, retryable).doesNotContain(finalFailure, completed);
@@ -138,11 +140,18 @@ class InboundEventStoreTest {
     store.transition(
         id, InboundState.FAILED_FETCH, ErrorCodes.STRIPE_UNAVAILABLE, NOW, Duration.ofHours(1));
 
-    assertThat(ids(store.due(NOW.plusSeconds(60), Duration.ofHours(72), 100))).doesNotContain(id);
-    assertThat(ids(store.due(NOW.plus(Duration.ofHours(2)), Duration.ofHours(72), 100)))
+    assertThat(ids(store.due(NOW.plusSeconds(60), Duration.ofHours(72), 100, "2026-03-31.clover")))
+        .doesNotContain(id);
+    assertThat(
+            ids(
+                store.due(
+                    NOW.plus(Duration.ofHours(2)), Duration.ofHours(72), 100, "2026-03-31.clover")))
         .contains(id);
     // Past the ceiling the event is final and becomes a compliance finding instead (I-08).
-    assertThat(ids(store.due(NOW.plus(Duration.ofDays(9)), Duration.ofHours(72), 100)))
+    assertThat(
+            ids(
+                store.due(
+                    NOW.plus(Duration.ofDays(9)), Duration.ofHours(72), 100, "2026-03-31.clover")))
         .doesNotContain(id);
   }
 

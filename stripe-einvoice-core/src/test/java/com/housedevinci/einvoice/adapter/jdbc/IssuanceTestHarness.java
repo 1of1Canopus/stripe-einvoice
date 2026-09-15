@@ -270,8 +270,18 @@ public final class IssuanceTestHarness {
         "SELECT count(*) FROM einvoice_issuance_event WHERE seller_id = '" + sellerId + "'");
   }
 
+  /** Due against this harness's own configured pin - what the sweeper would see unchanged. */
   public List<InboundEvent> due() {
-    return inbound.due(clock.instant(), Duration.ofHours(72), 100);
+    return due(pinnedApiVersion);
+  }
+
+  /**
+   * Due against a given pin, simulating an operator who updated {@code einvoice.stripe.api-version}
+   * and restarted (D2-03): a {@code REFUSED_VERSION_SKEW} row whose recorded {@code api_version}
+   * equals {@code pin} is re-picked.
+   */
+  public List<InboundEvent> due(String pin) {
+    return inbound.due(clock.instant(), Duration.ofHours(72), 100, pin);
   }
 
   public SeriesKey seriesKey() {
