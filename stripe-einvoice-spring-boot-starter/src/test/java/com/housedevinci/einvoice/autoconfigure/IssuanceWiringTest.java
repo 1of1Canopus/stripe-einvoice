@@ -236,7 +236,7 @@ class IssuanceWiringTest {
   }
 
   @Configuration
-  static class Ports {
+  public static class Ports {
 
     // destroyMethod = "": the pool is shared by every context these tests start, and a context
     // that closed it would take the next test's database with it.

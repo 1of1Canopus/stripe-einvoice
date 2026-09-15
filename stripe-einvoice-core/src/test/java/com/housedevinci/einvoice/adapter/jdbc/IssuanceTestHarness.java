@@ -124,6 +124,17 @@ public final class IssuanceTestHarness {
     return receive(type, objectId, FakeStripeSource.PINNED, true, "");
   }
 
+  /** Records an event whose raw body is the test's own, for the payload-as-a-source probe. */
+  public String receiveWithBody(String type, String objectId, String rawBody) {
+    String eventId = "evt_" + UUID.randomUUID().toString().replace("-", "");
+    byte[] body = rawBody.getBytes(StandardCharsets.UTF_8);
+    EventIdentity identity =
+        new EventIdentity(eventId, type, FakeStripeSource.PINNED, true, "", objectId);
+    inbound.record(
+        InboundEvent.received(identity, Mode.LIVE, "primary", body, clock.instant()), body);
+    return eventId;
+  }
+
   public String receive(
       String type, String objectId, String apiVersion, boolean livemode, String account) {
     String eventId = "evt_" + UUID.randomUUID().toString().replace("-", "");
