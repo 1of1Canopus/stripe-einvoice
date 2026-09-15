@@ -139,6 +139,17 @@ module is where that is set out.
 
 ## Residual risks on the issuance path
 
+- **A configured intake with a missing renderer or validator fails startup, by name (D2-02).** The
+  unit of work, the worker, the sweeper, the webhook controller and the health indicator are all
+  conditional, transitively, on a `DocumentRenderer` and a `DocumentValidator` bean. Silently not
+  wiring any of them was the earlier behaviour, and it meant an application with
+  `einvoice.stripe.webhook-secrets` and an archive root configured - one that plainly expects to
+  receive events - could start with no endpoint, no sweeper and no signal at any log level: Stripe
+  then posts to a path that answers 404, retries for three days, and disables the endpoint with
+  nothing having ever noticed. "Configured" is `einvoice.stripe.webhook-secrets` non-empty, or
+  `einvoice.issuance.enabled` set explicitly (checked against the environment, never the property's
+  own default, which is `true`). With neither, this is a numbering-only host and it starts with one
+  WARN naming what is missing, never a failure.
 - **An archive store that lies about write-once.** The capability is probed at startup with a real
   conditional write, and a store that overwrites is refused. With
   `einvoice.archive.allow-non-atomic-store=true` the application starts anyway, WARNs at every

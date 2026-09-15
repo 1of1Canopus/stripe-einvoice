@@ -24,6 +24,7 @@ import java.time.ZoneId;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -31,6 +32,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.env.Environment;
 
 /**
  * Wires the issuance unit of work: the intake, the worker, the sweeper, the archive and the signal.
@@ -101,6 +103,20 @@ public class EInvoiceIssuanceAutoConfiguration {
   public ArchiveStoreStartupProbe einvoiceArchiveStoreProbe(
       ArchiveStore archive, EInvoiceProperties properties) {
     return new ArchiveStoreStartupProbe(archive, properties.getArchive().isAllowNonAtomicStore());
+  }
+
+  /**
+   * Unconditional on the renderer and the validator, deliberately: this is the check that tells the
+   * difference between "not wired" and "wired wrong" (D2-02). It must run whether or not those
+   * beans exist, so it cannot itself be conditional on them.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public IssuanceIntakeWiringCheck einvoiceIssuanceIntakeWiringCheck(
+      ConfigurableListableBeanFactory beanFactory,
+      EInvoiceProperties properties,
+      Environment environment) {
+    return new IssuanceIntakeWiringCheck(beanFactory, properties, environment);
   }
 
   @Bean

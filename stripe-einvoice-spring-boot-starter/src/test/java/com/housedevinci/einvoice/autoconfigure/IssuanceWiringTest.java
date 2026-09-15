@@ -65,9 +65,54 @@ class IssuanceWiringTest {
   }
 
   @Test
-  void without_a_renderer_the_pipeline_does_not_start_and_the_numbering_api_still_does() {
-    // An application that can allocate a number and cannot produce a validated document would
-    // consume a legal series and archive nothing. So it does not start that half at all.
+  void without_a_renderer_and_with_no_intake_configured_the_numbering_api_still_starts() {
+    // A host with no webhook secret and no explicit einvoice.issuance.enabled has given every
+    // visible sign that it wants the numbering API only. An application that can allocate a
+    // number and cannot produce a validated document would otherwise consume a legal series and
+    // archive nothing, so the issuance half still does not start - but quietly, with a WARN, not a
+    // failure (D2-02).
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithoutRenderer.class)
+        .withPropertyValues(noIntakeConfigured())
+        .run(
+            context ->
+                assertThat(context)
+                    .hasNotFailed()
+                    .doesNotHaveBean(com.housedevinci.einvoice.application.IssuanceUnitOfWork.class)
+                    .doesNotHaveBean(IssuanceWorker.class)
+                    .doesNotHaveBean(StripeWebhookController.class)
+                    .hasSingleBean(IssuanceNumberingService.class));
+  }
+
+  // D2-02
+  @Test
+  void probe_a_configured_intake_without_a_renderer_is_refused_loudly_not_silently() {
+    // base() carries a webhook secret and an archive root: an application that plainly expects to
+    // receive events. Silently starting with no endpoint, no sweeper and no signal is precisely
+    // the failure the durable-record-first design exists to prevent, reached by a configuration
+    // mistake rather than a crash.
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithoutRenderer.class)
+        .withPropertyValues(base())
+        .run(
+            context ->
+                assertThat(
+                        context.getStartupFailure() == null
+                            && !context.containsBean("einvoiceWebhookController"))
+                    .describedAs(
+                        "a configured intake with no renderer must either fail startup or still"
+                            + " wire the controller - never both start clean and say nothing")
+                    .isFalse());
+  }
+
+  @Test
+  void a_configured_intake_without_a_renderer_names_the_missing_bean_and_the_opt_out() {
     new ApplicationContextRunner()
         .withConfiguration(
             AutoConfigurations.of(
@@ -77,10 +122,53 @@ class IssuanceWiringTest {
         .run(
             context ->
                 assertThat(context)
+                    .hasFailed()
+                    .getFailure()
+                    .rootCause()
+                    .isInstanceOf(EInvoiceException.class)
+                    .hasMessageContaining("DocumentRenderer")
+                    .hasMessageContaining("einvoice.issuance.enabled=false"));
+  }
+
+  @Test
+  void an_explicitly_enabled_issuance_without_a_renderer_fails_fast_even_with_no_secret() {
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithoutRenderer.class)
+        .withPropertyValues(noIntakeConfigured())
+        .withPropertyValues("einvoice.issuance.enabled=true")
+        .run(context -> assertThat(context).hasFailed());
+  }
+
+  @Test
+  void an_explicitly_disabled_issuance_with_no_secret_and_no_renderer_only_warns() {
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithoutRenderer.class)
+        .withPropertyValues(noIntakeConfigured())
+        .withPropertyValues("einvoice.issuance.enabled=false")
+        .run(
+            context ->
+                assertThat(context)
                     .hasNotFailed()
-                    .doesNotHaveBean(com.housedevinci.einvoice.application.IssuanceUnitOfWork.class)
-                    .doesNotHaveBean(IssuanceWorker.class)
-                    .hasSingleBean(IssuanceNumberingService.class));
+                    .doesNotHaveBean(
+                        com.housedevinci.einvoice.application.IssuanceUnitOfWork.class));
+  }
+
+  /** No webhook secret, and archive properties valid but unrelated to intake configuration. */
+  private static String[] noIntakeConfigured() {
+    return new String[] {
+      "einvoice.seller.id=wiring",
+      "einvoice.seller.tax-zone=Europe/Paris",
+      "einvoice.numbering.prefix=INV-{fiscalYear}-",
+      "einvoice.chain.unkeyed=true",
+      "einvoice.archive.type=filesystem",
+      "einvoice.archive.root=" + ROOT
+    };
   }
 
   @Test

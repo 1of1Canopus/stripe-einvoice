@@ -4,9 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.housedevinci.einvoice.application.DocumentRenderer;
 import com.housedevinci.einvoice.application.InboundEventStore;
-import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
 import com.housedevinci.einvoice.application.StripeInvoiceSource;
 import com.housedevinci.einvoice.autoconfigure.issuance.IssuanceTestApp;
+import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.EventIdentity;
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
@@ -309,6 +309,8 @@ class CipherProbeIssuanceStarterTest {
 
   @Test
   void probe_the_pipeline_refuses_to_start_without_a_validator() {
+    // base() carries a webhook secret: intake is configured, so a missing DocumentValidator now
+    // fails startup by name rather than starting silently with no endpoint (D2-02).
     new ApplicationContextRunner()
         .withConfiguration(
             AutoConfigurations.of(
@@ -318,9 +320,11 @@ class CipherProbeIssuanceStarterTest {
         .run(
             context ->
                 assertThat(context)
-                    .hasNotFailed()
-                    .doesNotHaveBean(IssuanceUnitOfWork.class)
-                    .doesNotHaveBean(StripeWebhookController.class));
+                    .hasFailed()
+                    .getFailure()
+                    .rootCause()
+                    .isInstanceOf(EInvoiceException.class)
+                    .hasMessageContaining("DocumentValidator"));
   }
 
   private ApplicationContextRunner runner(String... properties) {

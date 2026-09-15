@@ -82,6 +82,14 @@ re-picked automatically, because neither is cured by an upgrade.
 @Bean StripeInvoiceSource source() { ... }  // or set einvoice.stripe.api-key and take the SDK
 ```
 
+Without a renderer or a validator this whole half of the module does not start - allocating a
+number with no way to produce a validated document would consume a legal series and archive
+nothing. **How loudly depends on whether you plainly meant to receive events.** With
+`einvoice.stripe.webhook-secrets` configured, or `einvoice.issuance.enabled` set explicitly, the
+missing bean fails startup by name. With neither, this is a numbering-only host and it starts with
+one WARN naming what is missing, not a failure - set `einvoice.issuance.enabled=false` to say so on
+purpose and stop the WARN repeating.
+
 and, in your security configuration, the webhook path left unauthenticated - the HMAC over the
 exact bytes received is its authentication:
 
