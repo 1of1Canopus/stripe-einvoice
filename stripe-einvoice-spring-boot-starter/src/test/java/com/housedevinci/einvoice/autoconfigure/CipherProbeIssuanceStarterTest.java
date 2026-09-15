@@ -131,6 +131,59 @@ class CipherProbeIssuanceStarterTest {
   }
 
   @Test
+  void probe_a_body_whose_declared_length_lies_is_still_capped_by_the_counting_read() {
+    // I-09's second case, and the one a Content-Length check cannot cover: the header says the
+    // body is small and it is not. The cap has to come from counting the bytes as they are read.
+    //
+    // The body below is a complete, valid, correctly signed event, padded past the cap - so a 400
+    // can only come from the cap. A first version of this probe left out livemode and the object
+    // id, and passed for a different reason entirely: the identity reader refused it. A probe that
+    // passes with the control removed is not a probe (checklist line 60).
+    runner()
+        .run(
+            context -> {
+              InboundEventStore inbound = context.getBean(InboundEventStore.class);
+              StripeWebhookController controller =
+                  new StripeWebhookController(
+                      inbound,
+                      context.getBean(IssuanceWorker.class),
+                      Map.of("primary", SECRET),
+                      Duration.ofMinutes(5),
+                      4096,
+                      Mode.LIVE,
+                      CLOCK);
+              String eventId = freshId();
+              String json =
+                  "{\"id\":\""
+                      + eventId
+                      + "\",\"type\":\"invoice.finalized\","
+                      + "\"api_version\":\""
+                      + IssuanceTestApp.PINNED_VERSION
+                      + "\","
+                      + "\"livemode\":true,\"data\":{\"object\":{\"id\":\"in_1\"}},"
+                      + "\"padding\":\""
+                      + "z".repeat(64 * 1024)
+                      + "\"}";
+              byte[] payload = json.getBytes(StandardCharsets.UTF_8);
+
+              MockHttpServletRequest lying =
+                  new MockHttpServletRequest("POST", "/webhooks/stripe") {
+                    @Override
+                    public long getContentLengthLong() {
+                      return 12; // the header lies, as a hostile client's would
+                    }
+                  };
+              lying.setContentType("application/json");
+              lying.setContent(payload);
+              lying.addHeader("Stripe-Signature", signature(SECRET, payload));
+
+              assertThat(controller.receive(lying).getStatusCode())
+                  .isEqualTo(HttpStatus.BAD_REQUEST);
+              assertThat(inbound.find(eventId)).isEmpty();
+            });
+  }
+
+  @Test
   void probe_a_signature_valid_refusal_is_recorded_and_answered_200() {
     // I-01. Stripe disables an endpoint that keeps failing and an API version skew hits every event
     // on the account at once, so a refusal that answered 400 could stop the whole intake.
