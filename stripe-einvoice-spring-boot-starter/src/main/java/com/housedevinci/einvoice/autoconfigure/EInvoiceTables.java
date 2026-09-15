@@ -13,8 +13,8 @@ public final class EInvoiceTables {
 
   /**
    * The durable inbound record. It is guarded here for the same reason as the ledger - a host
-   * entity mapped over it would let Hibernate rewrite or delete rows this module's retry and
-   * replay paths depend on - even though the table itself is purgeable by this module (I-07).
+   * entity mapped over it would let Hibernate rewrite or delete rows this module's retry and replay
+   * paths depend on - even though the table itself is purgeable by this module (I-07).
    */
   public static final String INBOUND_EVENT = "einvoice_inbound_event";
 
