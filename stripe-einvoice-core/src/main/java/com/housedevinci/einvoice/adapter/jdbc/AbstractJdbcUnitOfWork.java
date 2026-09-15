@@ -5,7 +5,6 @@ import com.housedevinci.einvoice.domain.ErrorCodes;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The shared body of every {@link JdbcUnitOfWork}: acquire, decide who commits, run, fail closed.
@@ -79,21 +78,20 @@ public abstract class AbstractJdbcUnitOfWork implements JdbcUnitOfWork {
     if (transactional) {
       refuseReadOnlyTransaction(connection);
     }
-    AtomicBoolean executed = new AtomicBoolean();
+    LockLedger ledger = ledger(connection);
     Unit unit =
         new Unit(
-            StatementTracking.tracking(connection, executed),
-            connection,
-            ledger(connection),
-            true,
-            executed);
+            StatementTracking.tracking(connection, ledger::markWritten), connection, ledger, true);
     try {
       return work.run(unit);
     } catch (SQLException | RuntimeException e) {
-      if (executed.get()) {
+      if (ledger.written()) {
         // Our own typed refusal, raised in Java after a statement succeeded, is the case that
         // matters: the caller could otherwise catch it, carry on and commit a half-written unit of
         // work - a counter with no issuance row, which appears in no series report line (T-03).
+        // "Written" is tracked on the same transaction-scoped ledger as the locks (D1-12), not
+        // reset per call: a refusal raised by this call must still poison the caller's commit when
+        // an earlier call in the same transaction already wrote.
         markRollbackOnly(connection);
       }
       throw e;
@@ -102,14 +100,10 @@ public abstract class AbstractJdbcUnitOfWork implements JdbcUnitOfWork {
 
   private <T> T runOwned(SqlWork<T> work, boolean transactional, Connection connection)
       throws SQLException {
-    AtomicBoolean executed = new AtomicBoolean();
+    LockLedger ledger = LockLedger.forOneTransaction();
     Unit unit =
         new Unit(
-            StatementTracking.tracking(connection, executed),
-            connection,
-            LockLedger.forOneTransaction(),
-            false,
-            executed);
+            StatementTracking.tracking(connection, ledger::markWritten), connection, ledger, false);
     if (!transactional) {
       return work.run(unit);
     }

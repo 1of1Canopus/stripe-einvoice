@@ -3,7 +3,6 @@ package com.housedevinci.einvoice.adapter.jdbc;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
 
 /**
@@ -81,19 +80,12 @@ public interface JdbcUnitOfWork {
     private final Connection plumbing;
     private final LockLedger locks;
     private final boolean joined;
-    private final AtomicBoolean executedAnyStatement;
 
-    Unit(
-        Connection work,
-        Connection plumbing,
-        LockLedger locks,
-        boolean joined,
-        AtomicBoolean executedAnyStatement) {
+    Unit(Connection work, Connection plumbing, LockLedger locks, boolean joined) {
       this.work = Objects.requireNonNull(work);
       this.plumbing = Objects.requireNonNull(plumbing);
       this.locks = Objects.requireNonNull(locks);
       this.joined = joined;
-      this.executedAnyStatement = Objects.requireNonNull(executedAnyStatement);
     }
 
     /**
@@ -121,10 +113,6 @@ public interface JdbcUnitOfWork {
      */
     Connection plumbing() {
       return plumbing;
-    }
-
-    boolean executedAnyStatement() {
-      return executedAnyStatement.get();
     }
   }
 }

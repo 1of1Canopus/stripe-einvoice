@@ -185,6 +185,12 @@ public final class JdbcIssuanceStore
     return unitOfWork.inTransaction(
         unit -> {
           Connection c = unit.connection();
+          // D1-12: recorded as the very first thing this unit of work does, before the resume
+          // read and before the series-row insert, not just before the counter statement. A
+          // lock-order refusal is then raised before anything at all has run, which makes it
+          // non-poisoning under any predicate for "has this unit of work written" - belt and
+          // braces alongside the read/write classification below.
+          unit.locks().seriesRowLock();
           // D1-05: bounds how long this transaction will wait on the series row's lock, so a
           // blocked allocation gives up with a typed refusal rather than joining an unbounded
           // queue. T-05: in a joined transaction the setting outlives this call, so the caller's
@@ -320,9 +326,9 @@ public final class JdbcIssuanceStore
   private LegalNumber nextNumber(
       JdbcUnitOfWork.Unit unit, SeriesKey key, SeriesDefinition definition) throws SQLException {
     Connection c = unit.connection();
-    // T-02: recorded before the lock is taken, so a transaction that already holds the chain lock
-    // is refused rather than deadlocking against one that took them the other way round.
-    unit.locks().seriesRowLock();
+    // T-02, D1-12: the ledger entry for this lock is recorded at the head of allocate()'s unit of
+    // work, before the resume read, not here - a transaction that already holds the chain lock
+    // must be refused before it does anything at all, not only once it reaches the counter.
     try (PreparedStatement ps = c.prepareStatement(ALLOCATE)) {
       int i = 1;
       ps.setObject(i++, ts(Timestamps.toStorage(clock.instant())));

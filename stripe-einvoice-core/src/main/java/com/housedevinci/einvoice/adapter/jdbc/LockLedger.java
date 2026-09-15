@@ -32,6 +32,19 @@ public interface LockLedger {
   /** Records that this transaction is about to take the chain's advisory lock. */
   void chainLock();
 
+  /**
+   * Records that this transaction executed a statement that was not a read (D1-12). Scoped with the
+   * rest of the ledger - the same transaction, the same suspend/resume lifecycle (D1-11) - rather
+   * than tracked per call: a refusal raised by one call must still poison the caller's commit when
+   * an <em>earlier</em> call in the same transaction already wrote, exactly the "dispose, then a
+   * refused allocate" shape a host is free to write across two of this module's methods in one
+   * transaction.
+   */
+  void markWritten();
+
+  /** True once {@link #markWritten()} has been called for this transaction. */
+  boolean written();
+
   /** A ledger for one transaction, held by whoever owns that transaction's scope. */
   static LockLedger forOneTransaction() {
     return new Scoped();
@@ -44,6 +57,7 @@ public interface LockLedger {
 
     private boolean series;
     private boolean chain;
+    private boolean written;
 
     @Override
     public void seriesRowLock() {
@@ -68,6 +82,16 @@ public interface LockLedger {
                 + " allocation on that series for that long");
       }
       chain = true;
+    }
+
+    @Override
+    public void markWritten() {
+      written = true;
+    }
+
+    @Override
+    public boolean written() {
+      return written;
     }
   }
 }

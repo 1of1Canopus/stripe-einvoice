@@ -1,6 +1,7 @@
 package com.housedevinci.einvoice.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore;
@@ -149,6 +150,26 @@ class CipherProbeTransactionParticipationTest {
             });
   }
 
+  // D1-11 - suspend/resume on the lock ledger's synchronization.
+  @Test
+  void probe_a_requires_new_allocation_does_not_inherit_the_outer_lock_ledger() {
+    String seller = seller();
+    runner(seller, PlainDataSourceConfig.class)
+        .run(
+            context -> {
+              IssuanceNumberingService numbering = context.getBean(IssuanceNumberingService.class);
+              HostOuterService host = context.getBean(HostOuterService.class);
+              numbering.allocate("in_outer", "", "STRIPE-O", ISSUED_AT);
+
+              assertThatCode(() -> host.voidThenAllocateInANewTransaction("in_outer", "in_inner"))
+                  .describedAs(
+                      "the outer transaction's chain lock must not be visible to a REQUIRES_NEW"
+                          + " transaction, which holds neither lock")
+                  .doesNotThrowAnyException();
+              assertThat(numbering.find("in_inner")).isPresent();
+            });
+  }
+
   // Probe 7 - a read-only host transaction is a caller's annotation, not an outage.
   @Test
   void an_allocation_in_a_read_only_host_transaction_is_refused_by_name() {
@@ -188,6 +209,24 @@ class CipherProbeTransactionParticipationTest {
                   .extracting(Issuance::state)
                   .describedAs("and the swallowed disposition was rolled back with it")
                   .isNotEqualTo(com.housedevinci.einvoice.domain.IssuanceState.VOID_UNUSED);
+            });
+  }
+
+  // D1-12 - a refusal raised after a locking read, and before any write, must not poison the
+  // host's own unrelated work in the same transaction.
+  @Test
+  void probe_a_pre_write_refusal_does_not_poison_the_host_transaction() {
+    String seller = seller();
+    runner(seller, PlainDataSourceConfig.class)
+        .run(
+            context -> {
+              HostService host = context.getBean(HostService.class);
+              assertThatCode(host::swallowANotFoundVoidThenCommit)
+                  .describedAs(
+                      "the void path only ran SELECT ... FOR UPDATE before refusing with"
+                          + " ISSUANCE_NOT_FOUND; nothing was written, so the host's own commit"
+                          + " must succeed")
+                  .doesNotThrowAnyException();
             });
   }
 
@@ -296,6 +335,16 @@ class CipherProbeTransactionParticipationTest {
     }
 
     @Transactional
+    public void swallowANotFoundVoidThenCommit() {
+      try {
+        voids.voidUnused("in_absent_invoice", "pre-write refusal probe", "");
+      } catch (EInvoiceException expected) {
+        // A refusal the host is meant to catch: nothing was written, so this must not poison the
+        // commit below.
+      }
+    }
+
+    @Transactional
     public void runStartupChecksThenFail(String seller) {
       JdbcSupport.requirePostgreSql(dataSource);
       store.openSeries(new SeriesKey(seller, "DEFAULT", 2031, Mode.LIVE));
@@ -322,8 +371,8 @@ class CipherProbeTransactionParticipationTest {
     }
 
     @Bean
-    HostOuterService hostOuterService(HostService inner) {
-      return new HostOuterService(inner);
+    HostOuterService hostOuterService(HostService inner, IssuanceVoidService voids) {
+      return new HostOuterService(inner, voids);
     }
   }
 
@@ -331,15 +380,24 @@ class CipherProbeTransactionParticipationTest {
   public static class HostOuterService {
 
     private final HostService inner;
+    private final IssuanceVoidService voids;
 
-    HostOuterService(HostService inner) {
+    HostOuterService(HostService inner, IssuanceVoidService voids) {
       this.inner = inner;
+      this.voids = voids;
     }
 
     @Transactional
     public void allocateInANewTransactionThenFail(String invoiceId) {
       inner.allocateInItsOwnTransaction(invoiceId);
       throw new IllegalStateException("the host's own failure, outside the inner transaction");
+    }
+
+    /** D1-11: takes the chain lock here, in the outer transaction, then a REQUIRES_NEW inner. */
+    @Transactional
+    public void voidThenAllocateInANewTransaction(String existingInvoiceId, String newInvoiceId) {
+      voids.voidUnused(existingInvoiceId, "ledger probe", "");
+      inner.allocateInItsOwnTransaction(newInvoiceId);
     }
   }
 
