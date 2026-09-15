@@ -19,18 +19,35 @@ import javax.sql.DataSource;
  * base table, so the BEFORE ROW triggers still fire - but a read path into a legal ledger, inside
  * an application that also has its own users and its own query paths, is not a boundary we own.
  *
- * <p>So the question is asked of the database rather than of the mapping: {@code
- * information_schema.view_table_usage} names every view that reads a given table, whoever created
- * it and whether or not anything maps it.
+ * <p>So the question is asked of the database rather than of the mapping - but not of {@code
+ * information_schema.view_table_usage} (D1-07): that view filters its rows with {@code
+ * pg_has_role(owner, 'USAGE')} on the <b>table's</b> owner, and this module's own grant
+ * documentation tells the operator to run the application as a role that does <b>not</b> own these
+ * tables (the right advice, since an owner can disable the triggers). In that deployment - the one
+ * the docs recommend - the information_schema query returns nothing and the guard reports clean
+ * while a host view keeps reading the ledger. This queries {@code pg_depend}/{@code pg_rewrite}/
+ * {@code pg_class} instead: every role can read the catalog, regardless of who owns what it
+ * describes, so the guard sees the same views whichever role runs it.
  *
  * <p>Any failure to run the query is itself a refusal. A guard that cannot see is not a guard that
  * found nothing.
  */
 public final class DatabaseViewGuard {
 
+  // A view (or materialized view) "reads" a table when its defining rule depends on that table.
+  // pg_depend records that dependency directly: the rule that implements the view (classid
+  // pg_rewrite) depends on the table (refclassid pg_class). Every role can read pg_catalog, so this
+  // sees the same views regardless of who owns the view or the table (D1-07) - the ownership-
+  // filtered information_schema view this replaces could not make that promise.
   private static final String VIEWS_OVER_OUR_TABLES =
-      "SELECT view_schema, view_name, table_name FROM information_schema.view_table_usage"
-          + " WHERE table_name = ANY (?) ORDER BY view_schema, view_name";
+      "SELECT DISTINCT n.nspname AS view_schema, v.relname AS view_name, t.relname AS table_name"
+          + " FROM pg_depend d"
+          + " JOIN pg_rewrite r ON r.oid = d.objid AND d.classid = 'pg_rewrite'::regclass"
+          + " JOIN pg_class v ON v.oid = r.ev_class AND v.relkind IN ('v', 'm')"
+          + " JOIN pg_namespace n ON n.oid = v.relnamespace"
+          + " JOIN pg_class t ON t.oid = d.refobjid AND d.refclassid = 'pg_class'::regclass"
+          + " WHERE t.relname = ANY (?)"
+          + " ORDER BY 1, 2";
 
   private DatabaseViewGuard() {}
 
