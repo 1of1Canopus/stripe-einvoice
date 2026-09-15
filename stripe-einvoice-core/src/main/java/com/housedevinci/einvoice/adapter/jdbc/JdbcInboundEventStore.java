@@ -66,9 +66,16 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   static final String DUE =
       "SELECT "
           + COLUMNS
-          + " FROM einvoice_inbound_event WHERE (state IN ('RECEIVED','FETCHED','MAPPED','PARKED')"
-          + " OR (state IN ('FAILED_FETCH','FAILED_ISSUANCE') AND received_at > ?))"
-          + " AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
+          + " FROM einvoice_inbound_event WHERE"
+          // Still running: picked up whenever its time has come, and immediately when it has none.
+          + " (state IN ('RECEIVED','FETCHED','MAPPED','PARKED')"
+          + "   AND (next_attempt_at IS NULL OR next_attempt_at <= ?))"
+          // A retryable terminal is re-picked only when a next attempt was actually scheduled. A
+          // null there is the pipeline saying "this one cannot improve by running again" - an
+          // archive conflict, a tampered object, a validation refusal - and it must not be read as
+          // "due now", which is what the same column means for a row that is still running.
+          + " OR (state IN ('FAILED_FETCH','FAILED_ISSUANCE') AND received_at > ?"
+          + "   AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?)"
           + " ORDER BY received_at LIMIT ?";
 
   private final JdbcUnitOfWork unitOfWork;
@@ -139,15 +146,6 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   }
 
   @Override
-  public InboundEvent transition(
-      String eventId, InboundState next, String code, Instant now, Duration retryIn) {
-    return transition(eventId, next, code, "", now, retryIn);
-  }
-
-  /**
-   * @param ruleId the failing validation rule, recorded so the operator's later void can name it
-   *     rather than infer it from prose
-   */
   public InboundEvent transition(
       String eventId,
       InboundState next,
@@ -224,9 +222,10 @@ public final class JdbcInboundEventStore implements InboundEventStore {
         unit -> {
           List<InboundEvent> due = new ArrayList<>();
           try (PreparedStatement ps = unit.connection().prepareStatement(DUE)) {
-            ps.setObject(1, ts(now.minus(retryCeiling)));
-            ps.setObject(2, ts(now));
-            ps.setInt(3, Math.max(1, limit));
+            ps.setObject(1, ts(now));
+            ps.setObject(2, ts(now.minus(retryCeiling)));
+            ps.setObject(3, ts(now));
+            ps.setInt(4, Math.max(1, limit));
             try (ResultSet rs = ps.executeQuery()) {
               while (rs.next()) {
                 due.add(read(rs));
@@ -298,7 +297,7 @@ public final class JdbcInboundEventStore implements InboundEventStore {
         rs.getBoolean("body_present"));
   }
 
-  /** The failing validation rule recorded with the last transition, when there was one. */
+  @Override
   public Optional<String> lastRuleId(String eventId) {
     return unitOfWork.inReadUnit(
         unit -> {

@@ -596,7 +596,24 @@ public final class JdbcIssuanceStore
                       + " different sets of bytes cannot carry one legal number, so this is"
                       + " refused rather than reconciled.");
             }
-            return issuance; // a retry of the same phase, on the same bytes
+            // A retry of the same phase, on the same bytes. The hash and the key are already
+            // written and are write-once, but the state may have moved to FAILED_ARCHIVE in
+            // between - so the marker is re-asserted rather than assumed, or the retry would
+            // arrive at ISSUED from a state that cannot reach it.
+            if (issuance.state() == IssuanceState.ARCHIVING
+                || issuance.state() == IssuanceState.ISSUED) {
+              return issuance;
+            }
+            issuance.state().transitionTo(IssuanceState.ARCHIVING);
+            try (PreparedStatement ps = c.prepareStatement(MARK_STATE)) {
+              int i = 1;
+              ps.setString(i++, IssuanceState.ARCHIVING.name());
+              ps.setString(i++, sellerId);
+              ps.setString(i++, mode.wire());
+              ps.setString(i, stripeInvoiceId);
+              ps.executeUpdate();
+            }
+            return findBySource(c, sellerId, mode, stripeInvoiceId, false).orElseThrow();
           }
           issuance.state().transitionTo(IssuanceState.ARCHIVING);
           try (PreparedStatement ps = c.prepareStatement(MARK_ARCHIVING)) {

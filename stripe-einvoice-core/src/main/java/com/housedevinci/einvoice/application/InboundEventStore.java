@@ -38,8 +38,20 @@ public interface InboundEventStore {
    *
    * @param retryIn when the sweeper may re-pick a retryable terminal; null for "not again"
    */
+  default InboundEvent transition(
+      String eventId, InboundState next, String code, Instant now, Duration retryIn) {
+    return transition(eventId, next, code, "", now, retryIn);
+  }
+
+  /**
+   * @param ruleId the failing validation rule, recorded beside the state so the operator's later
+   *     void can name it rather than infer it from prose
+   */
   InboundEvent transition(
-      String eventId, InboundState next, String code, Instant now, Duration retryIn);
+      String eventId, InboundState next, String code, String ruleId, Instant now, Duration retryIn);
+
+  /** The failing validation rule recorded with the last transition, when there was one. */
+  Optional<String> lastRuleId(String eventId);
 
   /** Binds the resolved seller to the row once routing has resolved it from the account (D-01). */
   InboundEvent bindSeller(String eventId, String sellerId, Instant now);

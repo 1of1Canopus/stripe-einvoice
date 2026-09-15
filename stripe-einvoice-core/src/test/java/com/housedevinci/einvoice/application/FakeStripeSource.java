@@ -1,0 +1,54 @@
+package com.housedevinci.einvoice.application;
+
+import com.housedevinci.einvoice.domain.EInvoiceException;
+import com.housedevinci.einvoice.domain.ErrorCodes;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/** The authoritative source, under the test's control rather than Stripe's. */
+public final class FakeStripeSource implements StripeInvoiceSource {
+
+  public static final String PINNED = "2026-03-31.clover";
+
+  private final Map<String, SourceInvoice> invoices = new LinkedHashMap<>();
+  private final AtomicInteger fetches = new AtomicInteger();
+  private RuntimeException failure;
+
+  public FakeStripeSource with(SourceInvoice invoice) {
+    invoices.put(invoice.id(), invoice);
+    return this;
+  }
+
+  /** Stripe is down, rate-limited, or answering 5xx: an outage, never a verdict about the sale. */
+  public void breakWith(RuntimeException failure) {
+    this.failure = failure;
+  }
+
+  public void heal() {
+    this.failure = null;
+  }
+
+  public int fetches() {
+    return fetches.get();
+  }
+
+  @Override
+  public SourceInvoice fetchInvoice(String invoiceId) {
+    fetches.incrementAndGet();
+    if (failure != null) {
+      throw failure;
+    }
+    SourceInvoice invoice = invoices.get(invoiceId);
+    if (invoice == null) {
+      throw new EInvoiceException(
+          ErrorCodes.STRIPE_UNAVAILABLE, "the invoice could not be read from the Stripe API");
+    }
+    return invoice;
+  }
+
+  @Override
+  public String pinnedApiVersion() {
+    return PINNED;
+  }
+}

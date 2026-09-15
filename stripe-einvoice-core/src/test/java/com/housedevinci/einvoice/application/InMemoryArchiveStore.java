@@ -21,6 +21,7 @@ public final class InMemoryArchiveStore implements ArchiveStore {
   private final boolean overwrites;
   private final boolean declaresAtomic;
   private RuntimeException failure;
+  private RuntimeException failureAfterWrite;
 
   public InMemoryArchiveStore() {
     this(false, true);
@@ -40,8 +41,14 @@ public final class InMemoryArchiveStore implements ArchiveStore {
     this.failure = failure;
   }
 
+  /** Stores the object and then dies: the P3 crash the recovery column of the design describes. */
+  public void failAfterWriteWith(RuntimeException failure) {
+    this.failureAfterWrite = failure;
+  }
+
   public void heal() {
     this.failure = null;
+    this.failureAfterWrite = null;
   }
 
   /** Writes an object behind the module's back, for the orphan-detection tests. */
@@ -72,6 +79,9 @@ public final class InMemoryArchiveStore implements ArchiveStore {
           ErrorCodes.ARCHIVE_CONTENT_CONFLICT, "the archive key already holds different bytes");
     }
     objects.put(key.value(), bytes.clone());
+    if (failureAfterWrite != null) {
+      throw failureAfterWrite;
+    }
     return WriteResult.CREATED;
   }
 
