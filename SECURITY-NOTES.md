@@ -86,14 +86,78 @@ documented as privileged. The host application exposes it, or does not, behind i
 
 ## Personal data, and the erasure module
 
-Nothing in this pull request stores a buyer field: the issuance row holds ids, a number, timestamps,
-hashes and an operator's void reason. When the Stripe intake and the EN 16931 mapping arrive, that
-changes, and the sentence below has to be true before both modules are sold to the same customer:
+The issuance row still stores no buyer field: ids, a number, timestamps, hashes and an operator's
+void reason. Two other places now hold personal data, and both are set out below - the raw webhook
+bodies on the intake path, which are bounded and purged, and the archived documents, which are not.
+The sentence below has to be true before both modules are sold to the same customer:
 
 > **Issued invoices are outside erasure scope.** A seller must keep them for the legal retention
 > period of its jurisdiction, so a data subject's erasure request does not, and must not, remove
 > them. This module is an exporter of personal data into a long-lived archive, and that is a
 > deliberate, documented consequence of tax law rather than an oversight.
+
+## The webhook endpoint, and why it is open
+
+`POST /webhooks/stripe` is the one endpoint this module auto-configures and the one path your
+security configuration must leave unauthenticated. Its authentication is an HMAC-SHA256 over the
+**exact bytes received**, against a keyring, inside a bounded time window - computed here rather
+than through the SDK helper, which takes the payload as a decoded `String` and a single secret.
+
+What the endpoint refuses before anything durable happens: a content type that is not JSON, a body
+past `einvoice.webhook.max-body-bytes` counted as it is read, a missing or invalid signature, a
+timestamp outside the tolerance, and a body whose identity fields do not parse under a reader that
+refuses duplicate keys, malformed UTF-8, unpaired surrogates and nesting past a depth bound. All of
+those answer 400 and write nothing, because we cannot attribute them.
+
+Everything with a valid signature is recorded first and answered 200, including the refusals we can
+attribute: an API version off the pin, a test-mode event in a live application, an account that
+resolves to no seller. That is deliberate. Stripe treats a 400 as a failed delivery and disables
+endpoints that keep failing, and a version skew hits every event on the account at once, so a
+refusal that answered 400 could take the whole intake offline and lose the events that would have
+worked. Those rows keep their bodies and replay once the pin is updated.
+
+## Personal data on the intake path
+
+`einvoice_inbound_event` holds the raw signed webhook bodies: a full invoice payload per row, with
+the buyer's name, address, email, tax id and line descriptions. It is the largest store of personal
+data in this module, and it is treated differently from the ledger on purpose.
+
+- It carries **no append-only trigger** and the runtime role **may delete from it**. A table nobody
+  can ever delete from would make a retention promise impossible to keep.
+- The raw body is **nulled as soon as the event reaches a state it can never run from again**, and
+  a SHA-256 of it is kept so what arrived stays provable.
+- Anything that never reached such a state is purged at `einvoice.inbound.retention`.
+- Health details, findings, metrics and log lines carry ids, codes, counts and hashes. No buyer
+  field, no amount, no acknowledgement text that could carry one.
+
+The issued documents themselves are a different matter, and the paragraph below on the erasure
+module is where that is set out.
+
+## Residual risks on the issuance path
+
+- **An archive store that lies about write-once.** The capability is probed at startup with a real
+  conditional write, and a store that overwrites is refused. With
+  `einvoice.archive.allow-non-atomic-store=true` the application starts anyway, WARNs at every
+  startup, and every write does a read-back comparison - which narrows the window between two
+  concurrent writers and **does not close it**. Two processes writing the same key at the same
+  moment can still leave one document's bytes behind another's. The reconciliation sweep re-hashes
+  a bounded sample of the newest documents, which is what makes the condition detectable rather
+  than theoretical.
+- **The intake table is not seller-partitioned in this version.** Its rows are keyed on Stripe's
+  own event id, which is unique per account, and this edition issues for one configured seller
+  (the column exists and carries one value). The sweeper's own queries are therefore not
+  seller-scoped: a row that has not been routed yet has no seller to scope by, and filtering on one
+  would hide exactly the rows the sweeper exists to find. Multi-seller scoping arrives with Connect
+  support.
+- **A host-supplied `ArchiveStore`, `DocumentRenderer` or `DocumentValidator`** is code we do not
+  review. The contracts state what they must guarantee - write-once and byte-identity, the same
+  bytes for the same input, a verdict that is not PASSED unless every rule ran - and the
+  reconciliation sweep detects a store that breaks the first. A renderer that is not deterministic
+  is detected as an archive content conflict rather than silently issuing twice.
+- **A validator that reports PASSED without running.** This module refuses `NOT_EVALUATED` and
+  treats it as a refusal, but it cannot tell a lying validator from an honest one. The rule pack id
+  and version are recorded on the issuance and inside the hashed material so a re-validation years
+  later can be compared against what was claimed at the time.
 
 ## Reporting
 

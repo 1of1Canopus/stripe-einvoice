@@ -112,3 +112,84 @@ This module maps none of these tables with JPA, deliberately: with no entity the
 derived query, no JPQL, no projection, no lazy attribute, no first- or second-level cache and no
 dirty checking to reason about. A startup guard keeps that true by refusing to start if a host
 entity, secondary table, join table, collection table, `@Subselect` or database view reaches them.
+
+---
+
+# The issuance unit of work
+
+One Stripe event becomes one archived document, or none, and there is a record either way.
+
+## The path, and where each refusal lands
+
+| Step | What it does | What a refusal leaves |
+|---|---|---|
+| Intake | Content type, body cap counted as it is read, HMAC over the exact bytes against the keyring, identity read with a strict reader | 400 and nothing written: we cannot attribute it |
+| Record | One row in `einvoice_inbound_event` with the raw body, before any decision | 503 only when the database is unreachable |
+| Route | API version against the pin, `livemode` against `einvoice.mode`, `account` against the configured seller | A terminal `REFUSED_*` state, answered 200, replayable |
+| Fetch | `GET /v1/invoices/{id}`, lines paginated to exhaustion, tax rates by id | `FAILED_FETCH`, retried by the sweeper up to the ceiling |
+| Map | Totals recomputed and compared, issue date derived in the seller's tax zone, closed-year cut-off | `FAILED_MAPPING` or `FAILED_TOTALS`, final: they need a human |
+| P1 claim | The legal number, in one transaction with the issuance row | Nothing: every data refusal already happened |
+| P2 render | The exact bytes, then validation of those exact bytes | `FAILED_VALIDATION` on the issuance row, with the rule id recorded for the operator's void |
+| P3 write | `ARCHIVING` with the hash and key, then the write-once PUT | `FAILED_ARCHIVE`; an outage is retried, a content conflict is not |
+| P4 issue | `ISSUED` and the chained disposition, one transaction | Back to P3 on the retry, byte-identical, no second number |
+
+## Replaying a refused event
+
+An API version skew is Stripe's move, not yours, and it applies to every event on the account at
+once. The refused events are on `einvoice_inbound_event` with their bodies intact and
+`last_code = DEI-201`.
+
+1. Upgrade the module (the pin is the SDK's own version and is refused if configuration names
+   another).
+2. Restart. The sweeper re-picks the refused rows and drives them through the same path.
+3. Watch the findings list empty out.
+
+## Reconciliation, health and findings
+
+The sweep runs every `einvoice.reconcile.interval` and closes four directions: a finalised Stripe
+invoice with no issued document (re-enqueued through the same idempotent path, never issued
+inline), an `ISSUED` row whose object is missing, an archived document that no longer hashes to its
+record, an archive object no row predicted, and a number open past `einvoice.issuance.alert-after`.
+It **alerts and never repairs**.
+
+Two signals, and the difference matters:
+
+- **Health** (`/actuator/health/einvoice`) carries operational conditions only - a silent sweeper, a
+  stale reconciliation, a chain that does not verify. It is in a group of its own, outside
+  `readiness` and `liveness`, because a business condition three weeks old must never take your
+  application out of the load balancer.
+- **Findings** (`/actuator/einvoicefindings`) carry the business conditions: counts, codes and
+  subjects. Each is acknowledgeable through `IssuanceFindingService` with a reason that is recorded
+  and never deletes the finding.
+
+## Properties
+
+| Property | Default | Weaker mode |
+|---|---|---|
+| `einvoice.stripe.webhook-secrets.<id>` | required, env only | none |
+| `einvoice.stripe.api-key` | required for the bundled source, env only | none |
+| `einvoice.stripe.require-restricted-key` | `true` | `false` - WARNs at every startup |
+| `einvoice.stripe.telemetry` | `false` | `true` - WARNs at every startup |
+| `einvoice.stripe.api-version` | the SDK's own | none; naming another is refused at startup |
+| `einvoice.webhook.path` | `/webhooks/stripe` | - |
+| `einvoice.webhook.max-body-bytes` | `1048576` | up to 8 MiB |
+| `einvoice.webhook.tolerance` | `300s` | bounded above at 10 minutes; larger is refused |
+| `einvoice.archive.type` / `.root` | `filesystem`, root required | supply your own `ArchiveStore` |
+| `einvoice.archive.allow-non-atomic-store` | `false` | `true` - WARNs at every startup, read-back only |
+| `einvoice.issuance.concurrency` / `.queue-capacity` | `2` / `1000` | - |
+| `einvoice.issuance.retry-ceiling` | `72h` | - |
+| `einvoice.issuance.alert-after` | `6h` | - |
+| `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision |
+| `einvoice.reconcile.interval` / `.window` / `.grace` | `15m` / `2d` / `15m` | `enabled=false` removes the only watcher there is |
+| `einvoice.reconcile.drift-sample` | `10` | `0` stops re-hashing archived documents |
+| `einvoice.numbering.closed-year-cutoff` | unset | setting it refuses late invoices from closed years |
+| `einvoice.rule-pack-version` | `unversioned` | - |
+
+Nothing here disables signature verification, validation before archiving, the totals comparison or
+write-once archiving.
+
+## The database, continued
+
+Two more tables: `einvoice_inbound_event` (the durable intake record - purgeable, not append-only,
+and the one table the runtime role may delete from) and `einvoice_finding` (the compliance findings
+list). `docs/schema-grants.sql` has both, with the reason the intake table is treated differently.

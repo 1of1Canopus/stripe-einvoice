@@ -8,6 +8,30 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The issuance unit of work.** One Stripe event is driven to one archived document or to none,
+  with a record either way: a durable inbound record written before any routing decision, an
+  authoritative re-fetch of every field a document carries, a totals recomputation compared against
+  the upstream's own scalars, the legal number, the exact bytes, a write-once archive write and a
+  chained disposition - in four phases whose crash behaviour is stated and tested one test per row.
+- **A Stripe webhook endpoint.** The signature is verified over the exact bytes received against a
+  keyring, the body is capped by counting as it is read rather than by believing a header, and the
+  response contract splits on whether the request is provably from Stripe: 400 for what cannot be
+  attributed, 200 for everything recorded - including the refusals - and 503 only when the record
+  could not be made durable.
+- **An intake state machine** with signature-valid refusals as terminal states that keep their
+  bodies and replay once an API version pin is updated.
+- **Write-once archiving**, content-addressed, on a filesystem or an S3-compatible store, with the
+  store's capability probed at startup by a real conditional write rather than taken on trust.
+- **A reconciliation sweep and a compliance findings list**, both in the free core: a finalised
+  sale with no document is found and re-enqueued through the same idempotent path, an archived
+  document that is missing or no longer hashes to its record is reported, and every finding is
+  acknowledgeable with a recorded reason and never deleted.
+- **An operational health contributor** in a group of its own, outside `readiness` and `liveness`.
+- **A retention for the raw webhook bodies**: nulled the moment an event can no longer run, purged
+  at the configured ceiling.
+- **`einvoice.numbering.closed-year-cutoff`**, deferred from the previous change: when it is set, a
+  late invoice from a fiscal year that closed longer ago is refused and reported rather than
+  numbered into a period already declared.
 - **The legal numbering series.** Per-seller, per-series, per-fiscal-year, per-mode, with row-lock
   allocation (`UPDATE ... RETURNING`) inside the transaction that inserts the issuance row. One
   Stripe invoice maps to one number for all time, enforced by a unique constraint rather than by

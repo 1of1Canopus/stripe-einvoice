@@ -16,10 +16,20 @@ class SecurityConfig {
 
   @Bean
   SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-    return http.authorizeHttpRequests(requests -> requests.anyRequest().authenticated())
+    return http.authorizeHttpRequests(
+            requests ->
+                requests
+                    // The webhook endpoint authenticates its caller with an HMAC over the exact
+                    // bytes it received, against a keyring this application configures. Putting
+                    // HTTP Basic in front of it would not make it safer; it would make Stripe's
+                    // deliveries fail. Everything else stays authenticated.
+                    .requestMatchers(org.springframework.http.HttpMethod.POST, "/webhooks/stripe")
+                    .permitAll()
+                    .anyRequest()
+                    .authenticated())
         .httpBasic(basic -> {})
         // No session, no form login, and no CSRF token to carry: every caller authenticates on
-        // every request.
+        // every request, and the webhook caller authenticates with a signature over its body.
         .csrf(csrf -> csrf.disable())
         .build();
   }

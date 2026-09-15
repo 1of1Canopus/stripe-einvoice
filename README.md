@@ -7,9 +7,11 @@ France (small firms issuing from 1 September 2027, reception since 1 September 2
 does not produce it, and Stripe's own documentation tells you to install a marketplace app or write
 the mapping yourself. Java shops on Stripe have had nothing.
 
-> **Status: under construction.** This repository is pre-release and nothing is published yet. The
-> first piece is in place: the legal numbering series. The Stripe intake, the EN 16931 mapping and
-> the XRechnung / Peppol UBL writers follow.
+> **Status: under construction.** This repository is pre-release and nothing is published yet. Two
+> pieces are in place: the legal numbering series, and the issuance unit of work that drives one
+> Stripe event to one archived document or to none. The EN 16931 mapping and the XRechnung / Peppol
+> UBL writers follow, and until they do an application supplies its own document writer - the
+> starter refuses to wire the issuance path without one rather than archiving something it made up.
 
 ## What the numbering series does
 
@@ -38,6 +40,53 @@ What it guarantees today:
 | A rewrite by a role that outranks the triggers is still detectable | A keyed (HMAC) hash chain over the disposition log, with an anchor row, and a cross-check that a disposed issuance row has a chained event agreeing with it |
 | No JPA mapping of ours, and none of the host's over our tables | The module ships no entity; a startup guard refuses a host entity, secondary table, join table, collection table, `@Subselect` or database view that reaches these tables |
 
+## What the issuance unit of work does
+
+One sale becomes one legal document, or none, and there is a record either way.
+
+```
+Stripe  ->  POST /webhooks/stripe  ->  durable record  ->  worker  ->  document in the archive
+            (signature over the                              |
+             exact bytes)                                    +-> a refusal, with its reason, on the row
+```
+
+The order is the design. The verified event is **recorded before any decision is taken about it**,
+and the endpoint answers 200. A refusal that is nevertheless provably from Stripe - an API version
+skew, a test-mode event in a live application, an account that resolves to no configured seller -
+is a terminal state on that row with its own error code, not a 400. Stripe treats a 400 as a failed
+delivery and disables endpoints that keep failing, and a version skew applies to every event on the
+account at once: a control that refuses one bad event must not be able to stop the whole intake.
+Once the pin is updated, the recorded events replay through the same path.
+
+| Property | How |
+|---|---|
+| The webhook payload never reaches a document | Only `(event id, type, api version, livemode, account, object id)` are read from the body. Every field a document carries is re-fetched from the Stripe API, with the lines paginated to exhaustion; a residual "more pages" is a refusal, never a partial document |
+| A document carries the buyer as at the issue date | Only the fields Stripe froze onto the invoice at finalisation are mapped. The live customer object is neither read nor expanded, so a buyer who corrects their address in March does not change what a January invoice says |
+| The totals on the document are ours, and they agree with Stripe's | Every line sum and every per-rate tax bucket is recomputed and compared. A difference of one cent in one bucket is a refusal that names the field, never an adjustment |
+| A refusal consumes no number | Every refusal that depends on data happens before the allocator is called |
+| One number never names two documents | The archive key carries the SHA-256 of the exact bytes and the store is write-once; the same input renders the same bytes under any time zone and any locale |
+| A crash leaves something a retry can finish | Four phases, each with a recorded state: claim, render, write (the row predicts the object before the PUT), issue (state and chained disposition in one transaction) |
+| A store that quietly overwrites is refused | At startup, with a real conditional write against a scratch key - not on the strength of a capability flag |
+| A sale with no document is noticed | A reconciliation sweep lists what Stripe finalised and re-enqueues anything with no issued document, through the same idempotent path. It alerts and never repairs |
+| A redelivery returns the stored document | After checking the archived bytes against the recorded hash. A tampered archive is refused; a legitimate upstream edit is not |
+| Back-pressure costs latency, never an event | A bounded queue and a concurrency limit below your connection pool; past capacity the event stays `RECEIVED` and the sweeper takes it |
+| Buyer data has a retention | The raw signed bodies are nulled the moment an event can no longer run, and purged at `einvoice.inbound.retention` |
+
+### What it needs from you
+
+```java
+@Bean DocumentRenderer renderer() { ... }   // the EN 16931 writers ship in the next increment
+@Bean DocumentValidator validator() { ... } // a verdict that is not PASSED refuses the archive write
+@Bean StripeInvoiceSource source() { ... }  // or set einvoice.stripe.api-key and take the SDK
+```
+
+and, in your security configuration, the webhook path left unauthenticated - the HMAC over the
+exact bytes received is its authentication:
+
+```java
+.requestMatchers(HttpMethod.POST, "/webhooks/stripe").permitAll()
+```
+
 ## Quick start
 
 ```xml
@@ -63,6 +112,13 @@ einvoice:
   chain:
     hmac-secret: ${EINVOICE_CHAIN_SECRET}   # base64 of >= 32 bytes, from the environment
     hmac-key-id: k1
+  stripe:
+    webhook-secrets:            # a keyring: Stripe's own rotation leaves two secrets live
+      primary: ${EINVOICE_WEBHOOK_SECRET}
+    api-key: ${EINVOICE_STRIPE_KEY}   # restricted, read-scoped; this module never writes to Stripe
+  archive:
+    type: filesystem            # or supply your own ArchiveStore bean (an S3 one ships in core)
+    root: /var/lib/einvoice/archive
 ```
 
 ```java
@@ -83,13 +139,29 @@ it cannot authenticate anyone, and an auto-configured void endpoint would hand a
 caller a way to burn a series one number at a time. If you expose it, put it behind your own
 authorization.
 
+### Operating it
+
+| Question | Where the answer is |
+|---|---|
+| Is anything wrong right now? | `GET /actuator/health/einvoice` - operational conditions only: a silent sweeper, a stale reconciliation, a chain that does not verify. It is deliberately outside `readiness` and `liveness`, so a business condition can never take your application out of the load balancer |
+| What needs a human? | `GET /actuator/einvoicefindings` - open compliance findings with their codes and subjects. Acknowledge one through `IssuanceFindingService`, with a reason that is recorded; the finding is never deleted |
+| Stripe moved its API version | The refused events are on `einvoice_inbound_event` with their bodies. Update the pin, restart, and the sweeper replays them through the same path |
+| A document failed validation | The number stays allocated with the failing rule id recorded beside the event. An operator voids it through `IssuanceVoidService` with a reason, and the series report explains the hole |
+
 Run the sample:
 
 ```bash
 cd stripe-einvoice-sample
 docker compose up -d
-EINVOICE_CHAIN_SECRET=$(head -c 32 /dev/urandom | base64) ../mvnw spring-boot:run
+EINVOICE_CHAIN_SECRET=$(head -c 32 /dev/urandom | base64) \
+EINVOICE_WEBHOOK_SECRET=whsec_from_your_stripe_dashboard \
+../mvnw spring-boot:run
 ```
+
+The sample ships a **placeholder** document writer whose root element is `PlaceholderDocument`, so
+that nothing it produces can be mistaken for an EN 16931 invoice. It exists to demonstrate the
+whole path end to end - signature, record, re-fetch, totals, number, archive, chain - until the real
+writers land.
 
 ## Requirements
 
