@@ -29,7 +29,7 @@ Do not write "gap-free" in a README, a docs page, a release note or a sales page
 |---|---|
 | Row-lock allocation in the issuance transaction | `UPDATE einvoice_series ... RETURNING`, no `SEQUENCE`, no `nextval`, no `@GeneratedValue` |
 | One Stripe invoice, one number | `UNIQUE (seller_id, mode, stripe_invoice_id)`, with a resume-by-source read first and the constraint as the backstop |
-| No duplicate number | `UNIQUE (seller_id, series, fiscal_year, mode, legal_number)` |
+| No duplicate number, including across a fiscal-year boundary | `UNIQUE (seller_id, series, fiscal_year, mode, legal_number)` within one year, **and** a required `{fiscalYear}` placeholder in a resetting series' prefix, resolved once at the row's creation, so two different years' rows never render the same string in the first place |
 | Test events out of the live series | `mode` in the series primary key, resolved from Stripe's own `livemode`, never from metadata |
 | No silent format change | Allocation refuses at the last number the configured width renders |
 | Append-only ledger | Database triggers: no DELETE, no TRUNCATE, no UPDATE of an immutable column, write-once `document_sha256` and `archive_key`, declared state transitions only |
@@ -60,6 +60,12 @@ default. It is **not** the Stripe webhook secret: one proves a request came from
 proves our own record was not rewritten afterwards, and one value for both means one leak costs both
 properties. A value that is not base64 is refused by name at startup rather than guessed at - a
 32-character passphrase is also valid base64 and would silently become 24 different bytes of key.
+
+It is also excluded from `/actuator/env` and `/actuator/configprops` **by name**: a
+`SanitizingFunction` names `einvoice.chain.hmac-secret` and every `einvoice.chain.hmac-keys.*`
+retired id explicitly, rather than resting on the framework's default sanitiser, which happens to
+catch a property whose name contains "secret" or "key" today - a fact about English words, not a
+control that survives a rename.
 
 ## Voiding is privileged, and has no endpoint
 

@@ -87,9 +87,10 @@ document, and both belong on the page.
 | `einvoice.seller.id` | required | none |
 | `einvoice.seller.tax-zone` | required, no default | none |
 | `einvoice.numbering.series` | `DEFAULT` | an unconfigured series is a refusal, never auto-created |
-| `einvoice.numbering.prefix` | required, `[A-Z0-9-]{1,32}` | none |
+| `einvoice.numbering.prefix` | required, `[A-Z0-9-]{1,32}`, optionally with the literal `{fiscalYear}` placeholder | none; a resetting series without the placeholder is refused at startup |
 | `einvoice.numbering.width` | `6` | 4..12; outside that the application refuses to start |
 | `einvoice.numbering.fiscal-year-reset` | `true` | `false` - WARNs at every startup |
+| `einvoice.numbering.allocation-timeout` | `5s` | applied as `SET LOCAL lock_timeout`; a blocked allocation past this bound is a typed `DEI-117` refusal |
 | `einvoice.chain.hmac-secret` / `.hmac-key-id` | required, env only, base64 of >= 32 bytes | none |
 | `einvoice.chain.hmac-keys.<id>` | empty | retired ids the verifier still needs during a rotation |
 | `einvoice.chain.unkeyed` | `false` | `true` - WARNs at every startup, verifier reports `INTACT_UNKEYED` |

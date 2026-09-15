@@ -54,8 +54,11 @@ einvoice:
     id: acme-fr
     tax-zone: Europe/Paris      # required, no default: it decides the invoice date and fiscal year
   numbering:
-    prefix: INV-2026-           # required, no default
+    prefix: "INV-{fiscalYear}-" # required, no default; {fiscalYear} is required when the series
+                                # resets each year (below) - never a static year, or the second
+                                # January reuses the first year's numbers
     width: 6
+    fiscal-year-reset: true
   chain:
     hmac-secret: ${EINVOICE_CHAIN_SECRET}   # base64 of >= 32 bytes, from the environment
     hmac-key-id: k1

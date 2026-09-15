@@ -26,9 +26,32 @@ All notable changes to this project are documented here. The format follows
   `EntityManagerFactory` in the context including lazily created ones.
 - **A sample application** with an end-to-end test against PostgreSQL.
 
+### Fixed
+
+- A resetting series' rendered number now carries the fiscal year (a required `{fiscalYear}`
+  placeholder in the prefix, resolved once at the series row's creation), so a second fiscal year
+  can no longer reissue the first year's legal numbers.
+- Every allocation renders from the series row's own prefix and width, never from the running
+  configuration, so an edited property cannot silently change the format of a live series.
+- The disposition cross-check behind the "every number has a recorded disposition" claim is now
+  keyed on the full row identity, not on the number and state alone.
+- `einvoice.numbering.allocation-timeout` is now applied to the allocation transaction; a lock
+  wait past the bound is a typed refusal instead of an unbounded wait.
+- The screening function now refuses a value that is blank only under a wider, Unicode-aware
+  definition of whitespace, and refuses bidirectional override and isolate characters outright.
+- The database-view guard now sees a view whichever role runs it, not only a role that owns the
+  guarded tables.
+- The chain secret is now excluded from `/actuator/env` and `/actuator/configprops` by name.
+- The default schema-initialisation step no longer requires schema-owner privileges once the
+  schema is already fully migrated.
+- An unset document hash reads back as an empty string, not sixty-four padding spaces.
+
 ### Notes
 
 - PostgreSQL only, and the refusal probes the server rather than a configured dialect string.
 - There is no `SEQUENCE`, no `nextval` and no `@GeneratedValue` on any numbering column, asserted by
   a test over the sources and the schema.
 - This module auto-configures no HTTP endpoint at all.
+- A security review pass on this branch left one finding open, tracked internally: the allocator
+  does not yet join a caller-managed transaction that was opened outside this module. It needs a
+  small design addition rather than a one-line fix and is not resolved in this release.
