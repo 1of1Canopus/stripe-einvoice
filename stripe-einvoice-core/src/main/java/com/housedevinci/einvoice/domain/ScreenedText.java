@@ -32,6 +32,29 @@ public final class ScreenedText {
 
   private ScreenedText() {}
 
+  // D1-06. `\s` in Java is ASCII whitespace only: a value made entirely of U+00A0 (NO-BREAK SPACE),
+  // U+2007 (FIGURE SPACE) or U+200B (ZERO WIDTH SPACE) is not blank to that class and is blank to
+  // every reader of a report and, later, of a document - precisely the defect the collapse step
+  // exists to catch. This collapses every Unicode space separator (category Zs) and the invisible
+  // format characters used to fake blankness, alongside ordinary ASCII whitespace.
+  private static final java.util.regex.Pattern BLANK_RENDERING =
+      java.util.regex.Pattern.compile("[\\s\\p{Zs}\\u200B\\u200C\\u200D\\u2060\\uFEFF]+");
+
+  // Bidirectional overrides and isolates: refused outright wherever they appear in a screened
+  // value, never merely collapsed, because they change how every character around them displays
+  // rather than rendering as visible content themselves.
+  private static final java.util.Set<Character> BIDI_CONTROLS =
+      java.util.Set.of(
+          (char) 0x202A,
+          (char) 0x202B,
+          (char) 0x202C,
+          (char) 0x202D,
+          (char) 0x202E,
+          (char) 0x2066,
+          (char) 0x2067,
+          (char) 0x2068,
+          (char) 0x2069);
+
   /**
    * @param field the field's name, for the message - never its value (checklist line 45)
    * @param maxChars the per-field bound, in characters after normalisation
@@ -57,6 +80,16 @@ public final class ScreenedText {
         throw new EInvoiceException(
             ErrorCodes.INVALID, field + " contains a DELETE control character at index " + i);
       }
+      if (BIDI_CONTROLS.contains(c)) {
+        throw new EInvoiceException(
+            ErrorCodes.INVALID,
+            field
+                + " contains a bidirectional override or isolate character at index "
+                + i
+                + " (U+"
+                + String.format("%04X", (int) c)
+                + ")");
+      }
       if (Character.isHighSurrogate(c)) {
         if (i + 1 >= nfc.length() || !Character.isLowSurrogate(nfc.charAt(i + 1))) {
           throw new EInvoiceException(
@@ -70,7 +103,7 @@ public final class ScreenedText {
     }
     // Collapse-then-check, not collapse-then-use: the stored value keeps its own spacing, but a
     // value whose whitespace collapses to nothing is refused rather than written as a blank field.
-    String collapsed = nfc.replaceAll("\\s+", " ").strip();
+    String collapsed = BLANK_RENDERING.matcher(nfc).replaceAll(" ").strip();
     if (collapsed.isEmpty()) {
       throw new EInvoiceException(ErrorCodes.INVALID, field + " must not be blank");
     }
@@ -84,6 +117,9 @@ public final class ScreenedText {
 
   /** The collapsed form, for comparing two identifiers that must not collide (checklist line 8). */
   public static String collapsed(String value) {
-    return Normalizer.normalize(value, Normalizer.Form.NFC).replaceAll("\\s+", " ").strip();
+    return BLANK_RENDERING
+        .matcher(Normalizer.normalize(value, Normalizer.Form.NFC))
+        .replaceAll(" ")
+        .strip();
   }
 }
