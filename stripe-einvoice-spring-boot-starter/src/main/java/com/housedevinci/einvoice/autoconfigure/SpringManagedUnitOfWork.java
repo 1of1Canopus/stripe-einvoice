@@ -92,14 +92,47 @@ public final class SpringManagedUnitOfWork extends AbstractJdbcUnitOfWork {
     }
     LockLedger ledger = LockLedger.forOneTransaction();
     TransactionSynchronizationManager.bindResource(LEDGER_KEY, ledger);
-    TransactionSynchronizationManager.registerSynchronization(
-        new TransactionSynchronization() {
-          @Override
-          public void afterCompletion(int status) {
-            TransactionSynchronizationManager.unbindResourceIfPossible(LEDGER_KEY);
-          }
-        });
+    TransactionSynchronizationManager.registerSynchronization(new LedgerSynchronization(ledger));
     return ledger;
+  }
+
+  /**
+   * D1-11. The ledger is bound as a transaction resource, which is the right scope, but binding it
+   * is not enough: the framework's generic suspend logic
+   * ({@code AbstractPlatformTransactionManager.doSuspendSynchronization}) clears the
+   * <em>synchronization list</em> and asks the transaction manager to suspend <em>its own</em>
+   * resource (the connection holder), but it does not touch an arbitrary resource a synchronization
+   * bound under its own key - that is left to the synchronization itself, via exactly the {@code
+   * suspend()}/{@code resume()} callback pair. Without them the ledger simply stays bound while a
+   * {@code REQUIRES_NEW} transaction runs: the inner transaction inherits the outer transaction's
+   * lock records and is refused for locks it does not hold. Both halves of the documented contract
+   * are implemented here: {@link #suspend()} unbinds the ledger so the inner transaction that runs
+   * in between never sees it, and {@link #resume()} rebinds this same instance once the outer
+   * transaction continues - never a fresh ledger, or the outer transaction would forget locks it
+   * already took before the suspension.
+   */
+  private static final class LedgerSynchronization implements TransactionSynchronization {
+
+    private final LockLedger ledger;
+
+    LedgerSynchronization(LockLedger ledger) {
+      this.ledger = ledger;
+    }
+
+    @Override
+    public void suspend() {
+      TransactionSynchronizationManager.unbindResourceIfPossible(LEDGER_KEY);
+    }
+
+    @Override
+    public void resume() {
+      TransactionSynchronizationManager.bindResource(LEDGER_KEY, ledger);
+    }
+
+    @Override
+    public void afterCompletion(int status) {
+      TransactionSynchronizationManager.unbindResourceIfPossible(LEDGER_KEY);
+    }
   }
 
   /**
