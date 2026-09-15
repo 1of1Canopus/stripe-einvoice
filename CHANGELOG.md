@@ -56,6 +56,19 @@ All notable changes to this project are documented here. The format follows
 - The lock invariant is now the ordering rather than the exclusion: a caller may hold the series row
   lock and then the chain's advisory lock in one transaction, and the reverse order is refused
   (`DEI-120`) rather than left to deadlock.
+- The lock ledger is now unbound when a Spring transaction is suspended and rebound when it resumes,
+  so a `REQUIRES_NEW` call no longer inherits the outer transaction's lock records and is no longer
+  refused for locks it does not hold.
+- A refusal raised after only a locking read (`SELECT ... FOR UPDATE`), and before any write, no
+  longer marks the caller's transaction rollback-only. The two refusals a host is meant to catch and
+  carry on from - an unknown invoice on a void, and the illegal-transition refusal - no longer turn
+  a caught, handled refusal into an `UnexpectedRollbackException` at commit. "Written" is classified
+  at the point each statement is created, from its own SQL text, and tracked on the same
+  transaction-scoped ledger as the two locks, so a refusal in one call still poisons the caller's
+  commit when an earlier call in the same transaction already wrote.
+- A caller-owned unit of work that fails after writing, and refuses every further call on that unit
+  (`DEI-121`) rather than attempting to roll back a connection it does not own, is now covered by a
+  test.
 
 ### Notes
 
