@@ -67,6 +67,46 @@ CREATE INDEX IF NOT EXISTS einvoice_issuance_open
   ON einvoice_issuance (state, allocated_at);
 
 -- ---------------------------------------------------------------------------
+-- The durable inbound record: every signature-valid event, written before any routing decision
+-- and before the endpoint answers (I-01). Stripe's own redelivery is a backstop, never the retry
+-- mechanism: it stops after three days, and an outage that lasted four would otherwise cost a
+-- legal document with nothing left to show it was ever owed.
+--
+-- This table is deliberately NOT under the append-only triggers that protect the ledger above, and
+-- it IS purgeable (I-07). The issuance row is legal evidence; this row is a transport artifact
+-- holding a full invoice payload - buyer name, address, email, tax id, line descriptions. Copying
+-- the append-only guards here by reflex would make the retention property impossible to honour and
+-- turn the module into a permanent, undeletable copy of every buyer's details. The raw body is
+-- nulled as soon as the event reaches a state it can never run from again, and a purge job
+-- enforces einvoice.inbound.retention for anything that never got there.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS einvoice_inbound_event (
+  event_id          varchar(255) PRIMARY KEY,     -- Stripe's own id: the idempotency key
+  event_type        varchar(64)  NOT NULL,
+  object_id         varchar(255) NOT NULL,
+  api_version       varchar(64)  NOT NULL DEFAULT '',
+  livemode          boolean      NOT NULL,
+  stripe_account_id varchar(255) NOT NULL DEFAULT '',   -- '' = the platform account
+  seller_id         varchar(64)  NOT NULL DEFAULT '',   -- bound once routing resolved it
+  mode              varchar(4)   NOT NULL,
+  signature_key_id  varchar(64)  NOT NULL DEFAULT '',   -- which keyring id verified it
+  received_at       timestamptz  NOT NULL,
+  updated_at        timestamptz  NOT NULL,
+  state             varchar(32)  NOT NULL,
+  attempts          integer      NOT NULL DEFAULT 0,
+  next_attempt_at   timestamptz,
+  last_code         varchar(16)  NOT NULL DEFAULT '',   -- the stable DEI code, never a message
+  last_rule_id      varchar(64)  NOT NULL DEFAULT '',   -- the failing validation rule, for the void
+  body              bytea,                              -- nulled at a state that cannot run again
+  body_sha256       char(64)     NOT NULL               -- kept after the body is gone
+);
+-- The sweeper's query: everything not terminal, and every retryable terminal whose time has come.
+CREATE INDEX IF NOT EXISTS einvoice_inbound_due
+  ON einvoice_inbound_event (state, next_attempt_at);
+CREATE INDEX IF NOT EXISTS einvoice_inbound_object
+  ON einvoice_inbound_event (seller_id, mode, object_id);
+
+-- ---------------------------------------------------------------------------
 -- The chained issuance log: one row per disposition, append-only, hash-chained.
 --
 -- Separate from einvoice_issuance on purpose. A chain over a row with a mutable state column

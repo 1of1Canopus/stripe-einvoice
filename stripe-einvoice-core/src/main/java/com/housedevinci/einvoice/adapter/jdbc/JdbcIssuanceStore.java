@@ -58,7 +58,12 @@ import org.slf4j.LoggerFactory;
  * run without one (checklist line 48). A test greps these constants for the predicate.
  */
 public final class JdbcIssuanceStore
-    implements NumberAllocator, NumberVoider, IssuanceReader, IssuanceEventReader, IssuanceAnchor {
+    implements NumberAllocator,
+        NumberVoider,
+        IssuanceReader,
+        IssuanceEventReader,
+        IssuanceAnchor,
+        com.housedevinci.einvoice.application.IssuanceWriter {
 
   private static final Logger log = LoggerFactory.getLogger(JdbcIssuanceStore.class);
 
@@ -104,6 +109,14 @@ public final class JdbcIssuanceStore
       "INSERT INTO einvoice_issuance (seller_id, mode, stripe_invoice_id, stripe_account_id,"
           + " stripe_number, series, fiscal_year, legal_number, counter, issued_at, allocated_at,"
           + " rule_pack_version, state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id";
+
+  static final String MARK_ARCHIVING =
+      "UPDATE einvoice_issuance SET state = ?, document_sha256 = ?, archive_key = ?"
+          + " WHERE seller_id = ? AND mode = ? AND stripe_invoice_id = ?";
+
+  static final String MARK_STATE =
+      "UPDATE einvoice_issuance SET state = ?"
+          + " WHERE seller_id = ? AND mode = ? AND stripe_invoice_id = ?";
 
   static final String VOID_ISSUANCE =
       "UPDATE einvoice_issuance SET state = ?, void_reason = ?, void_rule_id = ?"
@@ -545,6 +558,129 @@ public final class JdbcIssuanceStore
           appendEvent(unit, IssuanceEvent.voided(voided, clock.instant()));
           return voided;
         });
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // The two database phases of the two-store write (design 5, P3 and P4)
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * P3: record the bytes we are about to write, with their hash and their key, <b>before</b> the
+   * object store is touched (I-05).
+   *
+   * <p>Every object in the archive then has a row that predicted it: an orphan is an indexed query
+   * instead of a bucket walk, and a crash between the PUT and the commit is attributable rather
+   * than inferred. Both columns become write-once at the trigger from this moment (N-06).
+   *
+   * <p>Idempotent by design, because this is a retry path: a row already in {@code ARCHIVING} or
+   * {@code ISSUED} with the same hash is returned unchanged. A row in either state with a
+   * <em>different</em> hash is a refusal - the same number would otherwise name two sets of bytes.
+   */
+  @Override
+  public Issuance markArchiving(
+      String sellerId,
+      Mode mode,
+      String stripeInvoiceId,
+      String documentSha256,
+      com.housedevinci.einvoice.domain.ArchiveKey key) {
+    com.housedevinci.einvoice.domain.Hashes.requireSha256Hex("document hash", documentSha256);
+    return unitOfWork.inTransaction(
+        unit -> {
+          Connection c = unit.connection();
+          Issuance issuance = requireIssuance(c, sellerId, mode, stripeInvoiceId);
+          if (!issuance.documentSha256().isEmpty()) {
+            if (!issuance.documentSha256().equals(documentSha256)) {
+              throw new EInvoiceException(
+                  ErrorCodes.ARCHIVE_CONTENT_CONFLICT,
+                  "this number already names a document with a different content hash. Two"
+                      + " different sets of bytes cannot carry one legal number, so this is"
+                      + " refused rather than reconciled.");
+            }
+            return issuance; // a retry of the same phase, on the same bytes
+          }
+          issuance.state().transitionTo(IssuanceState.ARCHIVING);
+          try (PreparedStatement ps = c.prepareStatement(MARK_ARCHIVING)) {
+            int i = 1;
+            ps.setString(i++, IssuanceState.ARCHIVING.name());
+            ps.setString(i++, documentSha256);
+            ps.setString(i++, key.value());
+            ps.setString(i++, sellerId);
+            ps.setString(i++, mode.wire());
+            ps.setString(i, stripeInvoiceId);
+            ps.executeUpdate();
+          }
+          return findBySource(c, sellerId, mode, stripeInvoiceId, false).orElseThrow();
+        });
+  }
+
+  /**
+   * P4: the document exists. The state and the chained disposition commit together, so a crash
+   * before the commit falls back to P3 - byte-identical, on the same number, with no second one.
+   */
+  @Override
+  public Issuance markIssued(String sellerId, Mode mode, String stripeInvoiceId) {
+    return unitOfWork.inTransaction(
+        unit -> {
+          Connection c = unit.connection();
+          Issuance issuance = requireIssuance(c, sellerId, mode, stripeInvoiceId);
+          if (issuance.state() == IssuanceState.ISSUED) {
+            return issuance; // a redelivery, or a retry after the commit went through
+          }
+          issuance.state().transitionTo(IssuanceState.ISSUED);
+          try (PreparedStatement ps = c.prepareStatement(MARK_STATE)) {
+            int i = 1;
+            ps.setString(i++, IssuanceState.ISSUED.name());
+            ps.setString(i++, sellerId);
+            ps.setString(i++, mode.wire());
+            ps.setString(i, stripeInvoiceId);
+            ps.executeUpdate();
+          }
+          Issuance issued = findBySource(c, sellerId, mode, stripeInvoiceId, false).orElseThrow();
+          appendEvent(unit, IssuanceEvent.of(issued, IssuanceState.ISSUED, clock.instant()));
+          return issued;
+        });
+  }
+
+  /**
+   * A failure state on the issuance row. Whether a sweeper may re-pick it is the enum's answer, per
+   * state, and never this call site's (I-08).
+   */
+  @Override
+  public Issuance markFailed(
+      String sellerId, Mode mode, String stripeInvoiceId, IssuanceState state, String ruleId) {
+    if (state != IssuanceState.FAILED_VALIDATION && state != IssuanceState.FAILED_ARCHIVE) {
+      throw new EInvoiceException(
+          ErrorCodes.ILLEGAL_TRANSITION,
+          "only FAILED_VALIDATION and FAILED_ARCHIVE are failure states of an issuance row");
+    }
+    return unitOfWork.inTransaction(
+        unit -> {
+          Connection c = unit.connection();
+          Issuance issuance = requireIssuance(c, sellerId, mode, stripeInvoiceId);
+          if (issuance.state() == state) {
+            return issuance;
+          }
+          issuance.state().transitionTo(state);
+          try (PreparedStatement ps = c.prepareStatement(MARK_STATE)) {
+            int i = 1;
+            ps.setString(i++, state.name());
+            ps.setString(i++, sellerId);
+            ps.setString(i++, mode.wire());
+            ps.setString(i, stripeInvoiceId);
+            ps.executeUpdate();
+          }
+          return findBySource(c, sellerId, mode, stripeInvoiceId, false).orElseThrow();
+        });
+  }
+
+  private Issuance requireIssuance(Connection c, String sellerId, Mode mode, String invoiceId)
+      throws SQLException {
+    return findBySource(c, sellerId, mode, invoiceId, true)
+        .orElseThrow(
+            () ->
+                new EInvoiceException(
+                    ErrorCodes.ISSUANCE_NOT_FOUND,
+                    "no number is allocated for that Stripe invoice under this seller and mode"));
   }
 
   /**

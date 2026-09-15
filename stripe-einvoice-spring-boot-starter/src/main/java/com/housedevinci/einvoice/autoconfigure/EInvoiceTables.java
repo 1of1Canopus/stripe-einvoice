@@ -11,7 +11,15 @@ public final class EInvoiceTables {
   public static final String ISSUANCE_EVENT = "einvoice_issuance_event";
   public static final String ISSUANCE_ANCHOR = "einvoice_issuance_anchor";
 
-  public static final List<String> ALL = List.of(SERIES, ISSUANCE, ISSUANCE_EVENT, ISSUANCE_ANCHOR);
+  /**
+   * The durable inbound record. It is guarded here for the same reason as the ledger - a host
+   * entity mapped over it would let Hibernate rewrite or delete rows this module's retry and
+   * replay paths depend on - even though the table itself is purgeable by this module (I-07).
+   */
+  public static final String INBOUND_EVENT = "einvoice_inbound_event";
+
+  public static final List<String> ALL =
+      List.of(SERIES, ISSUANCE, ISSUANCE_EVENT, ISSUANCE_ANCHOR, INBOUND_EVENT);
 
   private EInvoiceTables() {}
 

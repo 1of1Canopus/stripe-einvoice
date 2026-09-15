@@ -24,6 +24,14 @@ GRANT UPDATE ON einvoice_series, einvoice_issuance, einvoice_issuance_anchor
 GRANT USAGE ON SEQUENCE einvoice_issuance_id_seq, einvoice_issuance_event_seq_seq
   TO einvoice_runtime;
 
--- Deliberately NOT granted: DELETE, TRUNCATE, and any DDL. There is no code path in this module
--- that needs them, and a legal ledger that can be deleted by the application that writes it proves
--- nothing about what it once held.
+-- The durable inbound record is the one table with a different answer, deliberately (I-07). It
+-- holds the raw signed webhook bodies - a full invoice payload per row, with buyer name, address,
+-- email, tax id and line descriptions - so it is a transport artifact under a retention ceiling,
+-- not legal evidence. It carries no append-only trigger and the runtime role may DELETE from it,
+-- because a table nobody can ever delete from would make the retention property impossible to
+-- honour and turn this module into a permanent copy of every buyer's details.
+GRANT SELECT, INSERT, UPDATE, DELETE ON einvoice_inbound_event TO einvoice_runtime;
+
+-- Deliberately NOT granted: DELETE and TRUNCATE on the four ledger tables, and any DDL anywhere.
+-- There is no code path in this module that needs them, and a legal ledger that can be deleted by
+-- the application that writes it proves nothing about what it once held.
