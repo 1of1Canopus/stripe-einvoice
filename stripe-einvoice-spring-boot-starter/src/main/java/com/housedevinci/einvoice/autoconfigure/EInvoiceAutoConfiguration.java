@@ -1,6 +1,7 @@
 package com.housedevinci.einvoice.autoconfigure;
 
 import com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore;
+import com.housedevinci.einvoice.adapter.jdbc.JdbcUnitOfWork;
 import com.housedevinci.einvoice.application.IssuanceChainVerifier;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
@@ -12,6 +13,9 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import javax.sql.DataSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -21,12 +25,44 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Role;
+import org.springframework.transaction.PlatformTransactionManager;
 
 /** Wires the numbering series, the issuance ledger and the guards that keep them ours. */
 @AutoConfiguration(after = DataSourceAutoConfiguration.class)
 @EnableConfigurationProperties(EInvoiceProperties.class)
 @ConditionalOnBean(DataSource.class)
 public class EInvoiceAutoConfiguration {
+
+  private static final Logger log = LoggerFactory.getLogger(EInvoiceAutoConfiguration.class);
+
+  /**
+   * How this module's statements reach the database (D1-04).
+   *
+   * <p>Joining is the default and has no enable flag: an allocation made inside a host's
+   * transaction commits and rolls back with the unit of work that asked for it. A caller that wants
+   * an allocated number to survive its own rollback says so per call, with
+   * {@code @Transactional(propagation = REQUIRES_NEW)}; there is no application-wide switch,
+   * because a global switch that re-creates the defect is a switch someone sets during an incident
+   * and leaves set (T-04).
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public JdbcUnitOfWork einvoiceUnitOfWork(
+      DataSource dataSource, ObjectProvider<PlatformTransactionManager> transactionManagers) {
+    transactionManagers.stream()
+        .filter(tm -> tm.getClass().getName().contains("Jta"))
+        .findFirst()
+        .ifPresent(
+            tm ->
+                log.warn(
+                    "einvoice: a JTA transaction manager ({}) is in use. This module is tested"
+                        + " against a single JDBC DataSource only: XA, two-phase commit and the"
+                        + " lifetime of the series row lock across resources are unverified, and"
+                        + " an allocation joining a JTA transaction is an unsupported"
+                        + " configuration.",
+                    tm.getClass().getName()));
+    return new SpringManagedUnitOfWork(dataSource);
+  }
 
   /**
    * Injected everywhere a "now" is needed, so a test can move time across a fiscal-year boundary
@@ -77,6 +113,7 @@ public class EInvoiceAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public JdbcIssuanceStore einvoiceIssuanceStore(
+      JdbcUnitOfWork unitOfWork,
       DataSource dataSource,
       IssuanceChain chain,
       SeriesDefinition definition,
@@ -90,7 +127,12 @@ public class EInvoiceAutoConfiguration {
             Mode.of(properties.getMode())),
         definition);
     return new JdbcIssuanceStore(
-        dataSource, chain, series, clock, properties.getNumbering().getAllocationTimeout());
+        unitOfWork,
+        dataSource,
+        chain,
+        series,
+        clock,
+        properties.getNumbering().getAllocationTimeout());
   }
 
   @Bean

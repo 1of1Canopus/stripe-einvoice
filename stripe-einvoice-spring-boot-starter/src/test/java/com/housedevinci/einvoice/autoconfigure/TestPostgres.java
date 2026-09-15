@@ -36,6 +36,16 @@ final class TestPostgres {
     return dataSource;
   }
 
+  static long count(String sql) {
+    try (Connection c = dataSource().getConnection();
+        Statement st = c.createStatement();
+        var rs = st.executeQuery(sql)) {
+      return rs.next() ? rs.getLong(1) : -1;
+    } catch (SQLException e) {
+      throw new IllegalStateException("test query failed: " + e.getMessage(), e);
+    }
+  }
+
   static void execute(String sql) {
     try (Connection c = dataSource().getConnection();
         Statement st = c.createStatement()) {
