@@ -4,10 +4,13 @@ import static com.housedevinci.einvoice.adapter.jdbc.NumberAllocatorTest.CHAIN;
 import static com.housedevinci.einvoice.adapter.jdbc.NumberAllocatorTest.CLOCK;
 import static com.housedevinci.einvoice.adapter.jdbc.NumberAllocatorTest.SIX;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.housedevinci.einvoice.application.AllocationRequest;
 import com.housedevinci.einvoice.application.IssuanceChainVerifier;
 import com.housedevinci.einvoice.application.VoidRequest;
+import com.housedevinci.einvoice.domain.EInvoiceException;
+import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.Issuance;
 import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.ScreenedText;
@@ -106,21 +109,131 @@ class CipherProbePr1Test {
         .isEqualTo("INV-2026-000002");
   }
 
-  // D1-04
+  /**
+   * D1-04, rewritten against the explicit port that the design review settled on (probe ruling 1).
+   *
+   * <p>The pass-1 version drove a hand-held pooled connection and expected the store's own {@code
+   * getConnection()} to return that same physical connection - which no pool does, and which only
+   * an ambient thread-local registry could have arranged. The defect it detects is unchanged: a
+   * caller that owns a transaction, allocates inside it and rolls back must not keep the number.
+   * The caller now hands its connection over explicitly.
+   *
+   * <p>It does not close D1-04 on its own: the host-transaction regression tests are the starter's
+   * TransactionTemplate and {@code @Transactional} probes.
+   */
   @Test
   void probe_a_host_transaction_rollback_does_not_leave_an_allocated_number() throws Exception {
     String seller = PostgresSupport.freshSeller("probe-hosttx");
-    JdbcIssuanceStore store = storeFor(seller, SIX);
     try (Connection host = PostgresSupport.dataSource().getConnection()) {
       host.setAutoCommit(false);
-      store.allocate(requestIn(key(seller, 2026), "in_hosttx", NumberAllocatorTest.JANUARY));
+      storeOn(JdbcUnitOfWork.using(host), seller)
+          .allocate(requestIn(key(seller, 2026), "in_hosttx", NumberAllocatorTest.JANUARY));
       host.rollback();
     }
-    assertThat(store.findBySource(seller, Mode.LIVE, "in_hosttx"))
+    assertThat(storeFor(seller, SIX).findBySource(seller, Mode.LIVE, "in_hosttx"))
         .describedAs(
             "the allocation must be part of the caller's unit of work, not a second connection"
                 + " that commits on its own")
         .isEmpty();
+    assertThat(nextNumberOf(seller))
+        .describedAs("and the counter must be back where it was")
+        .isEqualTo(1L);
+  }
+
+  /** Probe 2: the direct call outside any transaction keeps its old guarantee. */
+  @Test
+  void probe_an_allocation_outside_any_transaction_still_commits_on_its_own() {
+    String seller = PostgresSupport.freshSeller("probe-notx");
+    JdbcIssuanceStore store = storeFor(seller, SIX);
+    store.allocate(requestIn(key(seller, 2026), "in_notx", NumberAllocatorTest.JANUARY));
+    assertThat(store.findBySource(seller, Mode.LIVE, "in_notx"))
+        .describedAs("a caller with no transaction of its own must still get a committed number")
+        .isPresent();
+  }
+
+  /** Probe 3: a caller-owned connection in auto-commit is refused before anything is written. */
+  @Test
+  void probe_a_caller_connection_in_autocommit_is_refused_rather_than_silently_committed()
+      throws Exception {
+    String seller = PostgresSupport.freshSeller("probe-autocommit");
+    storeFor(seller, SIX).openSeries(key(seller, 2026));
+    try (Connection host = PostgresSupport.dataSource().getConnection()) {
+      assertThat(host.getAutoCommit()).isTrue();
+      JdbcIssuanceStore store = storeOn(JdbcUnitOfWork.using(host), seller);
+      assertThatThrownBy(
+              () ->
+                  store.allocate(
+                      requestIn(key(seller, 2026), "in_autocommit", NumberAllocatorTest.JANUARY)))
+          .describedAs(
+              "statement-by-statement commits under a caller that believes it owns a"
+                  + " transaction is the defect, not a convenience")
+          .isInstanceOf(EInvoiceException.class)
+          .extracting(e -> ((EInvoiceException) e).code())
+          .isEqualTo(ErrorCodes.HOST_AUTOCOMMIT);
+    }
+    assertThat(nextNumberOf(seller)).describedAs("and nothing was written").isEqualTo(1L);
+  }
+
+  /** Probe 8: the caller's lock_timeout is restored, on the succeeding and the failing path. */
+  @Test
+  void probe_the_callers_lock_timeout_is_restored_after_an_allocation() throws Exception {
+    String seller = PostgresSupport.freshSeller("probe-locktimeout");
+    try (Connection host = PostgresSupport.dataSource().getConnection()) {
+      host.setAutoCommit(false);
+      try (Statement st = host.createStatement()) {
+        st.execute("SET LOCAL lock_timeout = '7331ms'");
+      }
+      JdbcIssuanceStore store = storeOn(JdbcUnitOfWork.using(host), seller);
+      store.allocate(requestIn(key(seller, 2026), "in_lt1", NumberAllocatorTest.JANUARY));
+      assertThat(lockTimeoutOf(host))
+          .describedAs("the caller's own later statements must keep the caller's timeout")
+          .isEqualTo("7331ms");
+
+      // And on the failing path: the same caller-owned transaction disposes (taking the chain
+      // lock) and then asks for another number, which is refused by the lock-order rule after our
+      // SET LOCAL has already run.
+      store.voidUnused(new VoidRequest(seller, Mode.LIVE, "in_lt1", "lock timeout probe", ""));
+      assertThatThrownBy(
+              () ->
+                  store.allocate(
+                      requestIn(key(seller, 2026), "in_lt2", NumberAllocatorTest.JANUARY)))
+          .isInstanceOf(EInvoiceException.class)
+          .extracting(e -> ((EInvoiceException) e).code())
+          .isEqualTo(ErrorCodes.LOCK_ORDER_VIOLATION);
+      assertThat(lockTimeoutOf(host))
+          .describedAs("a refusal must not leave our timeout on the caller's transaction")
+          .isEqualTo("7331ms");
+      host.rollback();
+    }
+  }
+
+  private static String lockTimeoutOf(Connection c) throws Exception {
+    try (Statement st = c.createStatement();
+        var rs = st.executeQuery("SHOW lock_timeout")) {
+      return rs.next() ? rs.getString(1) : "";
+    }
+  }
+
+  private static long nextNumberOf(String seller) {
+    return PostgresSupport.scalar(
+        "SELECT coalesce((SELECT next_number FROM einvoice_series WHERE seller_id = '"
+            + seller
+            + "' AND series = 'DEFAULT' AND fiscal_year = 2026 AND mode = 'live'), 1)");
+  }
+
+  private static JdbcIssuanceStore storeOn(JdbcUnitOfWork unitOfWork, String seller) {
+    return storeOn(unitOfWork, seller, SIX);
+  }
+
+  private static JdbcIssuanceStore storeOn(
+      JdbcUnitOfWork unitOfWork, String seller, SeriesDefinition definition) {
+    return new JdbcIssuanceStore(
+        unitOfWork,
+        PostgresSupport.dataSource(),
+        CHAIN,
+        Map.of(new JdbcIssuanceStore.SeriesId(seller, "DEFAULT", Mode.LIVE), definition),
+        CLOCK,
+        JdbcIssuanceStore.DEFAULT_ALLOCATION_TIMEOUT);
   }
 
   // D1-05

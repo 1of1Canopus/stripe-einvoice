@@ -118,6 +118,7 @@ public final class JdbcIssuanceStore
   /** D1-05's default when a caller does not configure one, matching the property's own default. */
   public static final Duration DEFAULT_ALLOCATION_TIMEOUT = Duration.ofSeconds(5);
 
+  private final JdbcUnitOfWork unitOfWork;
   private final DataSource dataSource;
   private final IssuanceChain chain;
   private final Map<SeriesId, SeriesDefinition> series;
@@ -141,6 +142,31 @@ public final class JdbcIssuanceStore
       Map<SeriesId, SeriesDefinition> series,
       Clock clock,
       Duration allocationTimeout) {
+    this(
+        JdbcUnitOfWork.ownConnection(dataSource),
+        dataSource,
+        chain,
+        series,
+        clock,
+        allocationTimeout);
+  }
+
+  /**
+   * The canonical constructor: every statement this store issues runs through {@code unitOfWork}
+   * (T-01), including the reads, so a host that allocates and then reads inside one transaction
+   * sees its own uncommitted row.
+   *
+   * <p>{@code dataSource} is kept for one thing only: {@link #openSeries(SeriesKey)}, which the
+   * startup check calls before any host transaction exists and which must not join one.
+   */
+  public JdbcIssuanceStore(
+      JdbcUnitOfWork unitOfWork,
+      DataSource dataSource,
+      IssuanceChain chain,
+      Map<SeriesId, SeriesDefinition> series,
+      Clock clock,
+      Duration allocationTimeout) {
+    this.unitOfWork = Objects.requireNonNull(unitOfWork, "unitOfWork");
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     this.chain = Objects.requireNonNull(chain, "chain");
     this.series = Map.copyOf(series);
@@ -156,13 +182,15 @@ public final class JdbcIssuanceStore
   public Issuance allocate(AllocationRequest request) {
     SeriesKey key = request.seriesKey();
     SeriesDefinition definition = definitionFor(key);
-    return JdbcSupport.inTransaction(
-        dataSource,
-        c -> {
+    return unitOfWork.inTransaction(
+        unit -> {
+          Connection c = unit.connection();
           // D1-05: bounds how long this transaction will wait on the series row's lock, so a
           // blocked allocation gives up with a typed refusal rather than joining an unbounded
-          // queue.
-          setLockTimeout(c);
+          // queue. T-05: in a joined transaction the setting outlives this call, so the caller's
+          // previous value is restored on every path, including the failing ones.
+          String previousLockTimeout = unit.joined() ? currentLockTimeout(unit) : null;
+          setLockTimeout(unit);
           try {
             // Resume, never re-allocate. A row in any state returns its existing number; only a
             // miss reaches the counter.
@@ -172,7 +200,7 @@ public final class JdbcIssuanceStore
               return existing.get();
             }
             createSeriesRowForNewFiscalYear(c, key, definition);
-            LegalNumber number = nextNumber(c, key, definition);
+            LegalNumber number = nextNumber(unit, key, definition);
             Instant allocatedAt = Timestamps.toStorage(clock.instant());
             return insertIssuance(c, request, number, allocatedAt);
           } catch (SQLException e) {
@@ -186,6 +214,8 @@ public final class JdbcIssuanceStore
                   e);
             }
             throw e;
+          } finally {
+            restoreLockTimeout(unit, previousLockTimeout);
           }
         });
   }
@@ -196,9 +226,36 @@ public final class JdbcIssuanceStore
    * the statement text. The value is our own validated {@link Duration}, never request input, so
    * this is not a concatenation of anything an attacker or a buyer ever supplies.
    */
-  private void setLockTimeout(Connection c) throws SQLException {
-    try (Statement st = c.createStatement()) {
+  private void setLockTimeout(JdbcUnitOfWork.Unit unit) throws SQLException {
+    try (Statement st = unit.plumbing().createStatement()) {
       st.execute(SET_LOCK_TIMEOUT_PREFIX + allocationTimeout.toMillis() + "ms'");
+    }
+  }
+
+  private static String currentLockTimeout(JdbcUnitOfWork.Unit unit) throws SQLException {
+    try (Statement st = unit.plumbing().createStatement();
+        ResultSet rs = st.executeQuery("SHOW lock_timeout")) {
+      return rs.next() ? rs.getString(1) : "0";
+    }
+  }
+
+  /**
+   * T-05. In a joined transaction {@code SET LOCAL} lives until the caller commits, so leaving our
+   * value in place would silently re-time-out the caller's own later statements. Restored on every
+   * path, and a restore that cannot run because the transaction is already aborted is logged rather
+   * than allowed to replace the failure the caller needs to see.
+   */
+  private static void restoreLockTimeout(JdbcUnitOfWork.Unit unit, String previous) {
+    if (previous == null) {
+      return;
+    }
+    try (Statement st = unit.plumbing().createStatement()) {
+      st.execute(SET_LOCK_TIMEOUT_PREFIX + previous + "'");
+    } catch (SQLException e) {
+      log.debug(
+          "einvoice: could not restore the caller's lock_timeout (SQLState {}); the transaction is"
+              + " failing anyway and will not outlive this call",
+          e.getSQLState());
     }
   }
 
@@ -260,8 +317,12 @@ public final class JdbcIssuanceStore
    * those two columns once it exists (the trigger says so), so this is the only way the rendered
    * format cannot drift from what a restart with an edited property would otherwise produce.
    */
-  private LegalNumber nextNumber(Connection c, SeriesKey key, SeriesDefinition definition)
-      throws SQLException {
+  private LegalNumber nextNumber(
+      JdbcUnitOfWork.Unit unit, SeriesKey key, SeriesDefinition definition) throws SQLException {
+    Connection c = unit.connection();
+    // T-02: recorded before the lock is taken, so a transaction that already holds the chain lock
+    // is refused rather than deadlocking against one that took them the other way round.
+    unit.locks().seriesRowLock();
     try (PreparedStatement ps = c.prepareStatement(ALLOCATE)) {
       int i = 1;
       ps.setObject(i++, ts(Timestamps.toStorage(clock.instant())));
@@ -364,6 +425,11 @@ public final class JdbcIssuanceStore
    * It is a convenience, never the mechanism: the allocator opens a new fiscal year's row itself,
    * inside the allocation transaction, because an application last restarted in November would
    * otherwise stop invoicing at midnight on 1 January (N-01).
+   *
+   * <p>T-01. This is the one store method that stays on the {@code DataSource} rather than on the
+   * unit of work, with the other startup checks: it runs before a host transaction exists and must
+   * not join one, or a failing startup check would poison the caller's transaction and a host that
+   * seeds a series inside a long transaction would hold the row lock for its duration.
    */
   public void openSeries(SeriesKey key) {
     SeriesDefinition definition = definitionFor(key);
@@ -430,9 +496,9 @@ public final class JdbcIssuanceStore
 
   @Override
   public Issuance voidUnused(VoidRequest request) {
-    return JdbcSupport.inTransaction(
-        dataSource,
-        c -> {
+    return unitOfWork.inTransaction(
+        unit -> {
+          Connection c = unit.connection();
           Issuance issuance =
               findBySource(c, request.sellerId(), request.mode(), request.stripeInvoiceId(), true)
                   .orElseThrow(
@@ -470,7 +536,7 @@ public final class JdbcIssuanceStore
                   IssuanceState.VOID_UNUSED,
                   request.reason(),
                   request.ruleId());
-          appendEvent(c, IssuanceEvent.voided(voided, clock.instant()));
+          appendEvent(unit, IssuanceEvent.voided(voided, clock.instant()));
           return voided;
         });
   }
@@ -478,11 +544,13 @@ public final class JdbcIssuanceStore
   /**
    * Appends one chained event and advances the anchor, in the caller's transaction.
    *
-   * <p>The chain lock is this module's own two-argument constant (N-05), and it is taken in a
-   * transaction that holds no series counter row lock: nothing in this module ever holds both
-   * (N-07).
+   * <p>The chain lock is this module's own two-argument constant (N-05), and it is recorded in the
+   * transaction's lock ledger before it is taken: a transaction may hold the series counter's row
+   * lock and then this one, never the reverse (N-07 as restated by T-02b).
    */
-  private void appendEvent(Connection c, IssuanceEvent event) throws SQLException {
+  private void appendEvent(JdbcUnitOfWork.Unit unit, IssuanceEvent event) throws SQLException {
+    Connection c = unit.connection();
+    unit.locks().chainLock();
     AdvisoryLocks.lock(c, AdvisoryLocks.CHAIN_CLASS_ID, AdvisoryLocks.CHAIN_KEY);
     String prev = IssuanceChain.GENESIS;
     long count = 0;
@@ -579,8 +647,8 @@ public final class JdbcIssuanceStore
 
   @Override
   public Optional<Issuance> findBySource(String sellerId, Mode mode, String stripeInvoiceId) {
-    return JdbcSupport.withConnection(
-        dataSource, c -> findBySource(c, sellerId, mode, stripeInvoiceId, false));
+    return unitOfWork.inReadUnit(
+        unit -> findBySource(unit.connection(), sellerId, mode, stripeInvoiceId, false));
   }
 
   private Optional<Issuance> findBySource(
@@ -599,9 +667,9 @@ public final class JdbcIssuanceStore
 
   @Override
   public SeriesReport seriesReport(SeriesKey key) {
-    return JdbcSupport.withConnection(
-        dataSource,
-        c -> {
+    return unitOfWork.inReadUnit(
+        unit -> {
+          Connection c = unit.connection();
           List<SeriesReport.Line> lines = new ArrayList<>();
           long open = 0;
           try (PreparedStatement ps = c.prepareStatement(SERIES_LINES)) {
@@ -648,9 +716,9 @@ public final class JdbcIssuanceStore
 
   @Override
   public List<IssuanceEvent> readAfter(long sequenceExclusive, int limit) {
-    return JdbcSupport.withConnection(
-        dataSource,
-        c -> {
+    return unitOfWork.inReadUnit(
+        unit -> {
+          Connection c = unit.connection();
           List<IssuanceEvent> events = new ArrayList<>();
           try (PreparedStatement ps =
               c.prepareStatement(
@@ -673,9 +741,9 @@ public final class JdbcIssuanceStore
 
   @Override
   public List<DisposedIssuance> disposedIssuances() {
-    return JdbcSupport.withConnection(
-        dataSource,
-        c -> {
+    return unitOfWork.inReadUnit(
+        unit -> {
+          Connection c = unit.connection();
           List<DisposedIssuance> disposed = new ArrayList<>();
           // D1-02: the full row identity, not just seller|mode|legal_number|state, so a forged row
           // in a different series, fiscal year or with a different source id cannot be vouched for
@@ -704,9 +772,9 @@ public final class JdbcIssuanceStore
 
   @Override
   public Optional<Anchor> anchor() {
-    return JdbcSupport.withConnection(
-        dataSource,
-        c -> {
+    return unitOfWork.inReadUnit(
+        unit -> {
+          Connection c = unit.connection();
           try (PreparedStatement ps =
                   c.prepareStatement(
                       "SELECT head_hash, row_count, keyed FROM einvoice_issuance_anchor"

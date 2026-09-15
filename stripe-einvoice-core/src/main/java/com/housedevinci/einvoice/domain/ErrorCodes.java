@@ -51,5 +51,31 @@ public final class ErrorCodes {
    */
   public static final String ALLOCATION_TIMEOUT = "DEI-117";
 
+  /**
+   * A caller handed the store a connection in auto-commit mode as if it owned a transaction
+   * (D1-04). Refused before any statement runs: each statement would commit on its own, so the
+   * caller's rollback would keep the number.
+   */
+  public static final String HOST_AUTOCOMMIT = "DEI-118";
+
+  /**
+   * An allocation was called inside a read-only transaction. A caller's annotation, not an outage,
+   * and it is refused before the series row lock is taken rather than surfacing as SQLState 25006.
+   */
+  public static final String HOST_TRANSACTION_READ_ONLY = "DEI-119";
+
+  /**
+   * A transaction that already holds the issuance chain's advisory lock asked for the series
+   * counter's row lock. Nothing in this module takes the two in that order; two transactions doing
+   * it in opposite orders deadlock (T-02).
+   */
+  public static final String LOCK_ORDER_VIOLATION = "DEI-120";
+
+  /**
+   * A caller-owned transaction that already failed inside the store after it had written. Nothing
+   * further runs on it; it must be rolled back.
+   */
+  public static final String UNIT_OF_WORK_POISONED = "DEI-121";
+
   private ErrorCodes() {}
 }

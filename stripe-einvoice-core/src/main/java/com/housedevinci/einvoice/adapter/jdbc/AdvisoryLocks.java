@@ -68,11 +68,13 @@ public final class AdvisoryLocks {
   /**
    * Takes a transaction-scoped advisory lock in the caller's current transaction.
    *
-   * <p><b>No transaction holds both of this module's locks (N-07).</b> The series counter's row
-   * lock is taken by the allocation transaction; the chain lock is taken by the disposition
-   * transaction; nothing acquires both. That is a stronger position than a correct lock ordering,
-   * and it is asserted by a test rather than left true by accident. If a future path must hold
-   * both, the order is the series row first and the chain second.
+   * <p><b>Nothing takes the chain lock before the series counter's row lock (N-07, restated by
+   * T-02b).</b> The invariant used to read "no transaction holds both locks", which was true
+   * because every call opened its own transaction. An allocation can now join a caller's
+   * transaction, so a caller that allocates and then disposes in one transaction holds both - a
+   * correct program, which it would be wrong to refuse. What prevents a deadlock is the order, and
+   * that is what is now enforced by {@link LockLedger} and asserted by a test: series row lock
+   * first, chain lock second, never the other way round.
    */
   public static void lock(Connection connection, int classId, String key) throws SQLException {
     try (PreparedStatement ps =
