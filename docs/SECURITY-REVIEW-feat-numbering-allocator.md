@@ -280,3 +280,168 @@ two-role deployment in the quick start rather than only in the grants file.
 
 D1-01, D1-02, D1-03, D1-04, D1-05, D1-06, D1-07, D1-08, D1-09, D1-10 - all of them, each with the
 named test. Pass 2 is the last pass on this branch.
+
+---
+
+## 2026-09-15 - pass 2 (final)
+
+Commit `7f05c2e`. Pass 2 of 2: no third pass. Everything below was run, not read.
+
+### Verdict
+
+**NOT MERGEABLE**, with a three-item fix list that closes without another review pass. No HIGH and no
+finding in the ten from pass 1: all ten are fixed and their probes are green. The three open items are
+new surfaces created by the transaction-participation work itself, all three reproduced, all three
+with a correction small enough to apply blind.
+
+| Severity | Count | Ids |
+|---|---|---|
+| HIGH | 0 | — |
+| MEDIUM | 2 | D1-11, D1-12 |
+| LOW | 1 | D1-13 |
+| INFO | 0 | — |
+
+### What was run
+
+| Check | Result |
+|---|---|
+| `./mvnw -B verify` | BUILD SUCCESS, 123 tests, 0 failures (87 core, 34 starter, 2 sample), coverage gates met |
+| `./mvnw -B clean verify -Prelease -Dgpg.skip=true` | BUILD SUCCESS, tests run |
+| `CIPHER_PROBE_MAVEN=1 tools/cipher-probe-release-pipeline.sh` | 63 fixed, 0 weak, exit 0 |
+| Reference guard, tree and final jars | clean; licence carve-out check clean |
+| Sources jars after the release build | sources, the module's `.sql` resource, the starter's imports file, `META-INF/LICENSE`, `META-INF/NOTICE`, Maven metadata; nothing else. LICENSE and NOTICE in both main jars |
+| Four mutations of my own | one passed, three failed; one of the three was my assertion shape, two are the findings below |
+
+Release hygiene lines 1, 3 and 10 pass on the final artifacts.
+
+### The ten pass-1 findings, re-verified
+
+Each by its own probe, green, with the mechanism checked rather than the probe alone.
+
+| Id | Probe | Mechanism I checked |
+|---|---|---|
+| D1-01 | `probe_a_new_fiscal_year_does_not_reissue_the_previous_years_legal_number` | The fiscal year is now inside the rendered number through an explicit placeholder; a resetting series whose prefix does not carry it is refused at startup; the resolved prefix is written into the series row once, at creation. Two different years cannot collide, because the year occupies fixed positions in a fixed-width rendering |
+| D1-02 | `probe_the_disposition_cross_check_is_keyed_per_row_not_per_number` | The cross-check key is now the row's identity: seller, mode, series, fiscal year, source object id, number, state, on both sides |
+| D1-03 | `probe_the_rendered_number_follows_the_series_row_not_todays_properties` | The allocation statement returns the row's own prefix and width and renders from them; the exhaustion bound is computed from the row's width in the same statement |
+| D1-04 | `probe_a_host_transaction_rollback_does_not_leave_an_allocated_number` plus the transaction-template and `@Transactional` probes | Closed; see the section below |
+| D1-05 | `probe_a_blocked_allocation_gives_up_after_the_configured_timeout` | The property is applied as a lock timeout, the timeout SQL state maps to its own code, and the caller's previous value is restored on the failing path too |
+| D1-06 | `probe_a_value_of_unicode_whitespace_only_is_refused_by_the_screening_function` | Collapse now covers Unicode space separators and the invisible format characters; bidirectional overrides and isolates are refused outright |
+| D1-07 | `probe_the_view_guard_sees_a_view_when_it_runs_as_the_runtime_role` | The guard reads the catalog dependency records rather than the owner-filtered information-schema view, so it sees a view as the non-owner runtime role |
+| D1-08 | `probe_an_empty_document_hash_reads_back_as_an_empty_string` | One spelling, produced at the single point that builds the value object, and used by both the row reader and the event reader |
+| D1-09 | `probe_the_chain_secret_is_excluded_by_name` | The secret and every retired key id are excluded by name, not by the framework's word-matching luck |
+| D1-10 | `probe_the_default_schema_step_works_as_the_documented_runtime_role` | The step reads the catalog before it writes, so a fully installed schema needs no privilege; a permission failure on a real bootstrap is reported by name |
+
+### The design review's seven items, verified
+
+T-01 (reads join the unit of work, startup checks deliberately do not), T-02a (the ledger is a
+transaction-bound resource), T-02b (the order is enforced, the exclusion is not, and the test is
+renamed to the property it holds), T-03 (the "already touched the database" fact is observed by the
+unit of work, not declared by each method), T-04 (the application-wide weaker mode is gone; the
+per-call escape hatch is documented and pinned), T-05 (restore on both paths), T-06 (the per-call
+assertion is now an enum for a log line), T-07 (both documentation lines) are all present and probed.
+
+Two checks of my own beyond the thirteen:
+
+- **The transaction manager a real host has.** The probes all wire a data-source transaction manager.
+  The common deployment is a JPA one. I built a context with an entity-manager factory and a JPA
+  transaction manager and rolled a host transaction back around an allocation:
+  `probe_an_allocation_joins_a_jpa_transaction_managers_transaction` **passes** — the number and the
+  counter both go back. This was the finding that would have made the whole fix silently ineffective
+  for most hosts; it is not there.
+- **Two units of work in one host transaction sharing the ledger.** Allocate, dispose, allocate again
+  in one host transaction is refused with the lock-order code, which is the designed and correct
+  answer for the deadlock-forming order.
+
+### The two questions put to this review
+
+**1. "Already touched the database" counts a locking read.** The conservative direction is right in
+principle and I am not asking for it to be loosened generally — but as implemented it is wrong for the
+two refusals a host is *supposed* to catch. See D1-12: it is fixable at the one place statements are
+created, without going back to a flag each method must remember.
+
+**2. A caller-owned connection cannot be rolled back by us, so the unit poisons itself.** Correct,
+and closed with no finding. A module that rolled back a connection it does not own would destroy the
+caller's unrelated work; refusing every further call on that unit, with a message that tells the
+caller to roll back, is the honest maximum. The one thing missing is a test — D1-13.
+
+---
+
+#### D1-11 · MEDIUM · the lock ledger outlives the transaction it belongs to, and refuses a correct program
+
+The ledger is bound as a transaction resource, which is the right scope, but nothing unbinds it when
+the framework *suspends* that transaction. A nested new transaction therefore inherits the suspended
+transaction's lock records: it is told it already holds the chain lock when it holds nothing at all,
+and an allocation inside it is refused with the lock-order code and a message that is simply untrue of
+that transaction. The refusal is a runtime failure on a correct host program, and the suspended
+transaction's records are still there afterwards.
+
+**Repro.** A host transaction disposes of a number (taking the chain lock), then calls a second bean
+whose method requires a new transaction and allocates. Expected: success. Observed: the lock-order
+refusal, raised from the inner transaction.
+
+**Required change.** The synchronization that unbinds the ledger on completion also implements the
+suspend and resume callbacks the framework already calls: unbind on suspend, rebind on resume. That is
+the documented contract for a transaction-scoped resource and it is one method pair inside the
+synchronization that already exists. Probe:
+`probe_a_requires_new_allocation_does_not_inherit_the_outer_lock_ledger`, asserting the inner
+allocation succeeds and its number is present.
+
+---
+
+#### D1-12 · MEDIUM · a refusal raised after a locking read makes the caller's own work uncommittable
+
+The unit of work marks the caller's transaction rollback-only whenever any statement has executed,
+and a `SELECT ... FOR UPDATE` counts. Two of this module's typed refusals are raised after exactly
+that and before any write: "no number is allocated for that Stripe invoice" and the illegal-transition
+refusal when a host tries to void a number that is already issued. Both are refusals a host is meant
+to catch and handle. Today, catching one and carrying on ends in a rollback exception at commit: the
+host's own unrelated work in that transaction is destroyed by a read.
+
+Nothing was written in either case, so this is not fail-closed prudence; it is an inaccurate
+predicate. The accurate one is available where the tracking already sits, and it stays *observed*
+rather than declared, which is the property that made the tracking wrapper the right shape in the
+first place.
+
+**Repro.** A host transaction asks to void an unknown invoice, catches the typed refusal, and returns
+normally. Observed: the commit fails with a rollback exception.
+
+**Required change.** In the statement-tracking wrapper, classify at creation: a statement whose SQL
+begins (after trimming) with `SELECT` or `SHOW` is a read and does not set the flag; everything else,
+including any dynamically executed SQL, sets it. The three write statements of this module are
+unaffected, including the two that use a returning clause and are executed as queries, because they do
+not begin with `SELECT`. Keep the comment explaining why a locking read is not a write, and why a
+future read-with-side-effects would have to be declared. The existing swallow-after-a-write probe must
+stay green — it writes before it refuses. Probe:
+`probe_a_pre_write_refusal_does_not_poison_the_host_transaction`.
+
+While you are in the allocation path: record the series-row lock in the ledger as the *first* thing
+the unit of work does, before the resume read and before the series-row insert, rather than just
+before the counter statement. The lock-order refusal is then raised before anything at all has run,
+which is the cheapest way to make it non-poisoning under any predicate.
+
+---
+
+#### D1-13 · LOW · the self-poisoning refusal of a caller-owned unit of work is never exercised
+
+The behaviour this review approves in answer 2 above — a caller-owned unit of work that failed after
+writing refuses every further call, with its own code, rather than pretending it can roll back a
+connection it does not own — has no test. It is the one behaviour in the port a host drives by hand,
+and it is the one that is unproven.
+
+**Required change.** A probe that takes a caller-owned connection, drives it into the write-then-fail
+state, and asserts that the next call on the same unit of work is refused with that code and that the
+caller's connection is still the caller's to roll back:
+`probe_a_caller_owned_unit_that_failed_after_writing_refuses_further_work`.
+
+### Fix list
+
+Three items, in order, each with its probe. No further review pass: run the full build, the probe
+suite with the Maven probes enabled, and the reference guard, and merge when they are green.
+
+1. **D1-11** — suspend and resume callbacks on the ledger synchronization; probe
+   `probe_a_requires_new_allocation_does_not_inherit_the_outer_lock_ledger`.
+2. **D1-12** — classify reads at statement creation in the tracking wrapper; move the series-row
+   ledger entry to the head of the allocation unit of work; probe
+   `probe_a_pre_write_refusal_does_not_poison_the_host_transaction`, with the existing
+   swallow-after-a-write probe still green.
+3. **D1-13** — probe `probe_a_caller_owned_unit_that_failed_after_writing_refuses_further_work`.
