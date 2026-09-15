@@ -45,6 +45,17 @@ All notable changes to this project are documented here. The format follows
 - The default schema-initialisation step no longer requires schema-owner privileges once the
   schema is already fully migrated.
 - An unset document hash reads back as an empty string, not sixty-four padding spaces.
+- **An allocation now joins the caller's transaction.** Called inside a Spring-managed transaction,
+  the counter increment and the issuance row commit and roll back with that transaction; called
+  outside one, it opens and commits its own connection exactly as before. The reads join it too, so
+  a caller that allocates and then reads inside one transaction sees its own row. A caller-owned
+  connection in auto-commit mode and a read-only caller transaction are refused with their own
+  error codes (`DEI-118`, `DEI-119`) instead of being half-executed, and a failure after this
+  module's first statement marks the caller's transaction rollback-only so a swallowed refusal
+  cannot be committed.
+- The lock invariant is now the ordering rather than the exclusion: a caller may hold the series row
+  lock and then the chain's advisory lock in one transaction, and the reverse order is refused
+  (`DEI-120`) rather than left to deadlock.
 
 ### Notes
 
@@ -52,6 +63,8 @@ All notable changes to this project are documented here. The format follows
 - There is no `SEQUENCE`, no `nextval` and no `@GeneratedValue` on any numbering column, asserted by
   a test over the sources and the schema.
 - This module auto-configures no HTTP endpoint at all.
-- A security review pass on this branch left one finding open, tracked internally: the allocator
-  does not yet join a caller-managed transaction that was opened outside this module. It needs a
-  small design addition rather than a one-line fix and is not resolved in this release.
+- Transaction participation is explicit: the module exposes a `JdbcUnitOfWork` port with a
+  caller-supplied-connection factory and a Spring implementation in the starter. There is no
+  ambient "current connection" registry, and no application-wide switch that turns joining off.
+- JTA and XA are out of scope: a single JDBC `DataSource` is the supported deployment, and a JTA
+  transaction manager in the context WARNs at every startup.

@@ -30,6 +30,7 @@ What it guarantees today:
 |---|---|
 | One Stripe invoice, one number, for all time | A unique constraint on `(seller, mode, stripe invoice id)`; a retry resumes onto the existing number instead of allocating a second one |
 | A rollback or a crash never consumes a number | Row-lock allocation (`UPDATE ... RETURNING`) inside the transaction that inserts the issuance row. No `SEQUENCE`, no `nextval`, no `@GeneratedValue` - those are non-transactional by design |
+| Your rollback is our rollback | An allocation made inside your `@Transactional` method or `TransactionTemplate` joins that transaction and is rolled back with it; reads join it too, so you can read back the number you just allocated. Outside a transaction, the allocation commits on its own, as before. To keep a number across your own rollback, allocate in a `@Transactional(propagation = REQUIRES_NEW)` method - that is the only way to ask for it |
 | A test-mode event never touches the live series | The mode is part of the series key, not a filter |
 | Invoicing does not stop on 1 January | A new fiscal year's series row is opened inside the allocation transaction, so an application last restarted in November keeps working |
 | The series cannot silently change format | The counter is refused at the last number the configured width can render |

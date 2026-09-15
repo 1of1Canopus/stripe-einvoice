@@ -28,6 +28,9 @@ Do not write "gap-free" in a README, a docs page, a release note or a sales page
 | Control | Where |
 |---|---|
 | Row-lock allocation in the issuance transaction | `UPDATE einvoice_series ... RETURNING`, no `SEQUENCE`, no `nextval`, no `@GeneratedValue` |
+| The allocation belongs to the caller's unit of work | Called inside a Spring transaction, it joins that transaction: the caller's rollback takes the number and the counter with it. Called outside one, it opens and commits its own. A caller-owned connection in auto-commit mode, and a read-only caller transaction, are refused by name rather than half-executed |
+| A caller cannot commit what we half-wrote | A failure after this module's first statement marks the caller's transaction rollback-only, so catching a typed refusal and committing anyway raises instead of recording a counter with no issuance row |
+| The two locks cannot deadlock | Nothing takes the chain's advisory lock before the series counter's row lock; a transaction that already holds the chain lock is refused the series row lock, by a ledger scoped to that transaction |
 | One Stripe invoice, one number | `UNIQUE (seller_id, mode, stripe_invoice_id)`, with a resume-by-source read first and the constraint as the backstop |
 | No duplicate number, including across a fiscal-year boundary | `UNIQUE (seller_id, series, fiscal_year, mode, legal_number)` within one year, **and** a required `{fiscalYear}` placeholder in a resetting series' prefix, resolved once at the row's creation, so two different years' rows never render the same string in the first place |
 | Test events out of the live series | `mode` in the series primary key, resolved from Stripe's own `livemode`, never from metadata |
@@ -51,6 +54,13 @@ Do not write "gap-free" in a README, a docs page, a release note or a sales page
 - **An unkeyed chain.** `einvoice.chain.unkeyed=true` exists, WARNs at every startup, and makes the
   verifier report `INTACT_UNKEYED` - never `INTACT`. Anyone who can write a row can then recompute
   every hash after it.
+- **A caller that asks for the number to survive its own rollback.**
+  `@Transactional(propagation = REQUIRES_NEW)` around an allocation suspends the caller's
+  transaction, so the number is kept when the caller rolls back. That is the only supported way to
+  ask for it, it is per call rather than application-wide, and the result is an allocated, open
+  number that the series report lists as open until it is disposed of.
+- **JTA and XA.** Out of scope and untested: a single JDBC `DataSource` is the supported
+  deployment. A JTA transaction manager in the context WARNs at every startup.
 - **Backups and replicas.** Nothing here reaches them.
 
 ## Secrets
