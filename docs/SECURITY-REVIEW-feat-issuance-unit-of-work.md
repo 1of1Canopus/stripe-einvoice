@@ -203,3 +203,147 @@ Three corrections, each with its probe. Pass 2 is the last pass on this branch.
    `probe_a_configured_intake_without_a_renderer_is_refused_loudly_not_silently`.
 3. **D2-03** - re-drive cured version-skew rows from the sweeper, and align the three documents.
    Probe `probe_a_version_skewed_event_is_re_picked_by_the_sweeper_after_the_pin_moves`.
+
+---
+
+## 2026-09-16 - pass 2 (final)
+
+Commit `a31bf4f`. Pass 2 of 2: no third pass.
+
+### Verdict
+
+**NOT MERGEABLE**, with a two-item fix list that closes without another review pass. The three pass-1
+findings are fixed and their probes are green, and the fixes are the right ones rather than the
+cheapest ones. The two items below are the same defect class as D2-01 reaching in through the one
+door the fix did not cover, and a one-line contradiction inside D2-02's own trigger.
+
+| Severity | Count | Ids |
+|---|---|---|
+| HIGH | 0 | - |
+| MEDIUM | 1 | D2-04 |
+| LOW | 1 | D2-05 |
+| INFO | 0 | - |
+
+Neither needs a design stop; both are corrections in one file each, with the probe named.
+
+### What was run
+
+| Check | Result |
+|---|---|
+| `./mvnw -B verify` | BUILD SUCCESS, 334 tests (242 core, 89 starter, 3 sample), coverage gates met |
+| `./mvnw -B clean verify -Prelease -Dgpg.skip=true`, sources-jar contents, reference guard on tree and release jars, licence gates | clean; release hygiene lines 1, 3 and 10 pass |
+| `CIPHER_PROBE_MAVEN=1 tools/cipher-probe-release-pipeline.sh` | 63 fixed, 0 weak |
+| Three mutations of my own | one passed, two failed: the two findings below |
+
+### The three pass-1 findings, re-verified
+
+- **D2-01 - fixed, and fixed well.** P1 and P4 are wrapped like the phases that already were. The
+  claim race is no longer a failure at all: the loser re-reads the winner's row and completes with
+  the winner's number, which is the honest shape and better than the failure state I would have
+  accepted. The backoff is granted only to the allocator codes that can improve with time, and a
+  series that is unconfigured or exhausted now gets no next attempt, which - given the due query
+  treats a null next attempt on a failure state as "not due" - is what makes it genuinely terminal.
+- **D2-02 - fixed.** The check runs unconditionally on the renderer and the validator, which is the
+  only place it could run, and the message names the missing bean type and the property that turns
+  the path off. The numbering-only host still starts, with one WARN naming what is missing.
+- **D2-03 - fixed, precisely.** The due query's new arm is `state = 'REFUSED_VERSION_SKEW' AND
+  api_version = ?` with the configured pin. I probed the negatives rather than the positive: a row
+  still skewed against the current pin, and a `REFUSED_MODE` row, are both absent from the due list
+  (`probe_the_cured_skew_predicate_picks_only_what_the_pin_actually_cured`, green). README, the docs
+  page and the security notes now describe exactly this and no more.
+
+### The re-plumbing flagged for this pass
+
+The note passed to me said that closing D2-01 moved the series-row ledger call to the head of the
+allocation unit of work and promoted the "has written" flag from a per-call holder onto the
+transaction-scoped ledger, touching three classes of the transaction port. **That did not happen on
+this branch.** `LockLedger`, `StatementTracking`, `AbstractJdbcUnitOfWork`, `SpringManagedUnitOfWork`
+and `JdbcUnitOfWork` are byte-identical to `main`; the fix for D2-01 is confined to the unit of work
+in the application layer. The work described is what landed on `main` as the pull request 1 pass-2
+fixes, and it is already reviewed.
+
+So the pull request 1 guarantees are inherited rather than re-implemented, and they hold here: the
+suspension unbind, the read-or-write classification at statement creation, the caller-owned unit's
+self-refusal and the lock-order invariant all have their probes in this tree and all are green in the
+run above, under both a data-source and a JPA transaction manager, including the `REQUIRES_NEW` case.
+Nothing in this change alters what runs inside those transactions in a way the probes do not cover.
+
+### D2-02's trigger predicate, examined
+
+"Configured" is `einvoice.stripe.webhook-secrets` non-empty **or**
+`environment.containsProperty("einvoice.issuance.enabled")` and the bound value is true.
+
+- **Accidental satisfaction:** not possible from the default. The property defaults to `true`, and
+  the check deliberately asks the environment whether anyone set it rather than reading the bound
+  default, so a host that never mentions it is never treated as having asked for the intake.
+- **A different property source:** covered. The secrets half reads the bound properties object, so
+  any source binds it - a YAML file, an environment variable, a command-line argument, a config
+  server; the flag half asks the `Environment`, which sees every property source including the
+  relaxed environment-variable form. There is no source that sets one of these and is invisible to
+  the check.
+- **One contradiction:** see D2-05.
+
+---
+
+#### D2-04 · MEDIUM · the two ports a host supplies are the two calls D2-01's fix did not wrap
+
+D2-01 wrapped every phase this module owns. The renderer and the validator are not owned by this
+module - in 0.1.0 they are *always* somebody else's code, since the writers are the next change - and
+they are called like this: `renderer.render(input)` inside a `catch (EInvoiceException)`, and
+`validator.validate(bytes, input)` inside no try at all. A host port that throws anything other than
+this module's own exception type - a null pointer, an illegal argument, an XML library's own runtime
+exception - leaves the method uncaught.
+
+The row is then `MAPPED`, with an empty code and no next attempt, which is exactly the state D2-01
+removed: the due query re-picks a `MAPPED` row with no next attempt immediately, so the event
+re-fetches from Stripe and re-renders on every sweep for ever, the `FAILED_*` retry ceiling never
+governs it because it never reaches a `FAILED_*` state, and the operator sees no code on the row.
+The one difference from D2-01 is the likelihood: this is the failure mode of third-party code, which
+is the one this module has least control over and most reason to expect.
+
+Checklist line 47 is the rule this breaks: a guard or infrastructure failure is caught at the module
+boundary and mapped to a stable, generic code, with the cause server-side only.
+
+**Repro.** `probe_a_host_validator_that_throws_is_recorded_like_any_other_phase_failure` - a
+validator that throws `IllegalStateException`; the row ends `MAPPED` with code `''`.
+
+**Required change.** Catch `RuntimeException`, not only this module's exception type, around both
+port calls - and around the archive calls in P3 for the same reason - and record
+`FAILED_ISSUANCE` with a stable generic code for an unmapped failure (the cause logged server-side,
+never in the row's code or in a message that reaches a caller). A renderer bug is not retryable in
+the sense an outage is, so no backoff: it needs a human, and a terminal state with a code is how this
+module says that. Probes: the one above, plus the same for a throwing renderer and a throwing
+archive store.
+
+---
+
+#### D2-05 · LOW · the remedy the refusal prints does not work when secrets are configured
+
+The fail-fast message ends with "set `einvoice.issuance.enabled=false` to run the numbering API
+only", and the docs page repeats it. It does not work: `intakeIsConfigured()` returns true from the
+webhook-secrets arm before the flag is ever consulted, so an application with secrets in its
+configuration and `einvoice.issuance.enabled=false` explicitly set still fails to start, with the
+message telling it to do the thing it has already done.
+
+This is the ordinary shape of a rollback or a shared configuration server: the secrets are in the
+config, the operator wants the numbering API only for now, and the module leaves no way out short of
+deleting the secrets.
+
+**Repro.** `probe_an_explicitly_disabled_intake_starts_even_with_secrets_configured` - the base
+wiring properties plus `einvoice.issuance.enabled=false` and no renderer; the context fails to start.
+
+**Required change.** One line at the head of `intakeIsConfigured()`: an explicit
+`einvoice.issuance.enabled=false` short-circuits to "not configured", whatever else is set. The WARN
+branch then covers it, which is the right outcome - the operator has said what they meant.
+
+### Fix list
+
+Two corrections, applied without a further review pass; merge when the build, the probe suite and
+the guards are green.
+
+1. **D2-04** - catch `RuntimeException` around the renderer, the validator and the archive calls and
+   record a terminal `FAILED_ISSUANCE` with a stable generic code. Probes
+   `probe_a_host_validator_that_throws_is_recorded_like_any_other_phase_failure`, one for a throwing
+   renderer, one for a throwing archive store.
+2. **D2-05** - an explicit `einvoice.issuance.enabled=false` short-circuits the intake check. Probe
+   `probe_an_explicitly_disabled_intake_starts_even_with_secrets_configured`.
