@@ -2,6 +2,8 @@ package com.housedevinci.einvoice.autoconfigure;
 
 import com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcSupport;
+import com.housedevinci.einvoice.domain.EInvoiceException;
+import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.LegalNumber;
 import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.SeriesDefinition;
@@ -49,6 +51,7 @@ public class EInvoiceStartupCheck implements InitializingBean {
 
   @Override
   public void afterPropertiesSet() {
+    refuseIfResettingSeriesLacksYearPlaceholder();
     JdbcSupport.requirePostgreSql(dataSource);
     if (properties.isInitializeSchema()) {
       JdbcSupport.initializeSchema(dataSource);
@@ -57,17 +60,43 @@ public class EInvoiceStartupCheck implements InitializingBean {
     // The tax zone is required and has no default, so an unknown id must fail here rather than on
     // the first invoice that crosses midnight.
     ZoneId zone = ZoneId.of(properties.getSeller().getTaxZone());
-    seedSeries(zone);
+    int fiscalYear = seedSeries(zone);
     warnAboutWeakerModes();
-    probeMaximumWidthNumber();
+    probeMaximumWidthNumber(fiscalYear);
+  }
+
+  /**
+   * D1-01. A series that restarts its counter every fiscal year must carry the year in its rendered
+   * number - a static prefix cannot promise "no two documents share a number" across a fiscal-year
+   * boundary, and an unattended service cannot be relied on to have someone re-edit the property
+   * every January anyway. Refused here, by name, rather than three years in on the first invoice
+   * that reuses a number.
+   */
+  private void refuseIfResettingSeriesLacksYearPlaceholder() {
+    if (properties.getNumbering().isFiscalYearReset() && !definition.hasYearPlaceholder()) {
+      throw new EInvoiceException(
+          ErrorCodes.CONFIG,
+          "einvoice.numbering.fiscal-year-reset=true but einvoice.numbering.prefix ('"
+              + definition.prefix()
+              + "') does not carry the "
+              + SeriesDefinition.YEAR_PLACEHOLDER
+              + " placeholder. Without it, the counter restarts at 1 every January while the"
+              + " rendered number stays the same, so the first invoice of the new year reuses the"
+              + " previous year's number. Add the placeholder (for example 'INV-"
+              + SeriesDefinition.YEAR_PLACEHOLDER
+              + "-') or set fiscal-year-reset=false for a continuous series.");
+    }
   }
 
   /**
    * Opens this year's series row if it does not exist. The allocator opens a new year's row itself,
    * inside the allocation transaction (N-01), so this is a convenience rather than the mechanism:
    * an application that was last restarted in November must not stop invoicing on 1 January.
+   *
+   * @return the fiscal year this seeded (or {@link SeriesKey#CONTINUOUS}), so the probe below logs
+   *     the same year rather than recomputing it a moment later
    */
-  private void seedSeries(ZoneId zone) {
+  private int seedSeries(ZoneId zone) {
     int fiscalYear =
         properties.getNumbering().isFiscalYearReset()
             ? clock.instant().atZone(zone).getYear()
@@ -78,6 +107,7 @@ public class EInvoiceStartupCheck implements InitializingBean {
             properties.getNumbering().getSeries(),
             fiscalYear,
             Mode.of(properties.getMode())));
+    return fiscalYear;
   }
 
   private void warnAboutWeakerModes() {
@@ -119,12 +149,13 @@ public class EInvoiceStartupCheck implements InitializingBean {
    * gap-freeness: the cheapest way to keep that residue small is to refuse a series that cannot
    * render its own last number.
    */
-  private void probeMaximumWidthNumber() {
-    LegalNumber probe = LegalNumber.probeOfMaximumWidth(definition);
+  private void probeMaximumWidthNumber(int fiscalYear) {
+    String resolvedPrefix = definition.resolvePrefix(fiscalYear);
+    LegalNumber probe = LegalNumber.probeOfMaximumWidth(resolvedPrefix, definition.width());
     log.info(
         "einvoice: numbering series {} renders {} .. {} (mode={})",
         properties.getNumbering().getSeries(),
-        LegalNumber.render(definition, 1).value(),
+        LegalNumber.render(resolvedPrefix, definition.width(), 1).value(),
         probe.value(),
         properties.getMode());
   }

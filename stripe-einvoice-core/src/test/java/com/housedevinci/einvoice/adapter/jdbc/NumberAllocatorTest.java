@@ -24,7 +24,7 @@ import org.junit.jupiter.api.Test;
 /** The allocator's own behaviour, against a real PostgreSQL. */
 class NumberAllocatorTest {
 
-  static final SeriesDefinition SIX = new SeriesDefinition("INV-2026-", 6, true);
+  static final SeriesDefinition SIX = new SeriesDefinition("INV-{fiscalYear}-", 6, true);
   static final Instant JANUARY = Instant.parse("2026-01-15T10:00:00Z");
   static final Clock CLOCK = Clock.fixed(JANUARY, ZoneOffset.UTC);
   static final IssuanceChain CHAIN =

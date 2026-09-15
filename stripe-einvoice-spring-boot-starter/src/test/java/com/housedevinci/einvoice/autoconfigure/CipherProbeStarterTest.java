@@ -71,7 +71,7 @@ class CipherProbeStarterTest {
               "einvoice.mode=test",
               "einvoice.seller.id=" + seller,
               "einvoice.seller.tax-zone=Europe/Paris",
-              "einvoice.numbering.prefix=TEST-2026-",
+              "einvoice.numbering.prefix=TEST-{fiscalYear}-",
               "einvoice.chain.hmac-secret=" + TEST_SECRET,
               "einvoice.chain.hmac-key-id=k1")
           .run(
@@ -106,7 +106,7 @@ class CipherProbeStarterTest {
           .withPropertyValues(
               "einvoice.seller.id=" + seller,
               "einvoice.seller.tax-zone=Europe/Paris",
-              "einvoice.numbering.prefix=INV-2026-",
+              "einvoice.numbering.prefix=INV-{fiscalYear}-",
               "einvoice.chain.unkeyed=true")
           .run(
               context -> {

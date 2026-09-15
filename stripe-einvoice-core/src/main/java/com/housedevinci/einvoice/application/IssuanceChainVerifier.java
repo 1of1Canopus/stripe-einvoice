@@ -200,9 +200,27 @@ public final class IssuanceChainVerifier {
         0);
   }
 
+  // D1-02: keyed on the row's identity - seller, mode, series, fiscal year, source object id,
+  // legal number and state - not merely on seller|mode|number|state. That narrower key let one
+  // legitimate chained event vouch for every row that happened to share those four values,
+  // including a forged, already-disposed row inserted out of band in a different fiscal year.
   private long countUnchained(Set<String> chained) {
     return reader.disposedIssuances().stream()
-        .map(d -> d.sellerId() + "|" + d.mode() + "|" + d.legalNumber() + "|" + d.state())
+        .map(
+            d ->
+                d.sellerId()
+                    + "|"
+                    + d.mode()
+                    + "|"
+                    + d.series()
+                    + "|"
+                    + d.fiscalYear()
+                    + "|"
+                    + d.stripeInvoiceId()
+                    + "|"
+                    + d.legalNumber()
+                    + "|"
+                    + d.state())
         .filter(key -> !chained.contains(key))
         .count();
   }
@@ -211,6 +229,12 @@ public final class IssuanceChainVerifier {
     return e.seriesKey().sellerId()
         + "|"
         + e.seriesKey().mode().wire()
+        + "|"
+        + e.seriesKey().series()
+        + "|"
+        + e.seriesKey().fiscalYear()
+        + "|"
+        + e.stripeInvoiceId()
         + "|"
         + e.legalNumber().value()
         + "|"

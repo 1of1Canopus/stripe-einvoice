@@ -44,5 +44,12 @@ public final class ErrorCodes {
   /** The issuance chain did not verify. */
   public static final String CHAIN_BROKEN = "DEI-116";
 
+  /**
+   * An allocation gave up waiting for the series row's lock (SQLState {@code 55P03}), distinct from
+   * a general store outage: the database answered, another allocation is simply ahead of this one
+   * (D1-05).
+   */
+  public static final String ALLOCATION_TIMEOUT = "DEI-117";
+
   private ErrorCodes() {}
 }

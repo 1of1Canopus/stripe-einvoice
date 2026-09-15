@@ -24,7 +24,7 @@ einvoice:
     tax-zone: Europe/Paris
   numbering:
     series: DEFAULT
-    prefix: INV-2026-
+    prefix: "INV-{fiscalYear}-"
     width: 6
   chain:
     # Environment only. head -c 32 /dev/urandom | base64

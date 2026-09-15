@@ -26,7 +26,9 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -81,15 +83,22 @@ public final class JdbcIssuanceStore
           + " (seller_id, series, fiscal_year, mode, prefix, width, next_number, updated_at)"
           + " VALUES (?,?,?,?,?,?,1,?) ON CONFLICT DO NOTHING";
 
+  // D1-03: the bound and the rendered value both come from the row's own prefix and width, never
+  // from the configured definition, so an edited property cannot silently change the format of a
+  // live series. D1-01: the row's prefix was resolved from the year placeholder once, at the row's
+  // creation, so it already differs per fiscal year - the allocator does not need to know that
+  // here.
   static final String ALLOCATE =
       "UPDATE einvoice_series SET next_number = next_number + 1, updated_at = ?"
           + " WHERE seller_id = ? AND series = ? AND fiscal_year = ? AND mode = ?"
-          + " AND next_number <= ?"
-          + " RETURNING next_number - 1";
+          + " AND next_number <= (power(10, width)::bigint - 1)"
+          + " RETURNING next_number - 1, prefix, width";
 
   static final String READ_SERIES =
       "SELECT prefix, width, next_number FROM einvoice_series"
           + " WHERE seller_id = ? AND series = ? AND fiscal_year = ? AND mode = ?";
+
+  private static final String SET_LOCK_TIMEOUT_PREFIX = "SET LOCAL lock_timeout = '";
 
   static final String INSERT_ISSUANCE =
       "INSERT INTO einvoice_issuance (seller_id, mode, stripe_invoice_id, stripe_account_id,"
@@ -106,10 +115,14 @@ public final class JdbcIssuanceStore
           + " WHERE seller_id = ? AND series = ? AND fiscal_year = ? AND mode = ?"
           + " ORDER BY counter";
 
+  /** D1-05's default when a caller does not configure one, matching the property's own default. */
+  public static final Duration DEFAULT_ALLOCATION_TIMEOUT = Duration.ofSeconds(5);
+
   private final DataSource dataSource;
   private final IssuanceChain chain;
   private final Map<SeriesId, SeriesDefinition> series;
   private final Clock clock;
+  private final Duration allocationTimeout;
 
   /** The configuration key of a series, before a fiscal year is known. */
   public record SeriesId(String sellerId, String series, Mode mode) {}
@@ -119,10 +132,20 @@ public final class JdbcIssuanceStore
       IssuanceChain chain,
       Map<SeriesId, SeriesDefinition> series,
       Clock clock) {
+    this(dataSource, chain, series, clock, DEFAULT_ALLOCATION_TIMEOUT);
+  }
+
+  public JdbcIssuanceStore(
+      DataSource dataSource,
+      IssuanceChain chain,
+      Map<SeriesId, SeriesDefinition> series,
+      Clock clock,
+      Duration allocationTimeout) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     this.chain = Objects.requireNonNull(chain, "chain");
     this.series = Map.copyOf(series);
     this.clock = Objects.requireNonNull(clock, "clock");
+    this.allocationTimeout = Objects.requireNonNull(allocationTimeout, "allocationTimeout");
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -136,19 +159,47 @@ public final class JdbcIssuanceStore
     return JdbcSupport.inTransaction(
         dataSource,
         c -> {
-          // Resume, never re-allocate. A row in any state returns its existing number; only a miss
-          // reaches the counter.
-          Optional<Issuance> existing =
-              findBySource(c, key.sellerId(), key.mode(), request.stripeInvoiceId(), true);
-          if (existing.isPresent()) {
-            return existing.get();
+          // D1-05: bounds how long this transaction will wait on the series row's lock, so a
+          // blocked allocation gives up with a typed refusal rather than joining an unbounded
+          // queue.
+          setLockTimeout(c);
+          try {
+            // Resume, never re-allocate. A row in any state returns its existing number; only a
+            // miss reaches the counter.
+            Optional<Issuance> existing =
+                findBySource(c, key.sellerId(), key.mode(), request.stripeInvoiceId(), true);
+            if (existing.isPresent()) {
+              return existing.get();
+            }
+            createSeriesRowForNewFiscalYear(c, key, definition);
+            LegalNumber number = nextNumber(c, key, definition);
+            Instant allocatedAt = Timestamps.toStorage(clock.instant());
+            return insertIssuance(c, request, number, allocatedAt);
+          } catch (SQLException e) {
+            if ("55P03".equals(e.getSQLState())) {
+              throw new EInvoiceException(
+                  ErrorCodes.ALLOCATION_TIMEOUT,
+                  "this allocation waited longer than einvoice.numbering.allocation-timeout ("
+                      + allocationTimeout
+                      + ") for the series row's lock and gave up rather than join an unbounded"
+                      + " queue",
+                  e);
+            }
+            throw e;
           }
-          createSeriesRowForNewFiscalYear(c, key, definition);
-          long counter = nextCounter(c, key, definition);
-          LegalNumber number = LegalNumber.render(definition, counter);
-          Instant allocatedAt = Timestamps.toStorage(clock.instant());
-          return insertIssuance(c, request, number, allocatedAt);
         });
+  }
+
+  /**
+   * {@code SET LOCAL} does not accept a bind parameter for its value - PostgreSQL parses it before
+   * the extended-protocol parameter substitution applies - so the milliseconds are rendered into
+   * the statement text. The value is our own validated {@link Duration}, never request input, so
+   * this is not a concatenation of anything an attacker or a buyer ever supplies.
+   */
+  private void setLockTimeout(Connection c) throws SQLException {
+    try (Statement st = c.createStatement()) {
+      st.execute(SET_LOCK_TIMEOUT_PREFIX + allocationTimeout.toMillis() + "ms'");
+    }
   }
 
   private SeriesDefinition definitionFor(SeriesKey key) {
@@ -175,6 +226,12 @@ public final class JdbcIssuanceStore
    * new year of a configured series it is 1, so concurrent creators agree by construction and
    * {@code ON CONFLICT DO NOTHING} settles the rest.
    */
+  /**
+   * D1-01. The prefix stored on the row is the template's placeholder substituted <em>for this
+   * fiscal year</em>, resolved once, here, at the row's creation - never re-resolved later. That is
+   * what makes two documents of one seller unable to share a number across a fiscal-year boundary:
+   * the 2026 row and the 2027 row carry different, concrete prefixes from the moment either exists.
+   */
   private void createSeriesRowForNewFiscalYear(
       Connection c, SeriesKey key, SeriesDefinition definition) throws SQLException {
     try (PreparedStatement ps = c.prepareStatement(CREATE_SERIES_ROW)) {
@@ -183,7 +240,7 @@ public final class JdbcIssuanceStore
       ps.setString(i++, key.series());
       ps.setInt(i++, key.fiscalYear());
       ps.setString(i++, key.mode().wire());
-      ps.setString(i++, definition.prefix());
+      ps.setString(i++, definition.resolvePrefix(key.fiscalYear()));
       ps.setInt(i++, definition.width());
       ps.setObject(i, ts(Timestamps.toStorage(clock.instant())));
       if (ps.executeUpdate() > 0) {
@@ -197,7 +254,13 @@ public final class JdbcIssuanceStore
     }
   }
 
-  private long nextCounter(Connection c, SeriesKey key, SeriesDefinition definition)
+  /**
+   * D1-03. Renders from the row's own {@code prefix} and {@code width}, read in the same statement
+   * as the counter, never from today's configured {@link SeriesDefinition}: the row is immutable on
+   * those two columns once it exists (the trigger says so), so this is the only way the rendered
+   * format cannot drift from what a restart with an edited property would otherwise produce.
+   */
+  private LegalNumber nextNumber(Connection c, SeriesKey key, SeriesDefinition definition)
       throws SQLException {
     try (PreparedStatement ps = c.prepareStatement(ALLOCATE)) {
       int i = 1;
@@ -205,14 +268,13 @@ public final class JdbcIssuanceStore
       ps.setString(i++, key.sellerId());
       ps.setString(i++, key.series());
       ps.setInt(i++, key.fiscalYear());
-      ps.setString(i++, key.mode().wire());
-      // N-02: the bound is in the statement, so the counter is never consumed past what the
-      // configured width can render. A number that silently gets wider is a format change to a
-      // legal series, and widening it is an operator's decision, never the allocator's.
-      ps.setLong(i, definition.lastRenderableNumber());
+      ps.setString(i, key.mode().wire());
       try (ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
-          return rs.getLong(1);
+          long counter = rs.getLong(1);
+          String prefix = rs.getString(2);
+          int width = rs.getInt(3);
+          return LegalNumber.render(prefix, width, counter);
         }
       }
     }
@@ -309,8 +371,57 @@ public final class JdbcIssuanceStore
         dataSource,
         c -> {
           createSeriesRowForNewFiscalYear(c, key, definition);
+          refuseIfRowDisagreesWithConfiguration(c, key, definition);
           return null;
         });
+  }
+
+  /**
+   * D1-03. Only the startup path compares the row against today's configuration - the allocator
+   * itself never does (a probe rebuilding the store with an edited definition must still render
+   * from the existing row, not be refused by it). An operator who edits {@code
+   * einvoice.numbering.prefix} or {@code .width} for a series that already has a row and restarts
+   * gets a named refusal here, rather than a silently ignored property.
+   */
+  private void refuseIfRowDisagreesWithConfiguration(
+      Connection c, SeriesKey key, SeriesDefinition definition) throws SQLException {
+    String expectedPrefix = definition.resolvePrefix(key.fiscalYear());
+    try (PreparedStatement ps = c.prepareStatement(READ_SERIES)) {
+      int i = 1;
+      ps.setString(i++, key.sellerId());
+      ps.setString(i++, key.series());
+      ps.setInt(i++, key.fiscalYear());
+      ps.setString(i, key.mode().wire());
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          return;
+        }
+        String rowPrefix = rs.getString(1);
+        int rowWidth = rs.getInt(2);
+        if (!expectedPrefix.equals(rowPrefix) || rowWidth != definition.width()) {
+          throw new EInvoiceException(
+              ErrorCodes.CONFIG,
+              "einvoice.numbering for seller="
+                  + key.sellerId()
+                  + " series="
+                  + key.series()
+                  + " year="
+                  + key.fiscalYear()
+                  + " mode="
+                  + key.mode().wire()
+                  + " resolves to prefix="
+                  + expectedPrefix
+                  + " width="
+                  + definition.width()
+                  + ", but the existing series row already carries prefix="
+                  + rowPrefix
+                  + " width="
+                  + rowWidth
+                  + ". Both are immutable once a series exists (a legal number's format cannot"
+                  + " change mid-series); revert the property or start a new series name.");
+        }
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -566,15 +677,25 @@ public final class JdbcIssuanceStore
         dataSource,
         c -> {
           List<DisposedIssuance> disposed = new ArrayList<>();
+          // D1-02: the full row identity, not just seller|mode|legal_number|state, so a forged row
+          // in a different series, fiscal year or with a different source id cannot be vouched for
+          // by a legitimate event that merely happens to share the number and the state.
           try (PreparedStatement ps =
                   c.prepareStatement(
-                      "SELECT seller_id, mode, legal_number, state FROM einvoice_issuance"
+                      "SELECT seller_id, mode, series, fiscal_year, stripe_invoice_id,"
+                          + " legal_number, state FROM einvoice_issuance"
                           + " WHERE state IN ('ISSUED', 'VOID_UNUSED') ORDER BY id");
               ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
               disposed.add(
                   new DisposedIssuance(
-                      rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)));
+                      rs.getString(1),
+                      rs.getString(2),
+                      rs.getString(3),
+                      rs.getInt(4),
+                      rs.getString(5),
+                      rs.getString(6),
+                      rs.getString(7)));
             }
           }
           return disposed;
@@ -614,12 +735,23 @@ public final class JdbcIssuanceStore
         new LegalNumber(rs.getString("legal_number"), rs.getLong("counter")),
         instant(rs.getObject("issued_at", OffsetDateTime.class)),
         instant(rs.getObject("allocated_at", OffsetDateTime.class)),
-        rs.getString("document_sha256"),
+        documentHash(rs),
         rs.getString("archive_key"),
         rs.getString("rule_pack_version"),
         IssuanceState.of(rs.getString("state")),
         rs.getString("void_reason"),
         rs.getString("void_rule_id"));
+  }
+
+  /**
+   * D1-08. {@code document_sha256} is {@code char(64)}, which blank-pads an unset value to sixty-
+   * four spaces on read; the in-memory value object's unset spelling is {@code ""}. One logical
+   * value must have one spelling at the single point that builds it, before either spelling can
+   * reach hashed material or a public reader.
+   */
+  private static String documentHash(ResultSet rs) throws SQLException {
+    String value = rs.getString("document_sha256");
+    return value == null ? "" : value.strip();
   }
 
   private static IssuanceEvent readEvent(ResultSet rs) throws SQLException {
@@ -639,7 +771,7 @@ public final class JdbcIssuanceStore
         new LegalNumber(rs.getString("legal_number"), rs.getLong("counter")),
         IssuanceState.of(rs.getString("state")),
         instant(rs.getObject("issued_at", OffsetDateTime.class)),
-        rs.getString("document_sha256"),
+        documentHash(rs),
         rs.getString("archive_key"),
         rs.getString("rule_pack_version"),
         rs.getString("void_reason"),

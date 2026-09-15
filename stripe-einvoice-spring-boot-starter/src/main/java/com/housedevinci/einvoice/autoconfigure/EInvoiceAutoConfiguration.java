@@ -89,7 +89,8 @@ public class EInvoiceAutoConfiguration {
             properties.getNumbering().getSeries(),
             Mode.of(properties.getMode())),
         definition);
-    return new JdbcIssuanceStore(dataSource, chain, series, clock);
+    return new JdbcIssuanceStore(
+        dataSource, chain, series, clock, properties.getNumbering().getAllocationTimeout());
   }
 
   @Bean

@@ -44,7 +44,7 @@ class EInvoiceAutoConfigurationTest {
     return new String[] {
       "einvoice.seller.id=" + seller,
       "einvoice.seller.tax-zone=Europe/Paris",
-      "einvoice.numbering.prefix=INV-2026-",
+      "einvoice.numbering.prefix=INV-{fiscalYear}-",
       "einvoice.chain.hmac-secret=" + TEST_SECRET,
       "einvoice.chain.hmac-key-id=k1"
     };
@@ -77,7 +77,7 @@ class EInvoiceAutoConfigurationTest {
     runner(
             "einvoice.seller.id=" + seller,
             "einvoice.seller.tax-zone=Europe/Paris",
-            "einvoice.numbering.prefix=INV-2026-")
+            "einvoice.numbering.prefix=INV-{fiscalYear}-")
         .run(
             context -> {
               assertThat(context).hasFailed();
@@ -95,7 +95,7 @@ class EInvoiceAutoConfigurationTest {
     runner(
             "einvoice.seller.id=" + seller,
             "einvoice.seller.tax-zone=Europe/Paris",
-            "einvoice.numbering.prefix=INV-2026-",
+            "einvoice.numbering.prefix=INV-{fiscalYear}-",
             "einvoice.chain.unkeyed=true",
             "einvoice.chain.hmac-secret=" + TEST_SECRET)
         .run(
@@ -134,7 +134,7 @@ class EInvoiceAutoConfigurationTest {
     runner(
             "einvoice.seller.id=" + seller,
             "einvoice.seller.tax-zone=Mars/Olympus",
-            "einvoice.numbering.prefix=INV-2026-",
+            "einvoice.numbering.prefix=INV-{fiscalYear}-",
             "einvoice.chain.hmac-secret=" + TEST_SECRET,
             "einvoice.chain.hmac-key-id=k1")
         .run(context -> assertThat(context).hasFailed());
