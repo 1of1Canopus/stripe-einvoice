@@ -93,6 +93,21 @@ All notable changes to this project are documented here. The format follows
 - A caller-owned unit of work that fails after writing, and refuses every further call on that unit
   (`DEI-121`) rather than attempting to roll back a connection it does not own, is now covered by a
   test.
+- The claim (P1) and the issue (P4) phases of the issuance unit of work now record a state and a
+  code on every stop, like every other phase already did. A refusal from either used to leave the
+  inbound row `MAPPED` with no code and no recorded attempt, so the sweeper re-picked it forever and
+  the retry ceiling was never reached. The loser of a claim race - `invoice.finalized` and
+  `invoice.paid` arriving together, the normal case - is now recorded `COMPLETED` with the winner's
+  number, re-read rather than guessed at, instead of landing in that state.
+- An application with `einvoice.stripe.webhook-secrets` configured (or `einvoice.issuance.enabled`
+  set explicitly) and no `DocumentRenderer` or `DocumentValidator` bean now fails startup by name,
+  naming the missing bean and the property that turns the pipeline off. It used to start with no
+  endpoint, no sweeper and no signal at any log level. A host with neither signal present still
+  starts quietly, with one WARN.
+- The sweeper now re-picks a `REFUSED_VERSION_SKEW` row once the currently configured API version
+  pin equals what that row recorded, matching what the README, the docs page and the security notes
+  already promised. It previously never re-picked a refused row at all; `REFUSED_MODE` and
+  `REFUSED_ACCOUNT` are still never re-picked automatically, since neither is cured by an upgrade.
 
 ### Notes
 
