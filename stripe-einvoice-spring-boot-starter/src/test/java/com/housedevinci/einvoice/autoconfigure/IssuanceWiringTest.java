@@ -147,6 +147,30 @@ class IssuanceWiringTest {
                     .hasMessageContaining("einvoice.issuance.enabled=false"));
   }
 
+  /**
+   * A YAML file offering an environment variable with a fallback - {@code api-key:
+   * ${EINVOICE_STRIPE_KEY:}}, which is the only way YAML can express it and what this project's own
+   * sample does - makes the property PRESENT and blank. "Present" used to be enough to build the
+   * Stripe client, which then threw "einvoice.stripe.api-key is required" and took down a host that
+   * had asked for the numbering API only.
+   */
+  @Test
+  void a_blank_api_key_is_no_api_key_and_does_not_fail_a_numbering_only_host() {
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithoutSource.class)
+        .withPropertyValues(noIntakeConfigured())
+        .withPropertyValues("einvoice.issuance.enabled=false", "einvoice.stripe.api-key=")
+        .run(
+            context ->
+                assertThat(context)
+                    .hasNotFailed()
+                    .doesNotHaveBean(StripeInvoiceSource.class)
+                    .hasSingleBean(IssuanceNumberingService.class));
+  }
+
   // D2-02
   @Test
   void probe_a_configured_intake_without_a_renderer_is_refused_loudly_not_silently() {

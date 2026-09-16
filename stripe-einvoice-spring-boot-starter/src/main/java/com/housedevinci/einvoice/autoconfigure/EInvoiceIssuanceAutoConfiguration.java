@@ -33,6 +33,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.core.env.Environment;
 
 /**
@@ -288,11 +289,18 @@ public class EInvoiceIssuanceAutoConfiguration {
         findings, properties.getSeller().getId(), Mode.of(properties.getMode()));
   }
 
-  /** The Stripe SDK client, when the SDK is on the classpath and an API key is configured. */
+  /**
+   * The Stripe SDK client, when the SDK is on the classpath and an API key is configured.
+   *
+   * <p>{@link StripeApiKeyCondition} rather than {@code @ConditionalOnProperty}: a YAML file that
+   * offers an environment variable with a fallback ({@code api-key: ${EINVOICE_STRIPE_KEY:}}) makes
+   * the property present and blank, and "present" was enough to run this factory and throw at
+   * startup in a host that only wanted the numbering API.
+   */
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnClass(name = "com.stripe.StripeClient")
-  @ConditionalOnProperty(prefix = "einvoice.stripe", name = "api-key")
+  @Conditional(StripeApiKeyCondition.class)
   public StripeInvoiceSource einvoiceStripeInvoiceSource(EInvoiceProperties properties) {
     return StripeClientFactory.create(properties);
   }

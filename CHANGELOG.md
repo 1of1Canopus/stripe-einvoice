@@ -39,6 +39,14 @@ All notable changes to this project are documented here. The format follows
   application with a webhook secret and no `einvoice.stripe.api-key` started with an endpoint that
   recorded events nothing would ever fetch, number or archive. It is now refused by name at startup,
   with the same remedy as the other two.
+- **A blank `einvoice.stripe.api-key` took down a numbering-only host.** A YAML file that offers an
+  environment variable with a fallback makes the property present and blank, which was enough to
+  build the Stripe client and throw "einvoice.stripe.api-key is required" at startup. Blank is now
+  no key; an application that *is* configured to receive events and has no reader is still refused
+  by name.
+- **The sample declared no Stripe SDK**, so the documented `spring-boot:run` could never wire an
+  authoritative reader whatever key was exported. It declares it now, and the refusal message names
+  both ways that bean comes to exist.
 - **The quick start did not work from a clean clone.** `cd stripe-einvoice-sample && ../mvnw
   spring-boot:run` cannot resolve its sibling modules; the README now installs first, and leads with
   the one command that produces a validated Peppol document and a validated XRechnung from a clean
