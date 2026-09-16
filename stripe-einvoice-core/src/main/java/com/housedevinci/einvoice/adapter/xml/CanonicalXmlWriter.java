@@ -279,10 +279,11 @@ public final class CanonicalXmlWriter {
   /**
    * Refuses text or an attribute value this writer cannot canonicalise instead of writing it raw or
    * substituting it: a C0 control character other than tab, line feed or carriage return, an
-   * unpaired UTF-16 surrogate, or an XML 1.0 non-character (D3-01). {@link IllegalArgumentException}
-   * because these are programming errors on the caller's part; {@code ScreenedText} in the domain
-   * package already refuses all three, and more, before any value reaches this class through the
-   * production path. This is the second line of defence for a caller that does not go through it.
+   * unpaired UTF-16 surrogate, or an XML 1.0 non-character (D3-01). {@link
+   * IllegalArgumentException} because these are programming errors on the caller's part; {@code
+   * ScreenedText} in the domain package already refuses all three, and more, before any value
+   * reaches this class through the production path. This is the second line of defence for a caller
+   * that does not go through it.
    */
   private static void requireValidText(String s) {
     int i = 0;

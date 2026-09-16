@@ -61,9 +61,9 @@ class VendoredArtefactAttributionTest {
   /**
    * The unit PROVENANCE.md and NOTICE actually attribute at: the bare file name for a schematron
    * stylesheet (each one is named individually in both documents, sometimes without its directory
-   * prefix - "Files: CEN-EN16931-UBL.xslt ..." - so the file name is the strongest substring
-   * common to every mention), or the shared {@code ubl/2.1/} prefix for the OASIS schema set,
-   * fifteen files both documents attribute as one group under one licence rather than by name.
+   * prefix - "Files: CEN-EN16931-UBL.xslt ..." - so the file name is the strongest substring common
+   * to every mention), or the shared {@code ubl/2.1/} prefix for the OASIS schema set, fifteen
+   * files both documents attribute as one group under one licence rather than by name.
    */
   private static String attributionGroup(String path) {
     if (path.startsWith("ubl/2.1/")) {
@@ -74,8 +74,8 @@ class VendoredArtefactAttributionTest {
   }
 
   private static String read(String classpathResource) {
-    try (InputStream in = VendoredArtefactAttributionTest.class.getResourceAsStream(
-        classpathResource)) {
+    try (InputStream in =
+        VendoredArtefactAttributionTest.class.getResourceAsStream(classpathResource)) {
       assertThat(in).as("%s must be on the test classpath", classpathResource).isNotNull();
       return new String(in.readAllBytes(), StandardCharsets.UTF_8);
     } catch (IOException e) {
