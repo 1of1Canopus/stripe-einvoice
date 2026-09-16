@@ -31,11 +31,13 @@ class CipherProbeStarterTest {
               "einvoice-test-chain-secret-0002!".getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
   @Test
-  void cipher_probe_the_module_auto_configures_no_http_endpoint_at_all() {
-    // N-04. This module is a library and cannot authenticate anyone, so it ships no endpoint - and
-    // above all no void endpoint, which would hand an unauthenticated caller a way to burn a
-    // numbering series one number at a time. The host writes that endpoint itself, behind its own
-    // authorization, and the docs say so in one line.
+  void cipher_probe_the_only_endpoint_this_module_maps_is_the_signed_webhook() {
+    // N-04, restated for the endpoint this pull request adds. The module is a library and cannot
+    // authenticate anyone, so it maps exactly one HTTP endpoint: the Stripe webhook, whose
+    // authentication is an HMAC over the exact bytes it received. Everything privileged - voiding
+    // a number, acknowledging a finding - stays a service method the host exposes behind its own
+    // authorization, because an auto-configured one would hand an unauthenticated caller a way to
+    // burn a series or to silence every alert.
     List<String> webAnnotated =
         sources()
             .filter(
@@ -46,12 +48,36 @@ class CipherProbeStarterTest {
                       || text.contains("@RequestMapping")
                       || text.contains("@GetMapping")
                       || text.contains("@PostMapping")
-                      || text.contains("@Endpoint")
-                      || text.contains("@WebEndpoint");
+                      || text.contains("@DeleteMapping")
+                      || text.contains("@PutMapping");
                 })
-            .map(Path::toString)
+            .map(path -> path.getFileName().toString())
             .toList();
-    assertThat(webAnnotated).isEmpty();
+    assertThat(webAnnotated).containsExactly("StripeWebhookController.java");
+
+    String controller =
+        read(
+            Path.of(
+                "src/main/java/com/housedevinci/einvoice/autoconfigure/StripeWebhookController.java"));
+    assertThat(controller).contains("@PostMapping").doesNotContain("@GetMapping");
+    assertThat(controller.split("@PostMapping", -1).length - 1).isEqualTo(1);
+
+    // Actuator endpoints are a surface the host already protects, and the one this module adds is
+    // a read. A write operation there would be the void endpoint by another name.
+    List<String> actuatorEndpoints =
+        sources()
+            .filter(path -> read(path).contains("@Endpoint") || read(path).contains("@WebEndpoint"))
+            .map(path -> path.getFileName().toString())
+            .toList();
+    assertThat(actuatorEndpoints).containsExactly("IssuanceFindingsEndpoint.java");
+    String endpoint =
+        read(
+            Path.of(
+                "src/main/java/com/housedevinci/einvoice/autoconfigure/IssuanceFindingsEndpoint.java"));
+    assertThat(endpoint)
+        .contains("@ReadOperation")
+        .doesNotContain("@WriteOperation")
+        .doesNotContain("@DeleteOperation");
   }
 
   @Test
@@ -128,22 +154,33 @@ class CipherProbeStarterTest {
 
   @Test
   void cipher_probe_no_log_line_in_this_module_carries_a_buyer_field() {
-    // Checklist line 45. There is no buyer field in this pull request's model yet, and that is
-    // exactly when to pin it: the mapper arrives next, and the first log line that prints a
-    // customer name will be written by someone debugging at four in the afternoon.
+    // Checklist line 45. A message built from constants and field *names* is what this module is
+    // supposed to produce - "stripe field: customer_name" tells an operator what to fix and quotes
+    // nobody. What is refused is a buyer's *value* reaching a log line or a message: the accessors
+    // below interpolated into either.
+    java.util.regex.Pattern valueInAMessage =
+        java.util.regex.Pattern.compile(
+            "(?s)(log\\.[a-z]+\\(|EInvoiceException\\(|\"\\s*\\+\\s*)[^;]{0,400}?"
+                + "(getCustomerName|getCustomerEmail|getCustomerAddress|\\bbuyer\\(\\)|"
+                + "customerName\\(\\)|customerEmail\\(\\)|\\.description\\(\\))");
     List<String> offenders =
         sources()
             .filter(
                 path -> {
-                  String text = read(path).toLowerCase(java.util.Locale.ROOT);
-                  return text.contains("log.info(\"einvoice: customer")
-                      || text.contains("customer_name")
-                      || text.contains("customeremail")
-                      || text.contains("buyername");
+                  String text = read(path);
+                  // The mapper reads those accessors; what it may not do is put their result in a
+                  // message. Lines that only *call* them are fine, so the match has to see the
+                  // accessor inside a log or exception argument.
+                  return valueInAMessage.matcher(withoutComments(text)).find();
                 })
             .map(Path::toString)
             .toList();
     assertThat(offenders).isEmpty();
+  }
+
+  /** Comments explain at length which Stripe fields exist; that prose is not a log line. */
+  private static String withoutComments(String source) {
+    return source.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("(?m)//.*$", "");
   }
 
   private static Stream<Path> sources() {

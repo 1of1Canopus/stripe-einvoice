@@ -64,6 +64,8 @@ public final class JdbcSupport {
       "SELECT to_regclass('einvoice_series') IS NOT NULL"
           + " AND to_regclass('einvoice_issuance') IS NOT NULL"
           + " AND to_regclass('einvoice_issuance_event') IS NOT NULL"
+          + " AND to_regclass('einvoice_inbound_event') IS NOT NULL"
+          + " AND to_regclass('einvoice_finding') IS NOT NULL"
           + " AND to_regclass('einvoice_issuance_anchor') IS NOT NULL"
           + " AND EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'einvoice_series_guard')"
           + " AND EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'einvoice_issuance_guard')"

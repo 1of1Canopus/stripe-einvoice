@@ -4,6 +4,7 @@ import com.housedevinci.einvoice.domain.Issuance;
 import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.SeriesKey;
 import com.housedevinci.einvoice.domain.SeriesReport;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -18,4 +19,12 @@ public interface IssuanceReader {
 
   /** Every number allocated in the series, with its disposition and the open count. */
   SeriesReport seriesReport(SeriesKey seriesKey);
+
+  /**
+   * Every issuance row of one series, newest number first.
+   *
+   * <p>Reconciliation reads whole rows rather than the report's lines: it needs the archive key and
+   * the content hash, which are what the archive directions of the sweep compare against.
+   */
+  List<Issuance> inSeries(SeriesKey seriesKey, int limit);
 }

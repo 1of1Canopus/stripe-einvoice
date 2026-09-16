@@ -21,7 +21,8 @@ import org.springframework.context.annotation.Bean;
 @ConditionalOnClass(SanitizingFunction.class)
 public class EInvoiceActuatorAutoConfiguration {
 
-  static final Set<String> SECRET_PROPERTIES = Set.of("einvoice.chain.hmac-secret");
+  static final Set<String> SECRET_PROPERTIES =
+      Set.of("einvoice.chain.hmac-secret", "einvoice.stripe.api-key");
 
   private static final Set<String> SECRET_NAMES =
       SECRET_PROPERTIES.stream()
@@ -29,6 +30,14 @@ public class EInvoiceActuatorAutoConfiguration {
           .collect(Collectors.toUnmodifiableSet());
 
   private static final String HMAC_KEYS_PREFIX = squash("einvoice.chain.hmac-keys");
+
+  /**
+   * The webhook signing keyring is a map, so its property names carry an operator-chosen id and
+   * cannot be listed one by one. The prefix is named here for the same reason the chain's is: the
+   * framework's name sanitisation happens to catch "secret" today, which is a fact about English
+   * words rather than a control.
+   */
+  private static final String WEBHOOK_SECRETS_PREFIX = squash("einvoice.stripe.webhook-secrets");
 
   private static String squash(String name) {
     return name.toLowerCase(Locale.ROOT).replace(".", "").replace("-", "").replace("_", "");
@@ -45,7 +54,9 @@ public class EInvoiceActuatorAutoConfiguration {
       // form (EINVOICE_CHAIN_HMAC_SECRET) are all the same string here, whichever form the
       // reporting property source used.
       String normalised = squash(key);
-      if (SECRET_NAMES.contains(normalised) || normalised.startsWith(HMAC_KEYS_PREFIX)) {
+      if (SECRET_NAMES.contains(normalised)
+          || normalised.startsWith(HMAC_KEYS_PREFIX)
+          || normalised.startsWith(WEBHOOK_SECRETS_PREFIX)) {
         return data.withValue("******");
       }
       return data;

@@ -30,6 +30,18 @@ einvoice:
     # Environment only. head -c 32 /dev/urandom | base64
     hmac-secret: ${EINVOICE_CHAIN_SECRET}
     hmac-key-id: k1
+  stripe:
+    # Environment only, and a different secret from the chain's: one proves a request came from
+    # Stripe, the other proves our own record was not rewritten afterwards.
+    webhook-secrets:
+      primary: ${EINVOICE_WEBHOOK_SECRET}
+    # A restricted, read-scoped key. This module never writes to Stripe. Leave it unset and the
+    # sample runs without an authoritative source, which means it issues nothing.
+    api-key: ${EINVOICE_STRIPE_KEY:}
+  archive:
+    # The legal originals. A directory here, an S3-compatible bucket in production.
+    type: filesystem
+    root: ${EINVOICE_ARCHIVE_ROOT:./target/einvoice-archive}
 
 logging:
   level:

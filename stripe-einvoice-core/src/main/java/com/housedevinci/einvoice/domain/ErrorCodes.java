@@ -77,5 +77,124 @@ public final class ErrorCodes {
    */
   public static final String UNIT_OF_WORK_POISONED = "DEI-121";
 
+  // -------------------------------------------------------------------------------------------
+  // DEI-2xx - the issuance unit of work: intake, routing, fetch, mapping, archive, validation.
+  // -------------------------------------------------------------------------------------------
+
+  /** A body arrived that is not provably from Stripe, or whose identity fields do not parse. */
+  public static final String INBOUND_UNREADABLE = "DEI-200";
+
+  /** The event's {@code api_version} is not the pinned one this module was written against. */
+  public static final String API_VERSION_SKEW = "DEI-201";
+
+  /** A test-mode event reached a live-mode application, or the reverse (D-01). */
+  public static final String MODE_MISMATCH = "DEI-202";
+
+  /** The event's {@code account} resolves to no configured seller. Never a default seller. */
+  public static final String UNKNOWN_ACCOUNT = "DEI-203";
+
+  /** A collection was still reporting more pages after the last one was read (D-02). */
+  public static final String TRUNCATED_COLLECTION = "DEI-204";
+
+  /** An event type this module does not subscribe to. Recorded, then dropped. */
+  public static final String UNSUBSCRIBED_EVENT_TYPE = "DEI-205";
+
+  /** No active webhook secret verified the signature over the exact received bytes. */
+  public static final String SIGNATURE_INVALID = "DEI-206";
+
+  /** The invoice's fiscal year closed longer ago than {@code closed-year-cutoff} allows. */
+  public static final String CLOSED_FISCAL_YEAR = "DEI-207";
+
+  /** The request body is larger than {@code einvoice.webhook.max-body-bytes}. */
+  public static final String BODY_TOO_LARGE = "DEI-208";
+
+  /** The request's content type is not JSON. */
+  public static final String UNSUPPORTED_CONTENT_TYPE = "DEI-209";
+
+  /** A transition outside the set the inbound state machine declares. */
+  public static final String INBOUND_ILLEGAL_TRANSITION = "DEI-210";
+
+  /** Stripe was unreachable, rate-limited or answered 5xx. An outage, never a verdict. */
+  public static final String STRIPE_UNAVAILABLE = "DEI-211";
+
+  /** The re-fetched invoice is not finalised yet: parked, retried, never invented. */
+  public static final String INVOICE_NOT_FINALISED = "DEI-212";
+
+  /** The re-fetched invoice is void and this module never issued a document for it. */
+  public static final String UPSTREAM_VOID_NOT_ISSUED = "DEI-213";
+
+  /** Our recomputation of a total or of a tax bucket disagrees with Stripe's own (D-12). */
+  public static final String TOTALS_MISMATCH = "DEI-220";
+
+  /** A field EN 16931 requires is absent after the authoritative re-fetch. */
+  public static final String MAPPING_INCOMPLETE = "DEI-221";
+
+  /** An amount or a percentage is outside the magnitude or scale this module will carry. */
+  public static final String AMOUNT_OUT_OF_BOUNDS = "DEI-222";
+
+  /** The archived bytes no longer hash to the {@code document_sha256} recorded with them. */
+  public static final String ARCHIVED_DOCUMENT_TAMPERED = "DEI-230";
+
+  /** An invoice was voided in Stripe after this module issued its document. */
+  public static final String VOID_AFTER_ISSUE_NEEDS_CREDIT_NOTE = "DEI-231";
+
+  /** The archive key exists with different bytes. An alert, never an overwrite. */
+  public static final String ARCHIVE_CONTENT_CONFLICT = "DEI-240";
+
+  /** The archive store is unreachable. Retryable until the retry ceiling. */
+  public static final String ARCHIVE_UNAVAILABLE = "DEI-241";
+
+  /** The archive store cannot create an object only if it is absent, and is refused (I-06). */
+  public static final String ARCHIVE_NOT_ATOMIC = "DEI-242";
+
+  /**
+   * A host-supplied {@code ArchiveStore} threw something other than this module's own exception
+   * type (D2-04, checklist line 47). The cause is logged server-side only; this code is what the
+   * row and any caller ever see. Terminal, not retryable: a host port's own bug does not improve by
+   * running again.
+   */
+  public static final String ARCHIVE_FAILED = "DEI-243";
+
+  /** The exact bytes did not pass validation. The failing rule id is recorded. */
+  public static final String VALIDATION_REFUSED = "DEI-250";
+
+  /** A validation could not run. Never PASSED by construction (checklist lines 18 and 57). */
+  public static final String VALIDATION_NOT_EVALUATED = "DEI-251";
+
+  /**
+   * A host-supplied {@code DocumentValidator} threw something other than this module's own
+   * exception type (D2-04, checklist line 47). The cause is logged server-side only. Terminal, not
+   * retryable, for the same reason {@link #ARCHIVE_FAILED} is.
+   */
+  public static final String VALIDATOR_FAILED = "DEI-252";
+
+  /** The issuance worker is at capacity. The event stays RECEIVED and the sweeper takes it. */
+  public static final String WORKER_SATURATED = "DEI-260";
+
+  /**
+   * A document renderer failed on input that mapping had already accepted - including an unexpected
+   * {@code RuntimeException} from a host-supplied renderer, not only this module's own exception
+   * type (D2-04, checklist line 47). The cause is logged server-side only. Terminal, not retryable.
+   */
+  public static final String RENDER_FAILED = "DEI-261";
+
+  /** A finalised Stripe invoice has no issuance row at all. The finding D-09 exists for. */
+  public static final String RECON_MISSING_ISSUANCE = "DEI-270";
+
+  /** An {@code ISSUED} row names an archive object that is not there. */
+  public static final String RECON_ARCHIVE_MISSING = "DEI-271";
+
+  /** An archived document no longer hashes to what its row recorded. */
+  public static final String RECON_ARCHIVE_DRIFT = "DEI-275";
+
+  /** An archive object that no {@code ISSUED} row predicted. Alerted, never deleted. */
+  public static final String RECON_ORPHAN_OBJECT = "DEI-272";
+
+  /** A number allocated and open past {@code einvoice.issuance.alert-after}. */
+  public static final String RECON_STUCK_ISSUANCE = "DEI-273";
+
+  /** Reconciliation has not completed within two intervals. No result is never "healthy". */
+  public static final String RECON_STALE = "DEI-274";
+
   private ErrorCodes() {}
 }

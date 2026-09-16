@@ -19,9 +19,55 @@
       <artifactId>slf4j-api</artifactId>
     </dependency>
 
+    <!--
+      Optional, and the artifact is useless to a host that does not archive to S3. The S3 adapter
+      is the only class that touches it, the starter wires it @ConditionalOnClass, and a host that
+      archives to a filesystem never sees the transitive tree. The Netty and Apache HTTP clients
+      are excluded: one sync client is what a conditional PUT needs, and the other two are several
+      megabytes of transitive surface for nothing.
+    -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+      <optional>true</optional>
+      <exclusions>
+        <exclusion>
+          <groupId>software.amazon.awssdk</groupId>
+          <artifactId>netty-nio-client</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>software.amazon.awssdk</groupId>
+          <artifactId>apache-client</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>software.amazon.awssdk</groupId>
+          <artifactId>apache5-client</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>url-connection-client</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <!--
+      Optional for the same reason: a host that supplies its own StripeInvoiceSource takes no SDK
+      at all. The signature check is ours (WebhookSignature) and needs nothing from it.
+    -->
+    <dependency>
+      <groupId>com.stripe</groupId>
+      <artifactId>stripe-java</artifactId>
+      <optional>true</optional>
+    </dependency>
+
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-minio</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>

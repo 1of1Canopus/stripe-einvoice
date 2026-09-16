@@ -8,6 +8,30 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The issuance unit of work.** One Stripe event is driven to one archived document or to none,
+  with a record either way: a durable inbound record written before any routing decision, an
+  authoritative re-fetch of every field a document carries, a totals recomputation compared against
+  the upstream's own scalars, the legal number, the exact bytes, a write-once archive write and a
+  chained disposition - in four phases whose crash behaviour is stated and tested one test per row.
+- **A Stripe webhook endpoint.** The signature is verified over the exact bytes received against a
+  keyring, the body is capped by counting as it is read rather than by believing a header, and the
+  response contract splits on whether the request is provably from Stripe: 400 for what cannot be
+  attributed, 200 for everything recorded - including the refusals - and 503 only when the record
+  could not be made durable.
+- **An intake state machine** with signature-valid refusals as terminal states that keep their
+  bodies and replay once an API version pin is updated.
+- **Write-once archiving**, content-addressed, on a filesystem or an S3-compatible store, with the
+  store's capability probed at startup by a real conditional write rather than taken on trust.
+- **A reconciliation sweep and a compliance findings list**, both in the free core: a finalised
+  sale with no document is found and re-enqueued through the same idempotent path, an archived
+  document that is missing or no longer hashes to its record is reported, and every finding is
+  acknowledgeable with a recorded reason and never deleted.
+- **An operational health contributor** in a group of its own, outside `readiness` and `liveness`.
+- **A retention for the raw webhook bodies**: nulled the moment an event can no longer run, purged
+  at the configured ceiling.
+- **`einvoice.numbering.closed-year-cutoff`**, deferred from the previous change: when it is set, a
+  late invoice from a fiscal year that closed longer ago is refused and reported rather than
+  numbered into a period already declared.
 - **The legal numbering series.** Per-seller, per-series, per-fiscal-year, per-mode, with row-lock
   allocation (`UPDATE ... RETURNING`) inside the transaction that inserts the issuance row. One
   Stripe invoice maps to one number for all time, enforced by a unique constraint rather than by
@@ -69,6 +93,28 @@ All notable changes to this project are documented here. The format follows
 - A caller-owned unit of work that fails after writing, and refuses every further call on that unit
   (`DEI-121`) rather than attempting to roll back a connection it does not own, is now covered by a
   test.
+- The claim (P1) and the issue (P4) phases of the issuance unit of work now record a state and a
+  code on every stop, like every other phase already did. A refusal from either used to leave the
+  inbound row `MAPPED` with no code and no recorded attempt, so the sweeper re-picked it forever and
+  the retry ceiling was never reached. The loser of a claim race - `invoice.finalized` and
+  `invoice.paid` arriving together, the normal case - is now recorded `COMPLETED` with the winner's
+  number, re-read rather than guessed at, instead of landing in that state.
+- An application with `einvoice.stripe.webhook-secrets` configured (or `einvoice.issuance.enabled`
+  set explicitly) and no `DocumentRenderer` or `DocumentValidator` bean now fails startup by name,
+  naming the missing bean and the property that turns the pipeline off. It used to start with no
+  endpoint, no sweeper and no signal at any log level. A host with neither signal present still
+  starts quietly, with one WARN.
+- The sweeper now re-picks a `REFUSED_VERSION_SKEW` row once the currently configured API version
+  pin equals what that row recorded, matching what the README, the docs page and the security notes
+  already promised. It previously never re-picked a refused row at all; `REFUSED_MODE` and
+  `REFUSED_ACCOUNT` are still never re-picked automatically, since neither is cured by an upgrade.
+- An unexpected exception from a host-supplied `DocumentRenderer`, `DocumentValidator` or
+  `ArchiveStore` is now recorded as a terminal, non-retryable failure with a stable generic code
+  instead of leaving the inbound row `MAPPED` forever with no code and no recorded attempt. The
+  cause is logged server-side only, never returned to a caller.
+- An explicit `einvoice.issuance.enabled=false` is now honoured even when a webhook secret is
+  otherwise configured, so the fail-fast startup refusal's own remedy - setting that property -
+  actually works.
 
 ### Notes
 

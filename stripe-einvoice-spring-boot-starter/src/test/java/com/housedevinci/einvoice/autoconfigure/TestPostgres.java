@@ -10,7 +10,7 @@ import javax.sql.DataSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 /** One PostgreSQL container for the starter's tests too, started once and reused. */
-final class TestPostgres {
+public final class TestPostgres {
 
   private static final PostgreSQLContainer<?> CONTAINER =
       new PostgreSQLContainer<>(
@@ -22,7 +22,7 @@ final class TestPostgres {
 
   private TestPostgres() {}
 
-  static synchronized DataSource dataSource() {
+  public static synchronized DataSource dataSource() {
     if (dataSource == null) {
       CONTAINER.start();
       HikariConfig config = new HikariConfig();
@@ -36,7 +36,7 @@ final class TestPostgres {
     return dataSource;
   }
 
-  static long count(String sql) {
+  public static long count(String sql) {
     try (Connection c = dataSource().getConnection();
         Statement st = c.createStatement();
         var rs = st.executeQuery(sql)) {
@@ -46,7 +46,7 @@ final class TestPostgres {
     }
   }
 
-  static void execute(String sql) {
+  public static void execute(String sql) {
     try (Connection c = dataSource().getConnection();
         Statement st = c.createStatement()) {
       st.execute(sql);

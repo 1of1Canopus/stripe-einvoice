@@ -23,10 +23,24 @@ class CipherProbeActuatorTest {
   }
 
   @Test
+  void probe_the_stripe_secrets_are_excluded_by_name() {
+    // The webhook keyring is the only thing between the internet and the document generator, and
+    // the API key reads every invoice on the account. Both are named here rather than left to the
+    // framework's habit of sanitising properties whose names contain an English word.
+    assertThat(sanitize("einvoice.stripe.api-key", "rk_live_x")).isEqualTo("******");
+    assertThat(sanitize("EINVOICE_STRIPE_API_KEY", "rk_live_x")).isEqualTo("******");
+    assertThat(sanitize("einvoice.stripe.webhook-secrets.primary", "whsec_x")).isEqualTo("******");
+    assertThat(sanitize("EINVOICE_STRIPE_WEBHOOK_SECRETS_PRIMARY", "whsec_x")).isEqualTo("******");
+    assertThat(sanitize("einvoice.stripe.webhook-secrets.retiring", "whsec_y")).isEqualTo("******");
+  }
+
+  @Test
   void a_harmless_property_is_left_alone() {
     assertThat(sanitize("einvoice.numbering.prefix", "INV-{fiscalYear}-"))
         .isEqualTo("INV-{fiscalYear}-");
     assertThat(sanitize("einvoice.mode", "live")).isEqualTo("live");
+    assertThat(sanitize("einvoice.stripe.api-version", "2026-08-26.dahlia"))
+        .isEqualTo("2026-08-26.dahlia");
   }
 
   private Object sanitize(String key, String value) {
