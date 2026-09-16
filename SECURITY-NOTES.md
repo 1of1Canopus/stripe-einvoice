@@ -179,6 +179,16 @@ module is where that is set out.
   a bug in a host's own port does not improve by running again, and a stack trace never reaches a
   caller. This is deliberately narrower than "the process crashed": an `Error` still propagates
   uncaught, exactly as before.
+- **A buyer-controlled mapped field that fails screening is refused after the allocator has already
+  run (D3-01).** The screening function and the canonical XML writer refuse a value no XML 1.0
+  parser could read - the non-characters, alongside the C0 controls and unpaired surrogates they
+  already refused - but that refusal happens during rendering, in the phase after a legal number is
+  allocated, not before it. The cost is one legal number, recorded as a chained `FAILED_ISSUANCE`
+  disposition with the rule id, visible in the series report and closable by an operator void - the
+  same shape as every other data-dependent mapping refusal this module already accepts, and bounded
+  by the buyer's own purchases rather than open-ended. A pre-allocation check that closes this before
+  the number is spent is planned as its own change (QUESTIONS 22): it needs a new port method called
+  before phase 1, which is a mechanism this fix pass does not build.
 
 ## Reporting
 

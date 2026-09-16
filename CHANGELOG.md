@@ -163,7 +163,11 @@ All notable changes to this project are documented here. The format follows
   pass as C0 controls and unpaired surrogates. A buyer-controlled field carrying one of these
   ordinary-looking code points used to survive both checks and produce bytes no XML 1.0 parser
   could read, discovered only after this module's own schema stage refused to re-read what it had
-  just written. Legal C1 controls continue to pass.
+  just written; nothing unparseable can leave this module now. Legal C1 controls continue to pass.
+  The refusal still happens after a legal number has been allocated, so it costs one number with a
+  recorded, chained failed disposition and an operator void, exactly like every other data-dependent
+  mapping refusal this module already accepts - see SECURITY-NOTES.md's residual risks. Closing that
+  before the allocator runs is planned as its own change (QUESTIONS 22).
 - An application whose configured validator can never actually run at all (no XSLT 2.0 processor
   on the classpath, in this module's own implementation) now refuses before the allocator and, when
   the issuance path is wired, at startup - rather than discovering the same application-wide fact
