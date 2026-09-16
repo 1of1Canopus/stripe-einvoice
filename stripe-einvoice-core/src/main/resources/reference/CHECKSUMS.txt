@@ -1,6 +1,12 @@
-# SHA-256 of every vendored artefact, recomputed on every build by VendoredArtefactsTest.
+# SHA-256 of every vendored artefact, recomputed on every build by CipherProbeDocumentsTest.
 # Provenance, release tag, retrieval date and licence per file: PROVENANCE.md
-c69bd7849a35fc3e14f1bdc303e08a2dfe5df3e54b6654e31f6a173e8107cc73  PROVENANCE.md
+# PROVENANCE.md is itself in this list: it is the evidence for everything else, so editing it
+# without regenerating the manifest turns the build red on purpose. Regenerate with:
+#   cd stripe-einvoice-core/src/main/resources/reference && find . -type f | sort \
+#     | grep -v CHECKSUMS | while read f; do \
+#         echo "$(shasum -a 256 "$f" | cut -d' ' -f1)  ${f#./}"; done
+# and put the two comment lines above back at the top.
+de9ec68053ba8e89f7ff8a193dcebcaee2edfb2e4708a7b9689be85db7fbb353  PROVENANCE.md
 759f2d2e830c7fd1d5a6e8b4f61e5dbafc7a7805862c4ae1c749eeac6adde698  schematron/en16931/EN16931-UBL-validation.xsl
 a8a54aef3699057a3820cd2ebcac8ea3c364a6ebaf4a237e62064a5bc2877c4a  schematron/peppol/CEN-EN16931-UBL.xslt
 8c6b935b1bc0bb17d29d949b0aa27ecc62021b613b9fba173cd6bfec6b3f0008  schematron/peppol/PEPPOL-EN16931-UBL.xslt
