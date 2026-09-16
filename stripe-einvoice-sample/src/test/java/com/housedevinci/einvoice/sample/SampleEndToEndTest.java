@@ -73,6 +73,10 @@ class SampleEndToEndTest {
 
   @Autowired com.housedevinci.einvoice.application.ArchiveStore archive;
 
+  @Autowired com.housedevinci.einvoice.application.DocumentValidator validator;
+
+  @Autowired com.housedevinci.einvoice.application.StripeInvoiceSource source;
+
   @Test
   void a_stripe_invoice_gets_a_number_a_void_is_recorded_and_the_report_explains_the_series()
       throws Exception {
@@ -142,14 +146,91 @@ class SampleEndToEndTest {
         archive
             .get(new com.housedevinci.einvoice.domain.ArchiveKey(issuance.archiveKey()))
             .orElseThrow();
-    org.assertj.core.api.Assertions.assertThat(new String(archived, StandardCharsets.UTF_8))
-        .describedAs("the sample's own placeholder, which no tool may mistake for EN 16931")
-        .contains("<PlaceholderDocument>")
-        .contains(issuance.legalNumber().value())
-        .doesNotContain("<Invoice>");
+    String xml = new String(archived, StandardCharsets.UTF_8);
+    org.assertj.core.api.Assertions.assertThat(xml)
+        .describedAs("the archived original is a Peppol BIS Billing 3.0 UBL invoice")
+        .startsWith("<Invoice ")
+        .contains(
+            "<cbc:CustomizationID>urn:cen.eu:en16931:2017#compliant#"
+                + "urn:fdc:peppol.eu:2017:poacc:billing:3.0</cbc:CustomizationID>")
+        .contains("<cbc:ID>" + issuance.legalNumber().value() + "</cbc:ID>");
     org.assertj.core.api.Assertions.assertThat(
             com.housedevinci.einvoice.domain.Hashes.sha256Hex(archived))
         .isEqualTo(issuance.documentSha256());
+
+    // The bytes that were archived are the bytes the official rules accepted (checklist line 15),
+    // re-checked here from the archive rather than from anything the renderer still held.
+    org.assertj.core.api.Assertions.assertThat(validator.validate(archived, null).verdict())
+        .isEqualTo(com.housedevinci.einvoice.application.DocumentValidator.Verdict.PASSED);
+  }
+
+  /**
+   * The same authoritative invoice, rendered and validated as XRechnung as well.
+   *
+   * <p>Only one document is <b>archived</b>: one profile per application, one legal original per
+   * invoice. This shows the second profile is a call away - which is what a reader evaluating the
+   * module wants to see - without inventing a second original under one number, which would be a
+   * mechanism nobody designed.
+   */
+  @Test
+  void the_same_invoice_also_renders_a_validator_clean_xrechnung() throws Exception {
+    com.housedevinci.einvoice.application.SourceInvoice invoice =
+        source.fetchInvoice("in_xrechnung_demo");
+    com.housedevinci.einvoice.application.DocumentInput input =
+        new com.housedevinci.einvoice.application.DocumentInput(
+            invoice,
+            new com.housedevinci.einvoice.domain.SeriesKey(
+                "acme-fr", "DEFAULT", 2026, com.housedevinci.einvoice.domain.Mode.LIVE),
+            new com.housedevinci.einvoice.domain.LegalNumber("INV-2026-000900", 900L),
+            java.time.LocalDate.of(2026, 2, 1),
+            "sample");
+
+    com.housedevinci.einvoice.adapter.xml.UblProfile profile =
+        com.housedevinci.einvoice.adapter.xml.UblProfile.XRECHNUNG_UBL;
+    com.housedevinci.einvoice.domain.en16931.SellerProfile seller = sampleSellerForXrechnung();
+    byte[] bytes =
+        new com.housedevinci.einvoice.adapter.en16931.En16931DocumentRenderer(seller, profile, null)
+            .render(input)
+            .bytes();
+    try (com.housedevinci.einvoice.adapter.validation.En16931DocumentValidator xrechnung =
+        new com.housedevinci.einvoice.adapter.validation.En16931DocumentValidator(
+            profile,
+            com.housedevinci.einvoice.adapter.validation.SecureXml.DEFAULT_XSLT2_PROCESSOR,
+            java.time.Duration.ofSeconds(60),
+            1)) {
+      org.assertj.core.api.Assertions.assertThat(xrechnung.validate(bytes, input).verdict())
+          .isEqualTo(com.housedevinci.einvoice.application.DocumentValidator.Verdict.PASSED);
+    }
+    java.nio.file.Path out =
+        java.nio.file.Path.of(
+            System.getProperty("java.io.tmpdir"), "einvoice-sample-xrechnung.xml");
+    java.nio.file.Files.write(out, bytes);
+    org.assertj.core.api.Assertions.assertThat(out).exists();
+  }
+
+  /**
+   * The sample's seller with the extra fields XRechnung's BR-DE-* rules require beyond Peppol's:
+   * this is what the properties would carry if the sample issued German documents.
+   */
+  private static com.housedevinci.einvoice.domain.en16931.SellerProfile sampleSellerForXrechnung() {
+    com.housedevinci.einvoice.domain.en16931.Party party =
+        new com.housedevinci.einvoice.domain.en16931.Party(
+            "Atelier Riviere SAS",
+            null,
+            new com.housedevinci.einvoice.domain.en16931.PostalAddress(
+                "12 rue des Lilas", null, "Lyon", "69003", null, "FR"),
+            com.housedevinci.einvoice.domain.en16931.VatIdentifier.parse(
+                "einvoice.seller.vat-id", "FR25900000019"),
+            null,
+            new com.housedevinci.einvoice.domain.en16931.PartyIdentifier("0002", "900000019"),
+            new com.housedevinci.einvoice.domain.en16931.PartyIdentifier("9957", "FR25900000019"),
+            new com.housedevinci.einvoice.domain.en16931.Contact(
+                "Comptabilite", "+33 4 72 00 00 00", "factures@atelier-riviere.invalid"));
+    return new com.housedevinci.einvoice.domain.en16931.SellerProfile(
+        party,
+        new com.housedevinci.einvoice.domain.en16931.PaymentInstruction(
+            "58", "FR7630006000011234567890189", "Atelier Riviere SAS", null),
+        "BON-DE-COMMANDE-9912");
   }
 
   private static String signature(byte[] body) throws Exception {
@@ -191,16 +272,19 @@ class SampleEndToEndTest {
                   "75001",
                   "Example City",
                   "FR",
-                  "FR00000000000"),
+                  "FR68900000001"),
               java.util.List.of(
                   new com.housedevinci.einvoice.application.SourceInvoice.SourceLine(
-                      "il_1", "One month of service", "txr_20", 10_000, 12_000)),
+                      "il_1", "One month of service", "txr_20", 1L, 10_000, 12_000)),
               java.util.List.of(
                   new com.housedevinci.einvoice.domain.Totals.Bucket(
                       "txr_20",
                       com.housedevinci.einvoice.domain.Percentage.of("20"),
                       false,
                       2_000)),
+              java.util.List.of(
+                  new com.housedevinci.einvoice.application.SourceInvoice.SourceTaxTreatment(
+                      "txr_20", "FR", "vat", "standard_rated")),
               10_000,
               2_000,
               12_000,

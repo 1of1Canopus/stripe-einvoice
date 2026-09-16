@@ -23,4 +23,24 @@ public final class TestValidators {
         new DocumentValidator.Report(
             DocumentValidator.Verdict.NOT_EVALUATED, ruleId, List.of("the schematron was absent"));
   }
+
+  /**
+   * A configuration that can never validate anything, ever - not this one invoice's problem, the
+   * application's (D3-02). {@code canValidate()} says so before phase 1 runs; {@code validate()}
+   * still reports {@code NOT_EVALUATED} for a caller that does not ask first.
+   */
+  public static DocumentValidator notEvaluatedNoProcessor(String ruleId) {
+    return new DocumentValidator() {
+      @Override
+      public DocumentValidator.Report validate(byte[] bytes, DocumentInput input) {
+        return new DocumentValidator.Report(
+            DocumentValidator.Verdict.NOT_EVALUATED, ruleId, List.of("no XSLT 2.0 processor"));
+      }
+
+      @Override
+      public boolean canValidate() {
+        return false;
+      }
+    };
+  }
 }

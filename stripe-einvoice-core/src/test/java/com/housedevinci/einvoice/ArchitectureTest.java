@@ -91,4 +91,49 @@ class ArchitectureTest {
                 "a legal date and a rendered number must not depend on where the container runs");
     rule.check(CLASSES);
   }
+
+  @Test
+  void document_generation_never_formats_through_the_default_locale() {
+    // Checklist line 17. String.format's one-argument overload takes Locale.getDefault(), so a
+    // single one of them in a writer makes the bytes depend on the machine - and the Thai-digit
+    // locale in GoldenDocumentTest is what would notice, long after the value was archived.
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAnyPackage(
+                "com.housedevinci.einvoice.adapter.xml..",
+                "com.housedevinci.einvoice.adapter.en16931..",
+                "com.housedevinci.einvoice.domain.en16931..")
+            .should()
+            .callMethod(String.class, "format", String.class, Object[].class)
+            .orShould()
+            .callMethod(java.util.TimeZone.class, "getDefault")
+            .orShould()
+            .callMethod(java.text.NumberFormat.class, "getInstance")
+            .orShould()
+            // The single-argument overload takes the default FORMAT locale. On an all-numeric
+            // pattern that happens to be harmless today, which is exactly why a byte comparison
+            // does not catch it and this rule has to: the day somebody adds MMM to a pattern, the
+            // month name becomes the machine's language and no golden file notices until then.
+            .callMethod(java.time.format.DateTimeFormatter.class, "ofPattern", String.class)
+            .because("the bytes of a legal document are the same bytes wherever they are produced");
+    rule.check(CLASSES);
+  }
+
+  @Test
+  void the_en16931_model_takes_no_marshaller_annotation() {
+    // D-25. The pull to annotate the model "just for the writer" is real and this is what says no:
+    // the canonical writer exists precisely so that prefixes, attribute order and empty-element
+    // form are ours rather than whichever Jakarta XML Bind implementation is on the classpath.
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.housedevinci.einvoice.domain.en16931..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAnyPackage(
+                "jakarta.xml..", "javax.xml..", "com.fasterxml..", "org.w3c..", "org.xml..")
+            .because("the EN 16931 model is a domain model, not a serialisation form");
+    rule.check(CLASSES);
+  }
 }

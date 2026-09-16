@@ -1,3 +1,4 @@
 com.housedevinci.einvoice.autoconfigure.EInvoiceAutoConfiguration
 com.housedevinci.einvoice.autoconfigure.EInvoiceActuatorAutoConfiguration
 com.housedevinci.einvoice.autoconfigure.EInvoiceIssuanceAutoConfiguration
+com.housedevinci.einvoice.autoconfigure.EInvoiceDocumentAutoConfiguration

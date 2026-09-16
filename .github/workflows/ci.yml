@@ -261,6 +261,16 @@ jobs:
                   continue
                   ;;
               esac
+              # The vendored EN 16931, XRechnung and Peppol validation artefacts and their
+              # checksum manifest. A PATH arm, exactly as the comment above requires, never an
+              # extension arm: admitting "*.xsd" or "*.txt" would re-admit whatever else ever
+              # carries that extension, including generated build output (RP-3). These are module
+              # resources under the module's own package root, so they belong in a sources jar the
+              # same way any other resource does; their provenance and checksums are in
+              # com/housedevinci/einvoice/reference/PROVENANCE.md and CHECKSUMS.txt.
+              case "$entry" in
+                com/housedevinci/einvoice/reference/*) continue ;;
+              esac
               case "$entry" in
                 *.java)                    continue ;;
                 *.properties|*.yml|*.yaml|*.json|*.sql|*.factories|*.imports) continue ;;

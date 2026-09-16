@@ -46,6 +46,7 @@ public class EInvoiceProperties {
   @Valid @NotNull private final Archive archive = new Archive();
   @Valid @NotNull private final Inbound inbound = new Inbound();
   @Valid @NotNull private final Reconcile reconcile = new Reconcile();
+  @Valid @NotNull private final Documents documents = new Documents();
 
   /**
    * The id and version of the rule pack an issued document was checked against, recorded on the row
@@ -84,6 +85,10 @@ public class EInvoiceProperties {
 
   public Reconcile getReconcile() {
     return reconcile;
+  }
+
+  public Documents getDocuments() {
+    return documents;
   }
 
   public String getMode() {
@@ -156,6 +161,369 @@ public class EInvoiceProperties {
 
     public void setStripeAccountId(String stripeAccountId) {
       this.stripeAccountId = stripeAccountId;
+    }
+
+    /**
+     * BT-27, the seller's registered name as it appears on the document. Required as soon as any
+     * document is rendered; a blank one fails startup rather than producing an invoice from nobody.
+     */
+    private String name = "";
+
+    /** BT-28, the trading name, when it differs from the registered one. */
+    private String tradingName = "";
+
+    /** BT-31, the VAT identifier, with its country prefix. Checked for shape and check digit. */
+    private String vatId = "";
+
+    /** BT-32, the local tax registration identifier, where the VAT identifier is not the one. */
+    private String taxRegistrationId = "";
+
+    /** BT-30, the legal registration identifier, and BT-30-1, the ISO 6523 scheme it is under. */
+    private String legalId = "";
+
+    /** ISO 6523 ICD. {@code 0002} is the French SIRENE register, {@code 0088} a GS1 location. */
+    private String legalIdScheme = "";
+
+    /** BT-34, the seller's electronic address. Mandatory for Peppol. */
+    private String electronicAddress = "";
+
+    /** BT-34-1, its scheme, from the Peppol EAS code list. Blank derives it from the VAT id. */
+    private String electronicAddressScheme = "";
+
+    @Valid @NotNull private final Address address = new Address();
+    @Valid @NotNull private final Contact contact = new Contact();
+    @Valid @NotNull private final Payment payment = new Payment();
+
+    public String getName() {
+      return name;
+    }
+
+    public void setName(String name) {
+      this.name = name;
+    }
+
+    public String getTradingName() {
+      return tradingName;
+    }
+
+    public void setTradingName(String tradingName) {
+      this.tradingName = tradingName;
+    }
+
+    public String getVatId() {
+      return vatId;
+    }
+
+    public void setVatId(String vatId) {
+      this.vatId = vatId;
+    }
+
+    public String getTaxRegistrationId() {
+      return taxRegistrationId;
+    }
+
+    public void setTaxRegistrationId(String taxRegistrationId) {
+      this.taxRegistrationId = taxRegistrationId;
+    }
+
+    public String getLegalId() {
+      return legalId;
+    }
+
+    public void setLegalId(String legalId) {
+      this.legalId = legalId;
+    }
+
+    public String getLegalIdScheme() {
+      return legalIdScheme;
+    }
+
+    public void setLegalIdScheme(String legalIdScheme) {
+      this.legalIdScheme = legalIdScheme;
+    }
+
+    public String getElectronicAddress() {
+      return electronicAddress;
+    }
+
+    public void setElectronicAddress(String electronicAddress) {
+      this.electronicAddress = electronicAddress;
+    }
+
+    public String getElectronicAddressScheme() {
+      return electronicAddressScheme;
+    }
+
+    public void setElectronicAddressScheme(String electronicAddressScheme) {
+      this.electronicAddressScheme = electronicAddressScheme;
+    }
+
+    public Address getAddress() {
+      return address;
+    }
+
+    public Contact getContact() {
+      return contact;
+    }
+
+    public Payment getPayment() {
+      return payment;
+    }
+  }
+
+  /** BG-5, the seller's postal address. Street, city and post code are mandatory for XRechnung. */
+  public static class Address {
+
+    private String line1 = "";
+    private String line2 = "";
+    private String city = "";
+    private String postalCode = "";
+    private String countrySubdivision = "";
+
+    /** BT-40, ISO 3166-1 alpha-2, validated against the JDK's own list rather than a pattern. */
+    private String country = "";
+
+    public String getLine1() {
+      return line1;
+    }
+
+    public void setLine1(String line1) {
+      this.line1 = line1;
+    }
+
+    public String getLine2() {
+      return line2;
+    }
+
+    public void setLine2(String line2) {
+      this.line2 = line2;
+    }
+
+    public String getCity() {
+      return city;
+    }
+
+    public void setCity(String city) {
+      this.city = city;
+    }
+
+    public String getPostalCode() {
+      return postalCode;
+    }
+
+    public void setPostalCode(String postalCode) {
+      this.postalCode = postalCode;
+    }
+
+    public String getCountrySubdivision() {
+      return countrySubdivision;
+    }
+
+    public void setCountrySubdivision(String countrySubdivision) {
+      this.countrySubdivision = countrySubdivision;
+    }
+
+    public String getCountry() {
+      return country;
+    }
+
+    public void setCountry(String country) {
+      this.country = country;
+    }
+  }
+
+  /** BG-6, the seller's contact point. All three fields are mandatory for XRechnung. */
+  public static class Contact {
+
+    private String name = "";
+    private String telephone = "";
+    private String email = "";
+
+    public String getName() {
+      return name;
+    }
+
+    public void setName(String name) {
+      this.name = name;
+    }
+
+    public String getTelephone() {
+      return telephone;
+    }
+
+    public void setTelephone(String telephone) {
+      this.telephone = telephone;
+    }
+
+    public String getEmail() {
+      return email;
+    }
+
+    public void setEmail(String email) {
+      this.email = email;
+    }
+  }
+
+  /**
+   * BG-16, the payment instructions. Mandatory for XRechnung (BR-DE-1).
+   *
+   * <p>The account identifier is validated as an IBAN, mod-97 check included, whenever the means
+   * code is a credit transfer: an IBAN with a transposed pair is a payment that does not arrive,
+   * printed on a legal document by us.
+   */
+  public static class Payment {
+
+    /** BT-81, UNTDID 4461. 58 is a SEPA credit transfer. */
+    private String meansCode = "58";
+
+    /** BT-84, the IBAN. */
+    private String accountId = "";
+
+    /** BT-85, the account holder's name. */
+    private String accountName = "";
+
+    /** BT-86, the BIC. */
+    private String serviceProviderId = "";
+
+    public String getMeansCode() {
+      return meansCode;
+    }
+
+    public void setMeansCode(String meansCode) {
+      this.meansCode = meansCode;
+    }
+
+    public String getAccountId() {
+      return accountId;
+    }
+
+    public void setAccountId(String accountId) {
+      this.accountId = accountId;
+    }
+
+    public String getAccountName() {
+      return accountName;
+    }
+
+    public void setAccountName(String accountName) {
+      this.accountName = accountName;
+    }
+
+    public String getServiceProviderId() {
+      return serviceProviderId;
+    }
+
+    public void setServiceProviderId(String serviceProviderId) {
+      this.serviceProviderId = serviceProviderId;
+    }
+  }
+
+  /**
+   * The document this application issues, and how it is judged.
+   *
+   * <p>One profile per application, and therefore one legal document per invoice - which is what
+   * the issuance unit of work archives. Rendering a second profile for the same invoice is a call
+   * on the renderer, not a second archived original; inventing a second original under one number
+   * would be a new mechanism and is deliberately absent.
+   */
+  public static class Documents {
+
+    /** {@code xrechnung-ubl} or {@code peppol-bis-ubl}. */
+    @NotBlank private String profile = "peppol-bis-ubl";
+
+    /**
+     * BT-10, the buyer reference. Mandatory for XRechnung (BR-DE-15); for a German public-sector
+     * buyer it is the Leitweg-ID the authority issued.
+     *
+     * <p>It comes from configuration and from nothing a buyer or a dashboard user can write.
+     * Reading it out of Stripe metadata or a checkout custom field would let a buyer-controlled
+     * value reach a business term, which needs an explicit allowlist mechanism the spec does not
+     * describe (D-10).
+     */
+    private String buyerReference = "";
+
+    /**
+     * BT-49, the buyer's electronic address, when it cannot be derived from the VAT identifier the
+     * invoice carries. Mandatory for Peppol (PEPPOL-EN16931-R010).
+     */
+    private String buyerElectronicAddress = "";
+
+    /** Its scheme, from the Peppol EAS code list. */
+    private String buyerElectronicAddressScheme = "";
+
+    /**
+     * The XSLT 2.0 processor class the vendored schematron is run with.
+     *
+     * <p>Not a dependency of this module: the only practical processor for the JVM is under a
+     * licence this repository's gate denies for anything it ships, so it is discovered by name.
+     * With none on the classpath the validator reports NOT_EVALUATED, which the issuance unit of
+     * work treats as a refusal - an application without a processor issues nothing rather than
+     * archiving a document no rule ever read.
+     */
+    @NotBlank private String xsltProcessor = "net.sf.saxon.TransformerFactoryImpl";
+
+    /** The wall-clock bound on one stylesheet run. A timeout is NOT_EVALUATED, never a pass. */
+    @NotNull private Duration validationTimeout = Duration.ofSeconds(60);
+
+    /** How many validations may run at once. Past it, a typed refusal rather than a queue. */
+    @Min(1)
+    @Max(32)
+    private int validationConcurrency = 2;
+
+    public String getProfile() {
+      return profile;
+    }
+
+    public void setProfile(String profile) {
+      this.profile = profile;
+    }
+
+    public String getBuyerReference() {
+      return buyerReference;
+    }
+
+    public void setBuyerReference(String buyerReference) {
+      this.buyerReference = buyerReference;
+    }
+
+    public String getBuyerElectronicAddress() {
+      return buyerElectronicAddress;
+    }
+
+    public void setBuyerElectronicAddress(String buyerElectronicAddress) {
+      this.buyerElectronicAddress = buyerElectronicAddress;
+    }
+
+    public String getBuyerElectronicAddressScheme() {
+      return buyerElectronicAddressScheme;
+    }
+
+    public void setBuyerElectronicAddressScheme(String buyerElectronicAddressScheme) {
+      this.buyerElectronicAddressScheme = buyerElectronicAddressScheme;
+    }
+
+    public String getXsltProcessor() {
+      return xsltProcessor;
+    }
+
+    public void setXsltProcessor(String xsltProcessor) {
+      this.xsltProcessor = xsltProcessor;
+    }
+
+    public Duration getValidationTimeout() {
+      return validationTimeout;
+    }
+
+    public void setValidationTimeout(Duration validationTimeout) {
+      this.validationTimeout = validationTimeout;
+    }
+
+    public int getValidationConcurrency() {
+      return validationConcurrency;
+    }
+
+    public void setValidationConcurrency(int validationConcurrency) {
+      this.validationConcurrency = validationConcurrency;
     }
   }
 

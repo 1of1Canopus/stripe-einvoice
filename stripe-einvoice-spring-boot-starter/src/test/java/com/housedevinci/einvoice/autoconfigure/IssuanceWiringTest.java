@@ -165,6 +165,29 @@ class IssuanceWiringTest {
                     .isNull());
   }
 
+  // D3-02
+  @Test
+  void a_configuration_that_can_never_validate_fails_startup_when_intake_is_configured() {
+    // base() configures a webhook secret; PortsWithUnvalidatableValidator supplies a renderer and
+    // a validator that both exist as beans but whose canValidate() says no - the shape of "no
+    // XSLT 2.0 processor on the classpath" without depending on Saxon actually being absent from
+    // this module's own test classpath.
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithUnvalidatableValidator.class)
+        .withPropertyValues(base())
+        .run(
+            context ->
+                assertThat(context.getStartupFailure())
+                    .describedAs(
+                        "a validator that can never run is the same class of problem as a missing"
+                            + " bean, and must not let a configured intake start")
+                    .isNotNull()
+                    .hasStackTraceContaining("can never validate anything"));
+  }
+
   @Test
   void an_explicitly_disabled_issuance_with_no_secret_and_no_renderer_only_warns() {
     new ApplicationContextRunner()
@@ -391,6 +414,28 @@ class IssuanceWiringTest {
     @Bean
     StripeInvoiceSource source() {
       return new IssuanceTestApp.RecordingStripeSource();
+    }
+  }
+
+  @Configuration
+  static class PortsWithUnvalidatableValidator extends Ports {
+
+    /** Both ports exist as beans; this one just can never actually validate anything (D3-02). */
+    @Bean
+    @Override
+    DocumentValidator validator() {
+      return new DocumentValidator() {
+        @Override
+        public DocumentValidator.Report validate(
+            byte[] bytes, com.housedevinci.einvoice.application.DocumentInput input) {
+          throw new UnsupportedOperationException("never reached: startup must refuse first");
+        }
+
+        @Override
+        public boolean canValidate() {
+          return false;
+        }
+      };
     }
   }
 

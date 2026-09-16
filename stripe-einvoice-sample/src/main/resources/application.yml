@@ -22,6 +22,39 @@ einvoice:
     # Required, no default: BT-2 is derived in this zone, and an invoice finalised at 23:30 UTC
     # belongs to the day its tax authority says it does.
     tax-zone: Europe/Paris
+    # The issuing party as it appears on the document. Every identifier below is checked at
+    # startup, check digit included: a mistyped VAT id here is a rejection at the recipient.
+    # Obviously synthetic: the SIREN is in the 9xx range and carries a real Luhn key.
+    name: Atelier Riviere SAS
+    vat-id: FR25900000019
+    legal-id: "900000019"
+    legal-id-scheme: "0002"          # ISO 6523 ICD: the French SIRENE register
+    electronic-address: FR25900000019
+    electronic-address-scheme: "9957" # Peppol EAS: a French VAT identifier
+    address:
+      line1: 12 rue des Lilas
+      city: Lyon
+      postal-code: "69003"
+      country: FR
+    contact:
+      name: Comptabilite
+      telephone: "+33 4 72 00 00 00"
+      email: factures@atelier-riviere.invalid
+    payment:
+      means-code: "58"               # UNTDID 4461: SEPA credit transfer
+      account-id: FR7630006000011234567890189
+      account-name: Atelier Riviere SAS
+  documents:
+    # peppol-bis-ubl or xrechnung-ubl. One profile per application, so one legal document per
+    # invoice - which is what the issuance unit of work archives.
+    profile: peppol-bis-ubl
+    # BT-10. Mandatory for XRechnung (BR-DE-15); for a German public-sector buyer it is the
+    # Leitweg-ID the authority issued. It never comes from Stripe metadata or a buyer field.
+    buyer-reference: BON-DE-COMMANDE-9912
+    # The EN 16931 schematron is XSLT 2.0 and the JDK ships XSLT 1.0 only. Add an XSLT 2.0
+    # processor to this application; without one nothing is issued, because an unevaluated rule
+    # is not a passed rule. See README, "the XSLT processor".
+    xslt-processor: net.sf.saxon.TransformerFactoryImpl
   numbering:
     series: DEFAULT
     prefix: "INV-{fiscalYear}-"

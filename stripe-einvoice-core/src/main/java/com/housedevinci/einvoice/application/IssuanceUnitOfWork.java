@@ -222,6 +222,15 @@ public final class IssuanceUnitOfWork {
     }
     inbound.transition(eventId, InboundState.MAPPED, "", clock.instant(), null);
 
+    if (!validator.canValidate()) {
+      // D3-02: this is a fact about the application, known before it serves a single request, not
+      // a fact about this invoice. Discovering it in P2, after the allocator has already run,
+      // spends a legal number on a document that was never going to be validated by anything -
+      // every invoice, for as long as the condition holds. No backoff: an operator has to add a
+      // processor or change the configuration, and a sweep does not do that.
+      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.XSLT_PROCESSOR_MISSING, null);
+    }
+
     // P1: the number. Every refusal that depends on data has already happened, so a number is
     // consumed only for an invoice this module has decided it can document. Wrapped like every
     // other phase (D2-01): unwrapped, a refusal here left the row MAPPED with attempts 0 and no
