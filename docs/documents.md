@@ -269,11 +269,10 @@ rounding at the writer changes what the seller charged.
 
 ## 6. Per-country notes
 
-| Country | What applies, and from when | Source |
-|---|---|---|
-| **France** | Reception of structured invoices from 1 September 2026; issuance for small firms from 1 September 2027. Invoices flow through partner platforms (PDP). | Article 289 bis CGI; DGFiP "Facturation électronique" programme pages |
-| **Germany** | Reception mandatory since 1 January 2025; issuance phased 2027-2028. B2G has required XRechnung since 2020, with a **Leitweg-ID** (BT-10) the authority issues. | Wachstumschancengesetz; E-Rechnungsverordnung; `https://xeinkauf.de/xrechnung/versionen-und-bundles/` |
-| **Belgium** | Structured B2B e-invoicing since 1 January 2026, over Peppol. | Law of 6 February 2024 |
+**The dates live in one place, [`mandates.md`](mandates.md)**, where every one of them carries a
+source URL and the date this project last retrieved it, and where a date that could not be confirmed
+against an official source says "not confirmed" instead of guessing. They were repeated here, once,
+with neither URLs nor retrieval dates, which is how a table goes quietly stale.
 
 Two practical consequences this module enforces rather than documents:
 
@@ -284,9 +283,8 @@ Two practical consequences this module enforces rather than documents:
   more; the module derives one from the party's VAT identifier where it knows the country's scheme,
   and refuses rather than inventing one where it does not.
 
-Deadlines move. These rows are dated and sourced so the reader can check them rather than trust
-them, and they are not legal advice: your accountant checks the first invoices a new configuration
-issues.
+Deadlines move, which is why they are sourced and dated in `mandates.md` rather than asserted here.
+None of it is legal advice: your accountant checks the first invoices a new configuration issues.
 
 ---
 

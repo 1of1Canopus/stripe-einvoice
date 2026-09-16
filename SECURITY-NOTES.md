@@ -223,12 +223,44 @@ assertion text, and those findings are persisted, rendered and logged. The full 
 only through `En16931DocumentValidator.validateInDetail`, documented as carrying document content,
 for a caller that has decided it may see it.
 
-**Without an XSLT 2.0 processor this module issues nothing.** The processor is discovered by class
-name and is not a dependency, because the only practical one for the JVM is under a licence this
-project's own gate denies for anything it ships. With none present every validation reports
-`NOT_EVALUATED`, the issuance unit of work refuses, and the starter WARNs at every startup naming
-the class it looked for. An unevaluated rule is not a passed rule, and archiving a document no rule
-ever read would be worse than issuing none.
+**The XSLT 2.0 processor ships with the module, under one carved-out licence.** Saxon-HE is a
+runtime dependency of the core module, so a default install validates and therefore issues; before
+that, every host had to add a processor itself or issue nothing. Saxon-HE is MPL-2.0 and the licence
+gate denies MPL, so the exception is coordinate-scoped in both halves of the gate and the invariant
+that makes it safe is this: **MPL-2.0 is file-level copyleft**, its obligations attach to Saxon's own
+files, those files are used unmodified and are not redistributed here, and nothing in this project
+imports a Saxon type - the processor is reached through JAXP by class name. A second MPL dependency
+fails the build, Saxon under any other denied licence fails the build, and a look-alike coordinate
+fails the build; four self-test cases and two probes hold each of those lines. **Do not copy this
+exemption to a dependency whose licence is reciprocal at the work level** (GPL, AGPL, SSPL): there
+the same shape of carve-out would relicense the product, and the invariant above does not hold.
+
+Saxon brings `org.xmlresolver:xmlresolver` (Apache-2.0) with it. It is a resolver, which is exactly
+the component the hardening above neutralises: DOCTYPE is refused at the parser, external DTD,
+schema and stylesheet access is blanked, and the resolvers installed throw on any resolution
+attempt.
+
+**Remove the processor and this module still issues nothing.** The class-name lookup remains, and it
+is what `DocumentValidator.canValidate()` answers; with no processor every validation reports
+`NOT_EVALUATED`, the issuance unit of work refuses **before a number is allocated**, and an
+application whose intake is configured refuses to start. An unevaluated rule is not a passed rule,
+and archiving a document no rule ever read would be worse than issuing none.
+
+**Known vulnerabilities in dependencies are gated, keylessly, and the gate has edges.** Every pull
+request scans the transitively resolved dependency graph with OSV-Scanner, and every release scans
+the jars it is about to sign, and their resolved runtime dependencies, with Grype before the signing
+step. One threshold applies to both (`tools/check-vulnerability-report.py`): HIGH and above fails,
+MEDIUM and below is written down for a decision in the release notes, an advisory with no severity
+counts at the threshold rather than below it, and an empty or unreadable report is a failure - a
+scan that did not run is never a clean scan. What this does **not** cover, said plainly:
+- test-scope dependencies are outside the Maven graph OSV-Scanner resolves; what ships is what is
+  gated;
+- there is no offline mode and no cached vulnerability database. Both scanners need the network, and
+  a network failure fails the check rather than passing it quietly;
+- a vulnerability with no advisory is invisible to both scanners, as it is to every scanner;
+- OWASP Dependency-Check is kept only as an optional weekly deep scan. The NVD API key it needs was
+  applied for and not issued, so it skips - loudly, with the reason in the run's own summary, never
+  silently.
 
 **What the documents contain, and for how long.** An issued invoice carries the buyer's name,
 postal address and VAT identifier, by law, and it lives in the customer's own archive for the
