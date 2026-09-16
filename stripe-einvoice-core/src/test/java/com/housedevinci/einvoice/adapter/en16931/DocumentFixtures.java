@@ -201,6 +201,73 @@ public final class DocumentFixtures {
             250_000));
   }
 
+  /**
+   * A credit note, built at the model level.
+   *
+   * <p>There is no Stripe object behind it on purpose. This edition's totals reconciliation refuses
+   * an invoice whose total is not positive (PR 2), so no Stripe credit note reaches the mapper yet;
+   * what D-13 asks for is that the <b>type code, the sign convention and the writer path</b> exist
+   * and are exercised, and those are exercised from here down. The amounts are positive and the
+   * type carries the sign, which is the whole point: a 380 with negative amounts is what several
+   * profiles reject outright.
+   */
+  public static com.housedevinci.einvoice.domain.en16931.EnInvoice creditNote(
+      SellerProfile seller) {
+    Party buyer =
+        new Party(
+            "Elbe Maschinenbau AG",
+            null,
+            new PostalAddress("Hafenweg 44", null, "Bremen", "28217", null, "DE"),
+            VatIdentifier.parse("the buyer's VAT identifier", "DE987654321"),
+            null,
+            null,
+            new PartyIdentifier("9930", "DE987654321"),
+            null);
+    com.housedevinci.einvoice.domain.en16931.Money net =
+        com.housedevinci.einvoice.domain.en16931.Money.ofMinor(50_000, "eur");
+    com.housedevinci.einvoice.domain.en16931.Money tax =
+        com.housedevinci.einvoice.domain.en16931.Money.ofMinor(9_500, "eur");
+    com.housedevinci.einvoice.domain.en16931.Money gross =
+        com.housedevinci.einvoice.domain.en16931.Money.ofMinor(59_500, "eur");
+    return new com.housedevinci.einvoice.domain.en16931.EnInvoice(
+        "AVO-2026-000003",
+        ISSUE_DATE,
+        null,
+        com.housedevinci.einvoice.domain.en16931.DocumentTypeCode.CREDIT_NOTE,
+        "EUR",
+        seller.defaultBuyerReferenceValue().orElse(null),
+        null,
+        NUMBER.value(),
+        ISSUE_DATE,
+        "STRIPE-CN-0001",
+        seller.party(),
+        buyer,
+        seller.payment(),
+        List.of(
+            new com.housedevinci.einvoice.domain.en16931.DocumentLine(
+                "1",
+                java.math.BigDecimal.ONE,
+                com.housedevinci.einvoice.domain.en16931.DocumentLine.UNIT_PIECE,
+                net,
+                "Gutschrift zu Wartungsvertrag, Quartal 1/2026",
+                null,
+                com.housedevinci.einvoice.domain.en16931.TaxCategory.STANDARD,
+                Percentage.of("19"),
+                null)),
+        List.of(
+            new com.housedevinci.einvoice.domain.en16931.TaxSubtotal(
+                com.housedevinci.einvoice.domain.en16931.TaxCategory.STANDARD,
+                Percentage.of("19"),
+                net,
+                tax,
+                null)),
+        net,
+        net,
+        tax,
+        gross,
+        gross);
+  }
+
   private static SourceInvoice invoice(
       String id,
       String number,
