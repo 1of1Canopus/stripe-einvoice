@@ -110,6 +110,12 @@ class ArchitectureTest {
             .callMethod(java.util.TimeZone.class, "getDefault")
             .orShould()
             .callMethod(java.text.NumberFormat.class, "getInstance")
+            .orShould()
+            // The single-argument overload takes the default FORMAT locale. On an all-numeric
+            // pattern that happens to be harmless today, which is exactly why a byte comparison
+            // does not catch it and this rule has to: the day somebody adds MMM to a pattern, the
+            // month name becomes the machine's language and no golden file notices until then.
+            .callMethod(java.time.format.DateTimeFormatter.class, "ofPattern", String.class)
             .because("the bytes of a legal document are the same bytes wherever they are produced");
     rule.check(CLASSES);
   }

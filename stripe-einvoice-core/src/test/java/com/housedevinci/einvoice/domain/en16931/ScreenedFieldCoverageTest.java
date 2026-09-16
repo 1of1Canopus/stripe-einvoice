@@ -111,7 +111,12 @@ class ScreenedFieldCoverageTest {
     Object[] arguments = new Object[constructor.getParameterCount()];
     Parameter[] parameters = constructor.getParameters();
     for (int i = 0; i < arguments.length; i++) {
-      arguments[i] = i == hostileIndex ? HOSTILE : plausible(parameters[i].getType());
+      arguments[i] =
+          i == hostileIndex
+              ? HOSTILE
+              : plausible(
+                  type.getSimpleName() + "." + type.getRecordComponents()[i].getName(),
+                  parameters[i].getType());
     }
     constructor.setAccessible(true);
     try {
@@ -159,6 +164,32 @@ class ScreenedFieldCoverageTest {
    * A value every record will accept, so that the only thing a constructor can object to is the
    * hostile component. A {@code null} here would make the test green for the wrong reason.
    */
+  /**
+   * Values that are plausible for one <em>named</em> component rather than for its type. Without
+   * these, a component validated another way - an ISO country, a currency, an IBAN - refuses the
+   * generic "Plausible" string, the record throws for the wrong reason, and every field in that
+   * record reads as screened when none of them is. That is how this test was green on its first
+   * run.
+   */
+  private static final java.util.Map<String, Object> PLAUSIBLE_BY_COMPONENT =
+      java.util.Map.of(
+          "PostalAddress.country", "DE",
+          "Money.currency", "EUR",
+          "EnInvoice.currency", "EUR",
+          "PartyIdentifier.scheme", "9930",
+          "PartyIdentifier.value", "DE123456789",
+          "PaymentInstruction.meansCode", "58",
+          "PaymentInstruction.accountIdentifier", "DE02120300000000202051",
+          "VatIdentifier.value", "DE123456789");
+
+  private static Object plausible(String component, Class<?> type) {
+    Object named = PLAUSIBLE_BY_COMPONENT.get(component);
+    if (named != null) {
+      return named;
+    }
+    return plausible(type);
+  }
+
   private static Object plausible(Class<?> type) {
     if (type == String.class) {
       return "Plausible";

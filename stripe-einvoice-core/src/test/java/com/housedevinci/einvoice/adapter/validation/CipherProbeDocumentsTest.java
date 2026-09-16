@@ -272,6 +272,15 @@ class CipherProbeDocumentsTest {
             2)) {
       DocumentValidator.Report report = validator.validate(bytes, null);
       assertThat(report.findings()).isNotEmpty();
+      // The SHAPE, not a denylist of today's values. Asserting only that this fixture's buyer
+      // does not appear would stay green the moment a rule that interpolates a different field
+      // fires, and the one rule this fixture triggers has entirely generic text - so a denylist
+      // here proves nothing at all. A finding is an identifier and a severity, and nothing else.
+      assertThat(report.findings())
+          .allMatch(
+              finding ->
+                  finding.matches("[A-Za-z0-9_.\\-]+ \\((fatal|error|warning|information)\\)"),
+              "an identifier and a severity, with no text");
       assertThat(report.findings().toString())
           .doesNotContain("Elbe Maschinenbau")
           .doesNotContain("Hafenweg")
