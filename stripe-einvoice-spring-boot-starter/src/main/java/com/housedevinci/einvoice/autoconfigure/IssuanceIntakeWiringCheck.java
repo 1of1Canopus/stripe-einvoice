@@ -104,6 +104,16 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
               + " and no signal. Supply the missing bean(s), or set"
               + " einvoice.issuance.enabled=false to run the numbering API only.");
     }
+    if (environment.containsProperty("einvoice.issuance.enabled")
+        && !properties.getIssuance().isEnabled()) {
+      // The operator already said it: einvoice.issuance.enabled=false. Telling them to do what
+      // they have done is how a startup log becomes noise nobody reads.
+      log.info(
+          "einvoice: numbering API only, as configured (einvoice.issuance.enabled=false). No Stripe"
+              + " intake, sweeper or archive is wired ({} absent).",
+          missing);
+      return;
+    }
     log.warn(
         "einvoice: the issuance path is not wired ({} missing), and intake is not configured - no"
             + " einvoice.stripe.webhook-secrets, and einvoice.issuance.enabled is not explicitly"
