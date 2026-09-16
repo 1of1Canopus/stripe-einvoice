@@ -1490,8 +1490,12 @@ probe_an_unreadable_scan_report_counts_as_clean() {
   : > "$work/empty.json"
   printf '{"results": [' > "$work/truncated.json"
   printf '{"scanner":"osv","version":"2"}' > "$work/no-results.json"
+  # A syntactically perfect report of a scan that looked at nothing. Without --all-packages an
+  # OSV report lists only VULNERABLE packages, so a resolution that silently produced nothing
+  # renders exactly like a clean tree - the vacuous pass this whole script exists to refuse.
+  printf '{"results":[{"source":{"path":"pom.xml"},"packages":[]}]}' > "$work/no-packages.json"
   local f
-  for f in empty truncated no-results; do
+  for f in empty truncated no-results no-packages; do
     if tools/check-vulnerability-report.py --format osv --report "$work/$f.json" --fail-on high >>"$PROBE_CAPTURE" 2>&1; then
       echo "the gate accepted $f.json as a clean scan" >>"$PROBE_CAPTURE"
       weak=0

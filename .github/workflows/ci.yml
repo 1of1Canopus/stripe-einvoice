@@ -218,6 +218,7 @@ jobs:
           set -uo pipefail
           "${RUNNER_TEMP}/bin/osv-scanner" scan source \
             --data-source=native --maven-registry=https://repo.maven.apache.org/maven2 \
+            --all-packages \
             --format json --output-file "${RUNNER_TEMP}/osv.json" \
             -L pom.xml:pom.xml \
             -L pom.xml:stripe-einvoice-core/pom.xml \

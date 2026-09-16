@@ -19,7 +19,9 @@ All notable changes to this project are documented here. The format follows
   it is about to sign, and their runtime dependencies, with Grype before the signing step. One
   threshold for both: HIGH and above fails, MEDIUM and below is recorded for a decision in the
   release notes, an unrated advisory counts at the threshold, and an unreadable report fails. The
-  scanners are pinned binaries verified against recorded checksums. OWASP Dependency-Check remains
+  scanners are pinned binaries verified against recorded checksums, and a report that lists no
+  packages at all is a failure, not a clean tree - the pull-request scan states how many packages it
+  looked at (380 on this tree today). OWASP Dependency-Check remains
   an optional weekly deep scan that skips loudly when no NVD key is configured.
 - **`docs/mandates.md`** - which country requires a structured invoice from when, every date with a
   source URL and the date it was retrieved, and "not confirmed" where an official source could not
