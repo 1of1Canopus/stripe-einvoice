@@ -1,6 +1,7 @@
 package com.housedevinci.einvoice.adapter.xml;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.housedevinci.einvoice.adapter.en16931.DocumentFixtures;
@@ -11,6 +12,7 @@ import com.housedevinci.einvoice.application.DocumentInput;
 import com.housedevinci.einvoice.application.DocumentValidator;
 import com.housedevinci.einvoice.application.SourceInvoice;
 import com.housedevinci.einvoice.domain.EInvoiceException;
+import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
@@ -174,6 +176,26 @@ class HostileStringTest {
                     .render(input))
         .isInstanceOf(EInvoiceException.class)
         .hasMessageContaining("cannot tell them apart");
+  }
+
+  // D3-01: XML 1.0 non-characters. Not control characters, not surrogates, not markup - perfectly
+  // ordinary Java string content that no XML 1.0 parser can read once it is in the document.
+  @ParameterizedTest
+  @ValueSource(ints = {0xFFFF, 0xFFFE, 0x0091})
+  void probe_a_buyer_name_no_xml_parser_can_read_is_refused_before_the_bytes(int codePoint) {
+    String name = "Elbe" + (char) codePoint + "AG";
+    if (codePoint == 0x0091) {
+      // A C1 control, legal in XML 1.0: must pass, and the resulting bytes must parse.
+      byte[] bytes = render(withBuyerName(name));
+      assertThatCode(
+              () ->
+                  SecureXml.documentBuilderFactory()
+                      .newDocumentBuilder()
+                      .parse(new ByteArrayInputStream(bytes)))
+          .doesNotThrowAnyException();
+      return;
+    }
+    assertThatThrownBy(() -> render(withBuyerName(name))).isInstanceOf(EInvoiceException.class);
   }
 
   private static int countOf(String haystack, String needle) {

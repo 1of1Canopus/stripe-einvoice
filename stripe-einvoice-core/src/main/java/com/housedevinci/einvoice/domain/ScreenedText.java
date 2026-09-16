@@ -22,6 +22,11 @@ import java.text.Normalizer;
  *       (C17-37).
  *   <li><b>Anything past its declared length bound.</b> EN 16931 bounds its fields; discovering
  *       that at the recipient rather than here is the same defect one hop too late.
+ *   <li><b>An XML 1.0 non-character</b> (U+FFFE, U+FFFF, U+FDD0..U+FDEF, and the last two code
+ *       points of every plane, D3-01). These are ordinary Java {@code char} or code point values -
+ *       nothing about them is a control character or a surrogate - but no XML 1.0 parser can read
+ *       one, so a buyer who puts one in their own name gets a document nothing downstream can open,
+ *       discovered only after a legal number has already been consumed for it.
  * </ul>
  *
  * <p>What it does repair, deliberately: Unicode normalisation to NFC, which is a canonical form
@@ -95,10 +100,30 @@ public final class ScreenedText {
           throw new EInvoiceException(
               ErrorCodes.INVALID, field + " contains an unpaired surrogate at index " + i);
         }
+        int codePoint = Character.toCodePoint(c, nfc.charAt(i + 1));
+        if (isXmlNonCharacter(codePoint)) {
+          throw new EInvoiceException(
+              ErrorCodes.INVALID,
+              field
+                  + " contains an XML non-character at index "
+                  + i
+                  + " (U+"
+                  + String.format("%06X", codePoint)
+                  + ")");
+        }
         i++;
       } else if (Character.isLowSurrogate(c)) {
         throw new EInvoiceException(
             ErrorCodes.INVALID, field + " contains an unpaired surrogate at index " + i);
+      } else if (isXmlNonCharacter(c)) {
+        throw new EInvoiceException(
+            ErrorCodes.INVALID,
+            field
+                + " contains an XML non-character at index "
+                + i
+                + " (U+"
+                + String.format("%04X", (int) c)
+                + ")");
       }
     }
     // Collapse-then-check, not collapse-then-use: the stored value keeps its own spacing, but a
@@ -113,6 +138,13 @@ public final class ScreenedText {
           field + " is " + nfc.length() + " characters, max " + maxChars + " for this field");
     }
     return nfc;
+  }
+
+  // D3-01: the 66 code points XML 1.0 declares are not characters at all - U+FFFE/U+FFFF at the
+  // end of every plane (0x0 through 0x10), plus the 32-point block U+FDD0..U+FDEF reserved inside
+  // the BMP. (codePoint & 0xFFFE) == 0xFFFE is exactly "the last two code points of some plane".
+  private static boolean isXmlNonCharacter(int codePoint) {
+    return (codePoint & 0xFFFE) == 0xFFFE || (codePoint >= 0xFDD0 && codePoint <= 0xFDEF);
   }
 
   /** The collapsed form, for comparing two identifiers that must not collide (checklist line 8). */

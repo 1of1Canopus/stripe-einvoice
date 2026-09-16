@@ -278,16 +278,18 @@ public final class CanonicalXmlWriter {
 
   /**
    * Refuses text or an attribute value this writer cannot canonicalise instead of writing it raw or
-   * substituting it: a C0 control character other than tab, line feed or carriage return, or an
-   * unpaired UTF-16 surrogate. {@link IllegalArgumentException} because these are programming
-   * errors on the caller's part; {@code ScreenedText} in the domain package already refuses both,
-   * and more, before any value reaches this class through the production path.
+   * substituting it: a C0 control character other than tab, line feed or carriage return, an
+   * unpaired UTF-16 surrogate, or an XML 1.0 non-character (D3-01). {@link IllegalArgumentException}
+   * because these are programming errors on the caller's part; {@code ScreenedText} in the domain
+   * package already refuses all three, and more, before any value reaches this class through the
+   * production path. This is the second line of defence for a caller that does not go through it.
    */
   private static void requireValidText(String s) {
     int i = 0;
     while (i < s.length()) {
       char c = s.charAt(i);
-      int codePointCount = Character.charCount(s.codePointAt(i));
+      int codePoint = s.codePointAt(i);
+      int codePointCount = Character.charCount(codePoint);
       if (codePointCount == 1) {
         if (Character.isSurrogate(c)) {
           throw new IllegalArgumentException("unpaired surrogate at index " + i);
@@ -296,12 +298,21 @@ public final class CanonicalXmlWriter {
           throw new IllegalArgumentException("control character at index " + i);
         }
       }
+      if (isXmlNonCharacter(codePoint)) {
+        throw new IllegalArgumentException("XML non-character at index " + i);
+      }
       i += codePointCount;
     }
   }
 
   private static boolean isC0Control(char c) {
     return c <= 0x1F && c != '\t' && c != '\n' && c != '\r';
+  }
+
+  // D3-01: same clause as ScreenedText.isXmlNonCharacter - kept here too because this writer must
+  // refuse on its own for a caller that does not go through ScreenedText.
+  private static boolean isXmlNonCharacter(int codePoint) {
+    return (codePoint & 0xFFFE) == 0xFFFE || (codePoint >= 0xFDD0 && codePoint <= 0xFDEF);
   }
 
   private static void escapeText(String s, StringBuilder sb) {
