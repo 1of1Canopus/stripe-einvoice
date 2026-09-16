@@ -7,6 +7,8 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -55,6 +57,49 @@ class VendoredArtefactAttributionTest {
                   + " mentioned",
               group, path)
           .contains(group);
+    }
+  }
+
+  /**
+   * D3-04: the manifest-to-file direction ({@link
+   * #every_vendored_artefact_group_is_named_in_provenance_and_notice()} and {@code
+   * CipherProbeDocumentsTest.probe_every_vendored_artefact_still_hashes_to_what_was_recorded_for_it})
+   * both iterate {@code CHECKSUMS.txt}'s own entries. A file planted under the vendored resource
+   * root that is <b>not</b> in the manifest is invisible to either: no checksum recomputed, no
+   * attribution asserted, and it still ships in the jar next to material it has nothing to do with.
+   * {@link com.housedevinci.einvoice.adapter.validation.VendoredArtefacts#open} still refuses to
+   * *load* an unlisted path at run time, which is what keeps this at LOW rather than higher - but
+   * shipping it silently is exactly the gap D3-03 was written to close.
+   *
+   * <p>This is the other direction: walk the shipped tree and assert every file it contains is a
+   * manifest entry. Shown red once, deliberately: planting a file under the vendored {@code ubl}
+   * directory without adding it to {@code CHECKSUMS.txt} failed this test, naming the exact path;
+   * the plant was removed once that was confirmed, and nothing committed exercises it.
+   */
+  @Test
+  void a_vendored_file_missing_from_the_manifest_fails_the_build() throws IOException {
+    Path root = Path.of("src", "main", "resources", "com", "housedevinci", "einvoice", "reference");
+    List<String> shipped;
+    try (Stream<Path> walk = Files.walk(root)) {
+      shipped =
+          walk.filter(Files::isRegularFile)
+              .map(root::relativize)
+              .map(p -> p.toString().replace(java.io.File.separatorChar, '/'))
+              .filter(p -> !p.equals("CHECKSUMS.txt")) // the manifest is not an entry of itself
+              .toList();
+    }
+    assertThat(shipped)
+        .as("the vendored resource tree at %s must not be empty in a test that walks it", root)
+        .isNotEmpty();
+    for (String path : shipped) {
+      assertThat(VendoredArtefacts.expectedChecksums())
+          .as(
+              "%s is packaged into the jar under the vendored resource root but has no entry in"
+                  + " CHECKSUMS.txt: no checksum is recomputed for it and no attribution is"
+                  + " asserted for it, even though VendoredArtefacts.open() would still refuse to"
+                  + " load it at run time",
+              path)
+          .containsKey(path);
     }
   }
 
