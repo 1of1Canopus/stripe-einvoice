@@ -182,3 +182,128 @@ Three corrections, each with its probe. Pass 2 is the last pass on this branch.
    Probe `probe_a_configuration_that_can_never_validate_consumes_no_number`.
 3. **D3-03** - attribute the vendored artefacts in `NOTICE`, and add the check that keeps the next one
    from shipping unattributed.
+
+---
+
+## 2026-09-16 - pass 2 (final)
+
+Commit `5d9694b`. Pass 2 of 2: no third pass.
+
+### Verdict
+
+**NOT MERGEABLE**, with a two-item list applied without another review pass. Both are LOW and both are
+a few lines. D3-02 and D3-03 are closed, D3-01's byte defect is closed precisely, and the deferral of
+D3-01's second half is **accepted** on one condition, which is the second item below.
+
+| Severity | Count | Ids |
+|---|---|---|
+| HIGH | 0 | - |
+| MEDIUM | 0 | - |
+| LOW | 2 | D3-04, D3-05 |
+| INFO | 0 | - |
+
+### What was run
+
+| Check | Result |
+|---|---|
+| `./mvnw -B verify` | BUILD SUCCESS, 455 tests (345 core, 106 starter, 4 sample), coverage gates met |
+| `./mvnw -B clean verify -Prelease -Dgpg.skip=true` | BUILD SUCCESS; the third-party attribution is in `META-INF/NOTICE` inside the published jar |
+| Reference guard, tree and release jars | clean |
+| Fifteen assertions of my own on the screening fix, one on the issuance refusal, two mutations of the artefact guards | the screening and issuance ones pass; the artefact mutation is D3-04 |
+
+### The three pass-1 findings, re-verified
+
+- **D3-01(a) - closed, and exactly scoped.** I checked the refusal over the whole class rather than
+  the two code points I reported: U+FFFE, U+FFFF, U+FDD0, U+FDEF and the plane-end pairs of the
+  supplementary planes (U+1FFFE, U+1FFFF, U+10FFFE, U+10FFFF) are all refused, including the
+  supplementary ones, which need the surrogate pair to be decoded before the test - and they are.
+  Just as important, the check does not over-refuse: U+0091 (a legal C1 control), U+FDCF and U+FDF0
+  (the code points either side of the reserved block), U+FFFD, U+1FFFD and U+20AC are all still
+  accepted. An over-broad rule here would refuse a legitimate buyer's name, which is the same defect
+  facing the other way. `probe_every_xml_non_character_is_refused` and
+  `probe_a_legal_character_beside_the_non_characters_is_still_accepted`, 14 cases, all green.
+- **D3-02 - closed.** The port now asks itself a capability question, in the same shape the archive
+  store already had, and the unit of work refuses before the allocator with the processor-missing
+  code and no backoff. The implementation cannot be satisfied by a name that does not load: it builds
+  the factory and answers from that, and it answers "no" when the factory exists but cannot be
+  configured securely, which is the right direction. The starter refuses startup when the intake is
+  configured and the validator says it can never run.
+  `probe_a_validator_that_can_never_validate_costs_no_number_and_says_why`: zero numbered rows, state
+  `FAILED_ISSUANCE`, code `DEI-XSLT-processor-missing`.
+- **D3-03 - closed for content, see D3-04 for coverage.** `NOTICE` now carries a third-party section
+  naming the four artefact groups, their publishers, releases and licences, and it travels inside the
+  published jar.
+
+### Ruling on the deferral of D3-01's second half
+
+**Accepted for this pull request.** Three reasons, in the order I weighed them.
+
+1. **The half that is closed is the half that mattered.** The finding was that a buyer-controlled
+   string could produce bytes no XML parser can read, archived and filed with a tax authority. Nothing
+   unparseable can leave this module now, and I verified the boundary rather than the example.
+2. **What remains is the exception this module already declared and defended.** A hostile field now
+   costs one number, spent on an issuance that reaches a recorded, chained failed disposition with its
+   rule id, visible in the series report and closable by an operator void. That is the same residue as
+   the validation refusals the numbering design ruled on when it chose byte determinism over absolute
+   gap-freeness - it is bounded (one number per invoice the buyer's own purchase causes), not silent,
+   and not unbounded in time.
+3. **Closing it needs a mechanism, and mechanisms are not built inside fix lists.** Screening before
+   the allocator means a pre-check port called before phase 1, because the mapper needs a number to
+   build its input. That is a new hook other code will depend on. My own rule says such a thing gets a
+   one-page design reviewed before code, and requiring it inside this branch's fix list would break
+   the rule I hold the builder to.
+
+The condition is D3-05: the residue has to be visible where this module states what it does and does
+not protect, not only in an internal note and a next-pull-request plan. An exercised weakness that is
+recorded only where users will not read it is the defect checklist lines 63 and 65 exist for.
+
+---
+
+#### D3-04 · LOW · the artefact guards read the manifest, not the tree, so a new vendored file evades both
+
+The attribution check added for D3-03 and the checksum probe both iterate the entries of
+`CHECKSUMS.txt`. Neither one walks the vendored resource directory. A file added under the reference
+resources and therefore packaged into the jar, but not added to the manifest, is invisible to both:
+no checksum, no attribution, both checks green.
+
+That is precisely the scenario the D3-03 fix was written for - "so a newly vendored artefact cannot
+ship without one" is the changelog's own wording - and the next person to vendor a file is the person
+it was written for. The cap on severity is that the module refuses to *load* a path outside the
+manifest at runtime, so an unlisted file can ship but cannot execute.
+
+**Repro.** Write `<fake/>` to a new file under the vendored `ubl` directory, then run the attribution
+test and the checksum probe: both pass, and the file would be packaged.
+
+**Required change.** Both checks start from the shipped tree, not from the manifest: enumerate the
+files under the vendored resource root and assert every one of them appears in `CHECKSUMS.txt` (and
+therefore, through the existing assertion, in the provenance page and in `NOTICE`). Keep the existing
+direction too - a manifest entry with no file is also wrong. Probe:
+`a_vendored_file_missing_from_the_manifest_fails_the_build`, planted and then removed, in the same
+class.
+
+---
+
+#### D3-05 · LOW · the public text reads as though the buyer-controlled cost is gone
+
+The changelog entry for D3-01 describes the fix in the past tense - a field carrying one of these code
+points "used to survive both checks and produce bytes no XML 1.0 parser could read". A reader
+concludes there is nothing left. What is left is that the refusal still happens after the number is
+allocated, so one number is spent and an operator has to void it, on every invoice for a buyer whose
+stored name carries such a character.
+
+The security notes carry a residual-risks list for exactly this kind of statement, and this residue is
+not in it.
+
+**Required change.** One entry in that list: a buyer-controlled field that fails screening is refused
+after the allocator has run, so it costs one number with a recorded, chained failed disposition and an
+operator void; closing that is the next change, and the note says so. Adjust the changelog sentence so
+it does not read as a complete fix. No test needed; this is public text matching the mechanism.
+
+### Fix list
+
+Two items, applied without a further review pass; merge when the build and the guards are green.
+
+1. **D3-04** - both artefact checks enumerate the shipped tree and assert manifest membership; probe
+   `a_vendored_file_missing_from_the_manifest_fails_the_build`.
+2. **D3-05** - the residual-risks list gains the buyer-field entry, and the changelog sentence stops
+   reading as a complete fix.
