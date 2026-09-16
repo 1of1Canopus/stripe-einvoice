@@ -173,6 +173,12 @@ module is where that is set out.
   treats it as a refusal, but it cannot tell a lying validator from an honest one. The rule pack id
   and version are recorded on the issuance and inside the hashed material so a re-validation years
   later can be compared against what was claimed at the time.
+- **An unexpected exception from a host-supplied renderer, validator or archive store** is caught,
+  logged server-side only, and recorded as a terminal `FAILED_ISSUANCE` with a stable generic code
+  - never left `MAPPED` with no code and no next attempt (D2-04). It is not retried automatically:
+  a bug in a host's own port does not improve by running again, and a stack trace never reaches a
+  caller. This is deliberately narrower than "the process crashed": an `Error` still propagates
+  uncaught, exactly as before.
 
 ## Reporting
 
