@@ -1355,6 +1355,78 @@ probe_sources_jar_assertion_is_extension_only_not_path_based() {
 }
 
 
+# ===========================================================================
+# PR 4 (release wiring). Same rule as every block above: each probe asserts a
+# WEAKNESS and reads WEAK while that weakness is present.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# S1 - the published artifacts carry no XSLT 2.0 processor, so a default install
+#      reports NOT_EVALUATED on every document, refuses every issuance, and the library
+#      only works for a host that read the README and added a dependency itself. Asks
+#      Maven for the module's real runtime dependency set - the pom text is not the
+#      question, the resolved scope is.
+#      Weak while no XSLT 2.0 processor is on the runtime classpath of the core module.
+# ---------------------------------------------------------------------------
+probe_published_artifacts_ship_no_xslt2_processor() {
+  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe runs an inner Maven build; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
+  local list
+  ./mvnw -B dependency:list -DincludeScope=runtime -pl stripe-einvoice-core >>"$PROBE_CAPTURE" 2>&1 || return 0
+  list="$(tail -n 400 "$PROBE_CAPTURE")"
+  # Saxon-HE, or any other processor a maintainer substitutes, at runtime or compile scope.
+  grep -qE 'Saxon-HE:jar:[^:]+:(runtime|compile)' <<<"$list" && return 1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# S2 - the MPL carve-out is not scoped to one coordinate: a SECOND dependency under the
+#      same licence walks through the gate on the back of the decision that was made about
+#      Saxon-HE alone. Runs the real gate over a synthetic notices file.
+#      Weak while a foreign coordinate declaring MPL-2.0 passes.
+# ---------------------------------------------------------------------------
+probe_mpl_carve_out_is_not_scoped_to_one_coordinate() {
+  local d rc
+  d="$(mktemp -d)"
+  cat >"$d/THIRD-PARTY-NOTICES.txt" <<'NOTICES'
+Lists of 1 third-party dependencies.
+     (MPL-2.0) some-other-mpl-library (example.synth:other-mpl:1.0 - http://x)
+NOTICES
+  tools/check-third-party-licences.sh "$d" jar >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$d"
+  [ "$rc" -eq 0 ]   # the gate accepted a second MPL dependency: weak
+}
+
+# ---------------------------------------------------------------------------
+# S3 - the carve-out is scoped to the coordinate but not to the LICENCE, so the accepted
+#      dependency becomes a hole for every denied licence: a future Saxon-HE release (or a
+#      repository that serves a forged pom for that coordinate) declaring GPL-3.0 would pass.
+#      Weak while Saxon-HE under a denied licence other than MPL passes.
+# ---------------------------------------------------------------------------
+probe_mpl_carve_out_admits_any_denied_licence_on_that_coordinate() {
+  local d rc
+  d="$(mktemp -d)"
+  cat >"$d/THIRD-PARTY-NOTICES.txt" <<'NOTICES'
+Lists of 1 third-party dependencies.
+     (GPL-3.0) Saxon-HE (net.sf.saxon:Saxon-HE:13.0 - http://www.saxonica.com/)
+NOTICES
+  tools/check-third-party-licences.sh "$d" jar >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$d"
+  [ "$rc" -eq 0 ]   # the gate accepted a GPL-3.0 declaration on the carved-out coordinate: weak
+}
+
+# ---------------------------------------------------------------------------
+# S4 - the licence gate has a --self-test (the N2/F2/G1 table, and since this change the four
+#      coordinate+licence cases) that nothing in .github/ runs. A self-test only a human runs
+#      by hand is the N12 shape: it is evidence, not a gate.
+#      Weak while no CI job invokes it.
+# ---------------------------------------------------------------------------
+probe_licence_gate_self_test_is_not_run_by_ci() {
+  grep -rq 'check-third-party-licences.sh --self-test' .github/workflows/ && return 1
+  return 0
+}
+
 echo "the security review release-pipeline probes  (WEAK = finding still open)"
 echo
 probe probe_multiline_version_accepted                       "M4 newline in the version input passes validation"   probe_multiline_version_accepted
@@ -1426,6 +1498,12 @@ probe probe_licence_carve_out_can_outlive_its_dependency     "a dead licence car
 probe probe_release_dryrun_skips_the_tests                   "the dry run asserts on jars a release never makes"  probe_release_dryrun_skips_the_tests
 probe probe_sources_jar_contents_are_never_asserted          "nothing asserts what a sources jar contains"        probe_sources_jar_contents_are_never_asserted
 probe probe_sources_jar_allowlist_is_extension_only          "RP-3 the sources-jar check is extension-only"       probe_sources_jar_assertion_is_extension_only_not_path_based
+
+echo
+probe probe_artifacts_ship_no_xslt2_processor                "S1 a default install can validate nothing"          probe_published_artifacts_ship_no_xslt2_processor
+probe probe_mpl_carve_out_is_not_coordinate_scoped           "S2 a second MPL dependency passes the gate"         probe_mpl_carve_out_is_not_scoped_to_one_coordinate
+probe probe_mpl_carve_out_admits_any_licence_on_saxon        "S3 GPL on the carved-out coordinate passes"         probe_mpl_carve_out_admits_any_denied_licence_on_that_coordinate
+probe probe_licence_gate_self_test_is_not_run_by_ci          "S4 nothing in CI runs the licence gate self-test"    probe_licence_gate_self_test_is_not_run_by_ci
 
 echo
 echo "still weak: $pass    fixed: $flipped"

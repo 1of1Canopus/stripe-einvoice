@@ -67,15 +67,22 @@
     </dependency>
     <!--
       The XSLT 2.0 processor the official EN 16931, XRechnung and Peppol schematron are written
-      in. Test scope, never compile scope: MPL-2.0 is denied by this repository's licence gate for
-      anything it ships, so the module discovers a processor by class name at run time and refuses
-      to issue when none is present. Here it means CI runs the real validator suites on every
-      build.
+      in, and the one this module ships with. RUNTIME scope: it is needed to validate a document
+      and by nothing at compile time, so no code here may import a Saxon type - the processor is
+      still reached through JAXP by class name (see SecureXml), which is what lets a host
+      substitute its own.
+
+      Saxon-HE is MPL-2.0. The licence gate denies MPL, with one coordinate-scoped exception for
+      exactly this artifact, decided by the maintainer and recorded in
+      tools/check-third-party-licences.sh (ALLOWED_COORDINATE_LICENCES) with the invariant that
+      makes it safe. A second MPL dependency still fails the gate. Before this, a default install
+      could validate nothing, therefore issue nothing, and every host had to add this dependency
+      itself after reading the README - a documented cliff rather than a working library.
     -->
     <dependency>
       <groupId>net.sf.saxon</groupId>
       <artifactId>Saxon-HE</artifactId>
-      <scope>test</scope>
+      <scope>runtime</scope>
     </dependency>
     <dependency>
       <groupId>org.testcontainers</groupId>

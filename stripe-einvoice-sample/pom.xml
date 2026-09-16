@@ -73,16 +73,11 @@
       <scope>test</scope>
     </dependency>
     <!--
-      The XSLT 2.0 processor the official EN 16931, XRechnung and Peppol schematron are written
-      in. Test scope, never compile scope: MPL-2.0 is denied by this repository's licence gate for
-      anything it ships, so the module discovers a processor by class name at run time and refuses
-      to issue when none is present. Here it means the tests run the real validator suites.
+      No Saxon-HE declaration here on purpose: the core module ships it at runtime scope, so this
+      module inherits it transitively, exactly as a host application does. Declaring it again at
+      test scope would hide a regression in that transitivity - the tests would keep validating
+      while a real host got NOT_EVALUATED.
     -->
-    <dependency>
-      <groupId>net.sf.saxon</groupId>
-      <artifactId>Saxon-HE</artifactId>
-      <scope>test</scope>
-    </dependency>
 
   </dependencies>
 

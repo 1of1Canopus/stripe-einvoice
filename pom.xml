@@ -94,14 +94,18 @@
     <stripe-java.version>33.4.2</stripe-java.version>
     <awssdk.version>2.54.18</awssdk.version>
     <!--
-      The XSLT 2.0 processor the vendored EN 16931, XRechnung and Peppol schematron need. TEST
-      SCOPE ONLY, everywhere it appears, and never a compile dependency: Saxon-HE is MPL-2.0, and
-      this repository's licence gate denies MPL for anything it ships (see includedLicenses below
-      and tools/check-third-party-licences.sh). Weakening a licence gate is not a builder's
-      decision, so the module asks for a processor by CLASS NAME at run time and reports
-      NOT_EVALUATED - which the issuance unit of work treats as a refusal - when none is present.
-      A host application that wants validated documents adds a processor itself, and the README,
-      the documents page and the internal decision log all say so.
+      The XSLT 2.0 processor the vendored EN 16931, XRechnung and Peppol schematron need. RUNTIME
+      scope in stripe-einvoice-core, never compile scope: no code imports a Saxon type, the
+      processor is reached through JAXP by class name, and a host may substitute another one.
+
+      Saxon-HE is MPL-2.0, which this repository's licence gate denies in general. The maintainer
+      accepted it for THIS COORDINATE ONLY: MPL-2.0 is file-level copyleft over Saxon's own files
+      and does not reach this project's source, which links against an unmodified binary. The
+      exception is written down twice, both coordinate-scoped: includedLicenses below admits the
+      licence NAME (the plugin cannot scope a name to a coordinate), and the denial pass in
+      tools/check-third-party-licences.sh admits the licence only on net.sf.saxon:Saxon-HE. A
+      second MPL dependency, or Saxon under another denied licence, still fails; four self-test
+      cases and two probes hold that line.
     -->
     <saxon.version>13.0</saxon.version>
     <errorprone.version>2.50.0</errorprone.version>
@@ -359,12 +363,25 @@
                   EPL-2.0       Jakarta APIs and Logback. Weak copyleft, file-level, and it does
                                 not reach our code because we only link against them.
                   Public Domain org.json and HdrHistogram's CC0 half. No obligations at all.
-                Everything else, GPL/LGPL/AGPL/MPL/CDDL/SSPL included, fails.
+                  MPL-2.0       ONE artifact: net.sf.saxon:Saxon-HE, the XSLT 2.0 processor the
+                                official schematron need. Weak, FILE-level copyleft over Saxon's
+                                own files; it does not reach this project's source, which links
+                                against an unmodified binary from Maven Central.
+                Everything else, GPL/LGPL/AGPL/CDDL/SSPL included, fails.
+
+                This plugin's allowlist is a licence-NAME check and cannot be scoped to a
+                coordinate, so on its own it would admit ANY MPL dependency. The coordinate
+                scoping is enforced by the second, all-of denial pass
+                (tools/check-third-party-licences.sh, ALLOWED_COORDINATE_LICENCES), which keeps
+                "mpl"/"mozillapubliclicense" on its deny list and carves it out for Saxon-HE
+                alone. Removing MPL-2.0 from this line would break the build; removing the
+                coordinate scoping there would silently admit the next MPL dependency, which is
+                the failure a probe asserts against.
               -->
               <force>true</force>
-              <includedLicenses>Apache-2.0|MIT|BSD|EPL-2.0|Public Domain</includedLicenses>
+              <includedLicenses>Apache-2.0|MIT|BSD|EPL-2.0|Public Domain|MPL-2.0</includedLicenses>
               <licenseMerges>
-                <licenseMerge>Apache-2.0|Apache 2.0|Apache License 2.0|Apache License Version 2.0|Apache License, Version 2.0|The Apache License, Version 2.0|The Apache Software License, Version 2.0|Apache Software License - Version 2.0|Apache License V2.0</licenseMerge>
+                <licenseMerge>Apache-2.0|Apache 2.0|Apache License 2.0|Apache License Version 2.0|Apache License version 2.0|Apache License, Version 2.0|The Apache License, Version 2.0|The Apache Software License, Version 2.0|Apache Software License - Version 2.0|Apache License V2.0</licenseMerge>
                 <licenseMerge>MIT|MIT License|MIT-0|The MIT License|The MIT License (MIT)</licenseMerge>
                 <!-- The Eclipse Distribution License is BSD-3-Clause verbatim, under another
                      name (https://www.eclipse.org/org/documents/edl-v10.php). It arrives here
@@ -372,6 +389,9 @@
                 <licenseMerge>BSD|BSD-2-Clause|BSD-3-Clause|The BSD License|BSD licence|BSD License 3|New BSD License|Revised BSD|EDL 1.0|Eclipse Distribution License - v 1.0|Eclipse Distribution License v. 1.0</licenseMerge>
                 <licenseMerge>EPL-2.0|EPL 2.0|Eclipse Public License - v 2.0|Eclipse Public License v2.0|Eclipse Public License v. 2.0|Eclipse Public License, Version 2.0</licenseMerge>
                 <licenseMerge>Public Domain|Public Domain, per Creative Commons CC0|CC0-1.0|CC0</licenseMerge>
+                <!-- Saxon-HE 13.0 declares "Mozilla Public License Version 2.0"; the other
+                     spellings are what neighbouring releases and re-publishers use. -->
+                <licenseMerge>MPL-2.0|MPL 2.0|Mozilla Public License Version 2.0|Mozilla Public License, Version 2.0|Mozilla Public License 2.0|Mozilla Public License v2.0</licenseMerge>
               </licenseMerges>
               <failOnMissing>true</failOnMissing>
               <failOnBlacklist>true</failOnBlacklist>

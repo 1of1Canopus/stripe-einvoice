@@ -71,6 +71,43 @@ ALLOWED_COORDINATES=(
   "jakarta.transaction:jakarta.transaction-api"
 )
 
+# A SECOND, STRICTLY NARROWER kind of carve-out: a coordinate excused for ONE denied
+# pattern and nothing else. ALLOWED_COORDINATES above excuses a coordinate from the whole
+# deny list, which is right for a genuinely disjunctive "permissive OR copyleft" licence
+# (either term may be chosen, so the permissive one is chosen). Saxon-HE is not that case:
+# it is MPL-2.0 and only MPL-2.0, accepted here by an explicit maintainer decision because
+# the EN 16931, XRechnung and Peppol schematron are XSLT 2.0 and Saxon-HE is the only
+# practical XSLT 2.0 processor for the JVM - without it a default install validates nothing
+# and therefore issues nothing.
+#
+# The scope of that decision is one coordinate and one licence family. An entry is
+# "<groupId>:<artifactId>|<pattern>[,<pattern>...]", every pattern being a token from
+# DENIED_PATTERNS below. The family needs more than one pattern because a POM writes the
+# licence in prose: Saxon-HE 13.0 declares "Mozilla Public License Version 2.0", which
+# normalises to a form containing "mozillapubliclicense" but NOT "mpl20", and a neighbouring
+# release is free to spell it either way. Listing the family is not a widening: every
+# pattern is still bound to this one coordinate. What the entry buys:
+#   - a SECOND MPL-licensed dependency still fails the gate (the exception names Saxon-HE,
+#     not the licence);
+#   - Saxon-HE under any OTHER denied licence still fails (the exception names mpl20, not
+#     the coordinate);
+#   - net.sf.saxon:Saxon-PE / :Saxon-EE, or a look-alike artifactId, still fail.
+# All four are probes in tools/cipher-probe-release-pipeline.sh and self-test cases below.
+#
+# The invariant that makes this exemption safe, stated rather than implied (checklist line
+# 72): MPL-2.0 is a FILE-level copyleft. It obliges us to keep Saxon's own modified files
+# under MPL and to say where the source is; it does not reach this project's own source,
+# because Saxon is consumed as an unmodified binary dependency across a process boundary of
+# our own code. That invariant holds for Saxon-HE consumed unmodified from Maven Central.
+# Do not copy this pattern to a dependency whose licence is reciprocal at the WORK level
+# (GPL, AGPL, SSPL) - there the same shape of exemption would relicense the product.
+#
+# `--check-unused` covers these entries too: if Saxon ever leaves the tree, or stops
+# declaring MPL, the entry is reported DEAD and the build fails.
+ALLOWED_COORDINATE_LICENCES=(
+  "net.sf.saxon:Saxon-HE|mozillapubliclicense,mpl20,mpl11,mpl10"
+)
+
 # Denied licence tokens (normalised, case-insensitive). Any dependency declaring ANY of
 # these among its licences fails, regardless of what else it also declares.
 #
@@ -142,6 +179,29 @@ is_denied_token() {
   [ -n "$norm" ] || return 1   # an empty token (N10: a bare "()") denies nothing, matches nothing
   for p in "${DENIED_PATTERNS[@]}"; do
     [[ "$norm" == *"$p"* ]] && return 0
+  done
+  return 1
+}
+
+# Is this coordinate excused for THIS licence token specifically? Exact match on the
+# coordinate (never a pattern: a look-alike artifactId must not inherit the decision),
+# substring match of the entry's patterns against the SAME normalised form is_denied_token
+# uses, so "MPL 2.0", "MPL-2.0" and "Mozilla Public License, Version 2.0" all reach it.
+is_allowed_coordinate_licence() {
+  local coord="$1" raw="$2" norm entry entry_coord entry_pats pat
+  norm="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
+  [ -n "$norm" ] || return 1
+  for entry in "${ALLOWED_COORDINATE_LICENCES[@]:-}"; do
+    [ -n "$entry" ] || continue
+    entry_coord="${entry%%|*}"
+    entry_pats="${entry#*|}"
+    [ "$coord" = "$entry_coord" ] || continue
+    pat_list=()
+    IFS=',' read -ra pat_list <<<"$entry_pats" || true
+    for pat in "${pat_list[@]:-}"; do
+      [ -n "$pat" ] || continue
+      [[ "$norm" == *"$pat"* ]] && return 0
+    done
   done
   return 1
 }
@@ -286,6 +346,10 @@ check_notices_file() {
     for tok in "${tok_list[@]:-}"; do
       [ -n "$tok" ] || continue
       if is_denied_token "$tok"; then
+        if is_allowed_coordinate_licence "$ga" "$tok"; then
+          echo "check-third-party-licences: carved out by coordinate+licence: '$tok' on $coord"
+          continue
+        fi
         echo "check-third-party-licences: DENIED licence '$tok' on $coord (from $notices)" >&2
         status=1
       fi
@@ -428,6 +492,38 @@ run_self_test() {
     failures=$((failures + 1))
   fi
 
+  # The coordinate+licence carve-out (Saxon-HE, MPL-2.0). Four cases, run through the real
+  # gate against synthetic notices files: the one accepted combination, and the three
+  # neighbours that must still fail. A carve-out nobody probes is a carve-out that quietly
+  # becomes a blanket one.
+  local -a scoped_cases=(
+    "allow|(Mozilla Public License Version 2.0) Saxon-HE (net.sf.saxon:Saxon-HE:13.0 - http://www.saxonica.com/)"
+    "deny|(Mozilla Public License Version 2.0) other-mpl (example.synth:other-mpl:1.0 - http://x)"
+    "deny|(GPL-3.0) Saxon-HE (net.sf.saxon:Saxon-HE:13.0 - http://www.saxonica.com/)"
+    "deny|(Mozilla Public License Version 2.0) Saxon-EE (net.sf.saxon:Saxon-EE:13.0 - http://x)"
+  )
+  local case_line want line
+  for case_line in "${scoped_cases[@]}"; do
+    want="${case_line%%|*}"
+    line="${case_line#*|}"
+    printf 'Lists of 1 third-party dependencies.\n     %s\n' "$line" > "$work/THIRD-PARTY-NOTICES.txt"
+    if check_notices_file "$work/THIRD-PARTY-NOTICES.txt" >/dev/null 2>&1; then
+      if [ "$want" = "allow" ]; then
+        echo "self-test OK    scoped allow '$line'"
+      else
+        echo "self-test FAIL  scoped '$line' was NOT denied - the carve-out is wider than one coordinate+licence"
+        failures=$((failures + 1))
+      fi
+    else
+      if [ "$want" = "deny" ]; then
+        echo "self-test OK    scoped deny  '$line'"
+      else
+        echo "self-test FAIL  scoped '$line' was denied - the accepted dependency cannot build"
+        failures=$((failures + 1))
+      fi
+    fi
+  done
+
   rm -rf "$work"
 
   echo
@@ -461,8 +557,9 @@ check_unused_allowlist_entries() {
     return 1
   fi
   needed="$(mktemp)"
+  needed_scoped="$(mktemp)"
   # shellcheck disable=SC2064
-  trap "rm -f '$needed'" RETURN
+  trap "rm -f '$needed' '$needed_scoped'" RETURN
   local f
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -477,6 +574,13 @@ check_unused_allowlist_entries() {
         [ -n "$tok" ] || continue
         if is_denied_token "$tok"; then
           echo "$ga" >> "$needed"
+          # A scoped entry is "needed" on a stricter test than a blanket one: the
+          # coordinate must be present AND one of ITS OWN patterns must be what carved
+          # this token out. An entry whose dependency still ships but no longer declares
+          # the licence it was written for is as dead as one whose dependency is gone.
+          if is_allowed_coordinate_licence "$ga" "$tok"; then
+            echo "$ga" >> "$needed_scoped"
+          fi
           break
         fi
       done
@@ -489,6 +593,18 @@ check_unused_allowlist_entries() {
       echo "check-third-party-licences --check-unused: $c is needed (carves out a denied licence declared in this tree)"
     else
       echo "check-third-party-licences --check-unused: DEAD carve-out '$c' - not needed by any module in this tree, remove it from ALLOWED_COORDINATES" >&2
+      status=1
+    fi
+  done
+
+  local entry entry_coord
+  for entry in "${ALLOWED_COORDINATE_LICENCES[@]:-}"; do
+    [ -n "$entry" ] || continue
+    entry_coord="${entry%%|*}"
+    if grep -qxF "$entry_coord" "$needed_scoped"; then
+      echo "check-third-party-licences --check-unused: $entry is needed (carves out one denied licence family on one coordinate)"
+    else
+      echo "check-third-party-licences --check-unused: DEAD scoped carve-out '$entry' - no module in this tree has that coordinate declaring that licence, remove it from ALLOWED_COORDINATE_LICENCES" >&2
       status=1
     fi
   done

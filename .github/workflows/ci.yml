@@ -104,6 +104,13 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
+      # The licence gate's own table test: the denial-pass spellings (N2/F4/F5), the three
+      # coordinate-forgery repros (N3/F2/G1), and the four cases that keep the MPL carve-out
+      # scoped to net.sf.saxon:Saxon-HE and to MPL alone. Runs BEFORE the build, so a weakened
+      # gate is reported as a weakened gate rather than as a green build that happened to have
+      # nothing to catch.
+      - name: Self-test the licence gate (every deny/allow case, carve-out scope included)
+        run: tools/check-third-party-licences.sh --self-test
       # ubuntu-latest ships Docker: Testcontainers starts PostgreSQL and Redis for the integration tests.
       - name: Build, test, format check, coverage gate, licence gates, third-party notices
         run: ./mvnw -B clean verify

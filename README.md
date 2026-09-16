@@ -45,25 +45,23 @@ What the writer guarantees:
 
 ### The XSLT processor
 
-The EN 16931, XRechnung and Peppol schematron are **XSLT 2.0**, and the JDK ships an XSLT 1.0
-processor only. This module therefore needs one, and asks for it **by class name** rather than
-depending on it: the only practical XSLT 2.0 processor for the JVM is MPL-2.0, and this project's
-licence gate denies MPL for anything it ships.
+The EN 16931, XRechnung and Peppol schematron are **XSLT 2.0** and the JDK ships an XSLT 1.0
+processor only, so this module ships one: `net.sf.saxon:Saxon-HE`, a runtime dependency of the
+core module. **You add nothing; validation works on a default install.**
 
-Add one to your application:
+Saxon-HE is MPL-2.0 - file-level copyleft over Saxon's own files, which are used unmodified and
+are not redistributed here. It is the only dependency of this project under that licence, and the
+licence gate admits it by coordinate, not by licence: a second MPL dependency fails the build.
 
-```xml
-<dependency>
-  <groupId>net.sf.saxon</groupId>
-  <artifactId>Saxon-HE</artifactId>
-  <version>13.0</version>
-</dependency>
-```
+The processor is still reached **by class name** through JAXP (`einvoice.documents.xslt-processor`,
+default `net.sf.saxon.TransformerFactoryImpl`) and no source file imports a Saxon type, so you can
+substitute another XSLT 2.0 processor by setting that property and excluding the dependency.
 
-**Without a processor this module issues nothing.** Every validation reports `NOT_EVALUATED`, which
-the issuance unit of work treats as a refusal, and the starter says so at every startup with a WARN
-naming the class it looked for. An unevaluated rule is not a passed rule, and archiving a document
-no rule ever read would be worse than issuing none.
+If you do exclude it and put nothing in its place, **this module issues nothing**: every validation
+reports `NOT_EVALUATED`, which the issuance unit of work treats as a refusal before a legal number
+is allocated, and an application configured to receive Stripe events refuses to start rather than
+spend a number per invoice on a document nothing will read. An unevaluated rule is not a passed
+rule, and archiving a document no rule ever read would be worse than issuing none.
 
 ## What the numbering series does
 
