@@ -22,7 +22,7 @@ class StripeApiInvoiceSourceTest {
        "customer_name":"Buyer Cooperative","customer_email":"buyer@example.invalid",
        "customer_address":{"line1":"1 Example Street","postal_code":"75001","city":"Example City",
                            "country":"FR"},
-       "customer_tax_ids":[{"type":"eu_vat","value":"FR00000000000"}],
+       "customer_tax_ids":[{"type":"eu_vat","value":"FR68900000001"}],
        "status_transitions":{"finalized_at":1768520000},
        "total_taxes":[{"amount":2000,"tax_behavior":"exclusive",
                        "tax_rate_details":{"tax_rate":"txr_20"}}]}
@@ -117,7 +117,7 @@ class StripeApiInvoiceSourceTest {
               .fetchInvoice("in_1");
 
       assertThat(invoice.buyer().name()).isEqualTo("Buyer Cooperative");
-      assertThat(invoice.buyer().taxId()).isEqualTo("FR00000000000");
+      assertThat(invoice.buyer().taxId()).isEqualTo("FR68900000001");
       assertThat(invoice.lines().get(0).description()).isEqualTo("One month of service");
       assertThat(invoice.finalizedAt()).isEqualTo(Instant.ofEpochSecond(1768520000L));
       assertThat(invoice.finalised()).isTrue();

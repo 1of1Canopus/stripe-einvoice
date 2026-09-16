@@ -195,11 +195,13 @@ public final class StripeApiInvoiceSource implements StripeInvoiceSource {
     }
 
     List<SourceInvoice.SourceLine> mapped = new ArrayList<>();
+    Map<String, SourceInvoice.SourceTaxTreatment> treatments = new LinkedHashMap<>();
     for (InvoiceLineItem line : lines) {
       long amount = required(line.getAmount(), "lines.data.amount");
       long tax = 0;
       long taxable = amount;
       String rateId = "";
+      String taxabilityReason = "";
       if (line.getTaxes() != null && !line.getTaxes().isEmpty()) {
         for (InvoiceLineItem.Tax lineTax : line.getTaxes()) {
           tax += lineTax.getAmount() == null ? 0 : lineTax.getAmount();
@@ -209,6 +211,13 @@ public final class StripeApiInvoiceSource implements StripeInvoiceSource {
           if (lineTax.getTaxRateDetails() != null
               && lineTax.getTaxRateDetails().getTaxRate() != null) {
             rateId = lineTax.getTaxRateDetails().getTaxRate();
+          }
+          if (lineTax.getTaxabilityReason() != null) {
+            // Stripe's own word for why the line was taxed as it was. The EN 16931 category is
+            // derived from it rather than inferred from the geography of the two parties: Stripe
+            // computed and charged the tax, and D-14 says our rule pack checks that answer and
+            // never silently disagrees with it.
+            taxabilityReason = lineTax.getTaxabilityReason();
           }
         }
       }
@@ -220,9 +229,22 @@ public final class StripeApiInvoiceSource implements StripeInvoiceSource {
             "a line carries no tax rate, so no EN 16931 tax category can be established for it"
                 + " (stripe field: lines.data.taxes.tax_rate_details.tax_rate)");
       }
+      TaxRate resolved = rate(rates, rateId);
+      treatments.putIfAbsent(
+          rateId,
+          new SourceInvoice.SourceTaxTreatment(
+              rateId,
+              resolved.getCountry() == null ? "" : resolved.getCountry(),
+              resolved.getTaxType() == null ? "" : resolved.getTaxType(),
+              taxabilityReason));
       mapped.add(
           new SourceInvoice.SourceLine(
-              line.getId(), line.getDescription(), rateId, taxable, taxable + tax));
+              line.getId(),
+              line.getDescription(),
+              rateId,
+              quantityOf(line),
+              taxable,
+              taxable + tax));
     }
 
     Address address = invoice.getCustomerAddress();
@@ -250,10 +272,29 @@ public final class StripeApiInvoiceSource implements StripeInvoiceSource {
         buyer,
         mapped,
         buckets,
+        List.copyOf(treatments.values()),
         required(invoice.getSubtotal(), "subtotal"),
         totalTax(invoice),
         required(invoice.getTotal(), "total"),
         true);
+  }
+
+  /**
+   * The line's quantity. Absent means one: a Stripe line with no quantity is one of the thing it
+   * describes, and zero or a negative is a payload this module does not understand rather than a
+   * quantity to normalise.
+   */
+  private static long quantityOf(InvoiceLineItem line) {
+    Long quantity = line.getQuantity();
+    if (quantity == null) {
+      return 1L;
+    }
+    if (quantity <= 0) {
+      throw new EInvoiceException(
+          ErrorCodes.MAPPING_INCOMPLETE,
+          "a line carries a quantity that is not above zero (stripe field: lines.data.quantity)");
+    }
+    return quantity;
   }
 
   private static String rateIdOf(Invoice.TotalTax tax) {

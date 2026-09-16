@@ -1,0 +1,23 @@
+# SHA-256 of every vendored artefact, recomputed on every build by VendoredArtefactsTest.
+# Provenance, release tag, retrieval date and licence per file: PROVENANCE.md
+c69bd7849a35fc3e14f1bdc303e08a2dfe5df3e54b6654e31f6a173e8107cc73  PROVENANCE.md
+759f2d2e830c7fd1d5a6e8b4f61e5dbafc7a7805862c4ae1c749eeac6adde698  schematron/en16931/EN16931-UBL-validation.xsl
+a8a54aef3699057a3820cd2ebcac8ea3c364a6ebaf4a237e62064a5bc2877c4a  schematron/peppol/CEN-EN16931-UBL.xslt
+8c6b935b1bc0bb17d29d949b0aa27ecc62021b613b9fba173cd6bfec6b3f0008  schematron/peppol/PEPPOL-EN16931-UBL.xslt
+e32d831668facbbd5136cc0119bf1dd6f92ac20738aa3b3f021586f5a305c738  schematron/xrechnung/XRechnung-UBL-validation.xsl
+dd546e4809df86b6445589f69f0d6c9df162840ae386574ddfc1da7638103e15  ubl/2.1/common/CCTS_CCT_SchemaModule-2.1.xsd
+580b5af6f68f7f556bd15945ba0e819cbf561442c81694f9b9468036ebedec4d  ubl/2.1/common/UBL-CommonAggregateComponents-2.1.xsd
+a3b349bf92e5cff26e303d2f05b7e00c884dcafcfd9e12755fb80289abf5e22e  ubl/2.1/common/UBL-CommonBasicComponents-2.1.xsd
+ad7a4e490978adfbcfc5ec0bb20941cf11ac960ccf0c4de8791a7c731a8dbe87  ubl/2.1/common/UBL-CommonExtensionComponents-2.1.xsd
+4fa9e2370100040fe14c43e135ef77e2eb66b21cb8dbfc2ffb8d82ae991fe92e  ubl/2.1/common/UBL-CommonSignatureComponents-2.1.xsd
+8be3379dbdcbcc7802fafdd16bac72c48fff1c0bb364213a31a17911dd06100b  ubl/2.1/common/UBL-CoreComponentParameters-2.1.xsd
+fcee77a11870208e6377ea6311b9f2a050bca24bdad8606ea02d71e9f9e72f8d  ubl/2.1/common/UBL-ExtensionContentDataType-2.1.xsd
+7dcb156e610239c97ae70940cf4653b88e48c3595bf5f56a2204a32e2893e6cf  ubl/2.1/common/UBL-QualifiedDataTypes-2.1.xsd
+9234c2ca48dbfa9a22a786112bb075c5922a305170920eaab1e3c04fa0b7344b  ubl/2.1/common/UBL-SignatureAggregateComponents-2.1.xsd
+0fbe2d7afff0c1e11164b8ec83e13f18801021c3c87e390a9d76f9cf862f6a64  ubl/2.1/common/UBL-SignatureBasicComponents-2.1.xsd
+09052d406b4293e2a5f9c2bfee6df10ad4d8d5f0b36e24a6349d7f7936d89eb6  ubl/2.1/common/UBL-UnqualifiedDataTypes-2.1.xsd
+a4f726bcf8cc3f7d9ffa4dab99e005535a8e8b60dced1e5d94578d2e05afa96e  ubl/2.1/common/UBL-XAdESv132-2.1.xsd
+1fa4625e9cefcb7a9abb5ac1b64315547450031eece8a55bd584e4ba4b79dbc1  ubl/2.1/common/UBL-XAdESv141-2.1.xsd
+101909c9f06456d61ddcc4fb982f1d40dc357b439f393b1a2eb46e42acd60809  ubl/2.1/common/UBL-xmldsig-core-schema-2.1.xsd
+1e117b6c1ab713604b29b0d685442a81a0c78a82575445ee8c43e6050cda7454  ubl/2.1/maindoc/UBL-CreditNote-2.1.xsd
+3a5aacd823f0e5b8f25ae7b5191c2002d5333ba351d87de9371ed62dca2b2b0c  ubl/2.1/maindoc/UBL-Invoice-2.1.xsd

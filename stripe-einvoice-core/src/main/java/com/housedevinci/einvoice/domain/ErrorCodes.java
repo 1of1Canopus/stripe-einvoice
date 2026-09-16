@@ -5,9 +5,8 @@ package com.housedevinci.einvoice.domain;
  * application branches on, what an operator greps for, and what the docs index.
  *
  * <p>{@code DEI-1xx} is the numbering series and its dispositions (this module's first pull
- * request). {@code DEI-2xx} is the issuance unit of work, {@code DEI-3xx} the mapper and the
- * writers; they arrive with their own designs and are deliberately absent here rather than declared
- * empty.
+ * request). {@code DEI-2xx} is the issuance unit of work, {@code DEI-3xx} the semantic model, the
+ * mapper, the UBL writers and the validators.
  */
 public final class ErrorCodes {
 
@@ -195,6 +194,53 @@ public final class ErrorCodes {
 
   /** Reconciliation has not completed within two intervals. No result is never "healthy". */
   public static final String RECON_STALE = "DEI-274";
+
+  // -------------------------------------------------------------------------------------------
+  // DEI-3xx - the EN 16931 semantic model, the mapper, the UBL writers and the validators.
+  // -------------------------------------------------------------------------------------------
+
+  /** No exponent is recorded for this currency, and there is no default of 2 (D-05). */
+  public static final String UNSUPPORTED_CURRENCY = "DEI-300";
+
+  /**
+   * A shape the upstream can produce and this edition does not map. Refused, never approximated.
+   */
+  public static final String MAPPING_UNSUPPORTED = "DEI-301";
+
+  /**
+   * No EN 16931 tax category can be established for a rate from the configured rule pack (D-14).
+   */
+  public static final String TAX_CATEGORY_UNKNOWN = "DEI-302";
+
+  /** A zero-rated, exempt or reverse-charge category with no VATEX reason code (D-14). */
+  public static final String EXEMPTION_REASON_REQUIRED = "DEI-303";
+
+  /** The configured seller profile is missing a field the target profile requires. */
+  public static final String SELLER_PROFILE_INCOMPLETE = "DEI-304";
+
+  /** A document does not balance: EN 16931's BR-CO-* sums disagree with each other. */
+  public static final String DOCUMENT_UNBALANCED = "DEI-305";
+
+  /** A document type code and a sign convention that EN 16931 does not pair (D-13). */
+  public static final String DOCUMENT_TYPE_UNSUPPORTED = "DEI-306";
+
+  /** An identifier (VAT id, Leitweg-ID, electronic address) is not in its declared format. */
+  public static final String IDENTIFIER_MALFORMED = "DEI-307";
+
+  /** A vendored schema or stylesheet is absent, unreadable, or no longer hashes to its record. */
+  public static final String ARTEFACT_TAMPERED = "DEI-320";
+
+  /** No XSLT 2.0 processor is on the classpath, so the schematron could not run at all. */
+  public static final String XSLT_PROCESSOR_MISSING = "DEI-321";
+
+  /** XML this module was asked to read carries a DOCTYPE, an entity, or will not parse (D-07). */
+  public static final String XML_REFUSED = "DEI-322";
+
+  /** A validation run passed its wall-clock bound. Never a pass; the report says NOT_EVALUATED. */
+  public static final String VALIDATION_TIMEOUT = "DEI-323";
+
+  /** A validation run produced more output than the bound allows. Same disposition. */
+  public static final String VALIDATION_OUTPUT_TOO_LARGE = "DEI-324";
 
   private ErrorCodes() {}
 }

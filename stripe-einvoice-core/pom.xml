@@ -65,6 +65,18 @@
       <artifactId>junit-jupiter</artifactId>
       <scope>test</scope>
     </dependency>
+    <!--
+      The XSLT 2.0 processor the official EN 16931, XRechnung and Peppol schematron are written
+      in. Test scope, never compile scope: MPL-2.0 is denied by this repository's licence gate for
+      anything it ships, so the module discovers a processor by class name at run time and refuses
+      to issue when none is present. Here it means CI runs the real validator suites on every
+      build.
+    -->
+    <dependency>
+      <groupId>net.sf.saxon</groupId>
+      <artifactId>Saxon-HE</artifactId>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.testcontainers</groupId>
       <artifactId>testcontainers-minio</artifactId>

@@ -191,16 +191,19 @@ class SampleEndToEndTest {
                   "75001",
                   "Example City",
                   "FR",
-                  "FR00000000000"),
+                  "FR68900000001"),
               java.util.List.of(
                   new com.housedevinci.einvoice.application.SourceInvoice.SourceLine(
-                      "il_1", "One month of service", "txr_20", 10_000, 12_000)),
+                      "il_1", "One month of service", "txr_20", 1L, 10_000, 12_000)),
               java.util.List.of(
                   new com.housedevinci.einvoice.domain.Totals.Bucket(
                       "txr_20",
                       com.housedevinci.einvoice.domain.Percentage.of("20"),
                       false,
                       2_000)),
+              java.util.List.of(
+                  new com.housedevinci.einvoice.application.SourceInvoice.SourceTaxTreatment(
+                      "txr_20", "FR", "vat", "standard_rated")),
               10_000,
               2_000,
               12_000,
