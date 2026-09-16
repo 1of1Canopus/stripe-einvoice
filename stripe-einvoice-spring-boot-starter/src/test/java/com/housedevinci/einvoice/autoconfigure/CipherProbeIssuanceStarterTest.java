@@ -282,7 +282,7 @@ class CipherProbeIssuanceStarterTest {
             context -> {
               EInvoiceHealthIndicator health =
                   new EInvoiceHealthIndicator(
-                      context.getBean(IssuanceSweeper.class),
+                      java.util.Optional.of(context.getBean(IssuanceSweeper.class)),
                       context.getBean(EInvoiceProperties.class),
                       Clock.fixed(NOW.plus(Duration.ofDays(1)), ZoneOffset.UTC));
               assertThat(health.health().getStatus().getCode()).isEqualTo("DOWN");

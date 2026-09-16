@@ -87,6 +87,66 @@ class IssuanceWiringTest {
                     .hasSingleBean(IssuanceNumberingService.class));
   }
 
+  /**
+   * Found by running the documented quick start from a clean clone, which is the only way this
+   * class of defect is ever found: the starter contributes a health group naming its own
+   * contributor, the contributor was conditional on the sweeper, and a numbering-only host
+   * therefore failed to start with "Health contributor 'einvoiceIssuance' ... does not exist" - a
+   * bean name the host never chose, from a library it added for numbering.
+   */
+  @Test
+  void a_numbering_only_host_still_has_the_contributor_its_health_group_names() {
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithoutRenderer.class)
+        .withPropertyValues(noIntakeConfigured())
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              assertThat(context.containsBean(EInvoiceHealthGroupPostProcessor.CONTRIBUTOR))
+                  .describedAs(
+                      "the health group this starter contributes names %s; a group naming a"
+                          + " contributor that does not exist fails the host's startup",
+                      EInvoiceHealthGroupPostProcessor.CONTRIBUTOR)
+                  .isTrue();
+              EInvoiceHealthIndicator health =
+                  context.getBean(
+                      EInvoiceHealthGroupPostProcessor.CONTRIBUTOR, EInvoiceHealthIndicator.class);
+              assertThat(health.health().getStatus().getCode()).isEqualTo("UP");
+              assertThat(health.health().getDetails())
+                  .containsEntry("issuance", "not configured")
+                  .doesNotContainKey("lastSweep");
+            });
+  }
+
+  /**
+   * The third bean the pipeline cannot run without. With a webhook secret configured and no
+   * einvoice.stripe.api-key there is no StripeInvoiceSource, and before this the application
+   * started with an endpoint recording events that nothing would ever fetch, number or archive -
+   * the same silence D2-02 closed for the renderer and the validator.
+   */
+  @Test
+  void a_configured_intake_without_an_authoritative_source_is_refused_at_startup() {
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithoutSource.class)
+        .withPropertyValues(base())
+        .run(
+            context ->
+                assertThat(context)
+                    .hasFailed()
+                    .getFailure()
+                    .rootCause()
+                    .isInstanceOf(EInvoiceException.class)
+                    .hasMessageContaining("StripeInvoiceSource")
+                    .hasMessageContaining("einvoice.stripe.api-key")
+                    .hasMessageContaining("einvoice.issuance.enabled=false"));
+  }
+
   // D2-02
   @Test
   void probe_a_configured_intake_without_a_renderer_is_refused_loudly_not_silently() {
@@ -414,6 +474,34 @@ class IssuanceWiringTest {
     @Bean
     StripeInvoiceSource source() {
       return new IssuanceTestApp.RecordingStripeSource();
+    }
+  }
+
+  /**
+   * Everything the pipeline needs except the authoritative reader, which is what a host has when
+   * einvoice.stripe.api-key is not set. Declared from scratch rather than by overriding {@code
+   * Ports.source()} with null: a {@code @Bean} method returning null still registers a bean name
+   * for that type, so the check under test would see a source that is not there.
+   */
+  @Configuration
+  static class PortsWithoutSource {
+
+    // destroyMethod = "": the pool is shared by every context these tests start.
+    @Bean(destroyMethod = "")
+    DataSource dataSource() {
+      return TestPostgres.dataSource();
+    }
+
+    @Bean
+    DocumentRenderer renderer() {
+      return input ->
+          new DocumentRenderer.RenderedDocument(
+              "<Invoice/>".getBytes(java.nio.charset.StandardCharsets.UTF_8), "xml", "test");
+    }
+
+    @Bean
+    DocumentValidator validator() {
+      return (bytes, input) -> DocumentValidator.Report.passed();
     }
   }
 

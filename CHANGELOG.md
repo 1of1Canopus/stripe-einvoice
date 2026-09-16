@@ -8,6 +8,49 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **An XSLT 2.0 processor ships with the module, so a default install validates.** Saxon-HE is a
+  runtime dependency of the core module; nothing to add, and no configuration to read first. It is
+  MPL-2.0, admitted by the licence gate for that one coordinate and that one licence family, with
+  the reasoning and the invariant recorded in `SECURITY-NOTES.md`; a second MPL dependency still
+  fails the build. The class-name lookup stays as the "is a processor present" question
+  `DocumentValidator.canValidate()` answers and as the seam for substituting another processor.
+- **A keyless CVE gate on both sides of a merge.** Every pull request runs OSV-Scanner over the
+  transitively resolved dependency graph as a required check, and every release scans the artifacts
+  it is about to sign, and their runtime dependencies, with Grype before the signing step. One
+  threshold for both: HIGH and above fails, MEDIUM and below is recorded for a decision in the
+  release notes, an unrated advisory counts at the threshold, and an unreadable report fails. The
+  scanners are pinned binaries verified against recorded checksums. OWASP Dependency-Check remains
+  an optional weekly deep scan that skips loudly when no NVD key is configured.
+- **`docs/mandates.md`** - which country requires a structured invoice from when, every date with a
+  source URL and the date it was retrieved, and "not confirmed" where an official source could not
+  be reached. The per-country table in `docs/documents.md` pointed to the same facts without either,
+  which is how such a table goes stale.
+
+### Fixed
+
+- **A numbering-only host could not start.** The starter contributes a health group naming its own
+  contributor, and the contributor was conditional on the issuance sweeper, so an application that
+  added this library for numbering failed to start with `Health contributor 'einvoiceIssuance' ...
+  does not exist` - a bean name it never chose. The contributor now exists whenever the starter
+  does and reports `issuance: not configured` where there is no pipeline. Found by running the
+  documented quick start from a clean clone.
+- **A configured intake with no Stripe API key started silently.** The startup wiring check asked
+  for a `DocumentRenderer` and a `DocumentValidator` but not for the authoritative reader, so an
+  application with a webhook secret and no `einvoice.stripe.api-key` started with an endpoint that
+  recorded events nothing would ever fetch, number or archive. It is now refused by name at startup,
+  with the same remedy as the other two.
+- **The quick start did not work from a clean clone.** `cd stripe-einvoice-sample && ../mvnw
+  spring-boot:run` cannot resolve its sibling modules; the README now installs first, and leads with
+  the one command that produces a validated Peppol document and a validated XRechnung from a clean
+  clone with no Stripe account (about two minutes, measured).
+
+### Changed
+
+- A probe that runs an inner build or an external command now prints the last 30 lines of that
+  command's output when it reports WEAK, and a probe that could not run at all says why on its own
+  line. A swallowed transient failure and a real weakness used to look identical.
+- The licence gate's own self-test runs in CI, not only when someone remembers to run it by hand.
+
 - **EN 16931 documents: XRechnung 3.0 and Peppol BIS Billing 3.0, in UBL.** A semantic model in the
   domain package with zero third-party imports, a canonical UBL 2.1 writer, and a mapper from the
   authoritative Stripe invoice. Every EN 16931 balance rule is an invariant of the model, so an

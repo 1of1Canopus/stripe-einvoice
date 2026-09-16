@@ -24,6 +24,7 @@ import java.time.ZoneId;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -258,14 +259,24 @@ public class EInvoiceIssuanceAutoConfiguration {
         clock);
   }
 
-  /** The operational health contributor, in its own group and outside readiness and liveness. */
+  /**
+   * The operational health contributor, in its own group and outside readiness and liveness.
+   *
+   * <p>Deliberately NOT conditional on the sweeper. The starter contributes a health group naming
+   * this contributor, and Boot refuses to start when a group names a contributor that does not
+   * exist - so on a numbering-only host, which has no sweeper, the group made the HOST's
+   * application fail to start over a bean name the host never chose. Found by running the
+   * documented quick start from a clean clone. The contributor reports "not configured" there; an
+   * application that meant to issue never gets that far, because {@link IssuanceIntakeWiringCheck}
+   * refuses at startup.
+   */
   @Bean(name = "einvoiceIssuance")
   @ConditionalOnMissingBean(name = "einvoiceIssuance")
   @ConditionalOnClass(name = "org.springframework.boot.health.contributor.HealthIndicator")
-  @ConditionalOnBean(IssuanceSweeper.class)
   public EInvoiceHealthIndicator einvoiceHealthIndicator(
-      IssuanceSweeper sweeper, EInvoiceProperties properties, Clock clock) {
-    return new EInvoiceHealthIndicator(sweeper, properties, clock);
+      ObjectProvider<IssuanceSweeper> sweeper, EInvoiceProperties properties, Clock clock) {
+    return new EInvoiceHealthIndicator(
+        Optional.ofNullable(sweeper.getIfAvailable()), properties, clock);
   }
 
   @Bean
