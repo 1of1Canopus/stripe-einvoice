@@ -172,10 +172,9 @@ public final class ErrorCodes {
   public static final String WORKER_SATURATED = "DEI-260";
 
   /**
-   * A document renderer failed on input that mapping had already accepted - including an
-   * unexpected {@code RuntimeException} from a host-supplied renderer, not only this module's own
-   * exception type (D2-04, checklist line 47). The cause is logged server-side only. Terminal, not
-   * retryable.
+   * A document renderer failed on input that mapping had already accepted - including an unexpected
+   * {@code RuntimeException} from a host-supplied renderer, not only this module's own exception
+   * type (D2-04, checklist line 47). The cause is logged server-side only. Terminal, not retryable.
    */
   public static final String RENDER_FAILED = "DEI-261";
 

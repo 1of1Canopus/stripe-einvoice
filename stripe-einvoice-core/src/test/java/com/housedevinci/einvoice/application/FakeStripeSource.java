@@ -23,8 +23,8 @@ public final class FakeStripeSource implements StripeInvoiceSource {
   /**
    * Stripe is down, rate-limited, or answering 5xx: an outage, never a verdict about the sale.
    *
-   * @param failure a {@code RuntimeException} for an outage probe, or a test's own {@code Error}
-   *     to simulate a crash that no ordinary exception handling reaches
+   * @param failure a {@code RuntimeException} for an outage probe, or a test's own {@code Error} to
+   *     simulate a crash that no ordinary exception handling reaches
    */
   public void breakWith(Throwable failure) {
     this.failure = failure;
