@@ -32,8 +32,11 @@ the same number, and inventing one would be a mechanism nobody has designed.
 
 ## 2. The validator artefacts
 
-Vendored under `stripe-einvoice-core/src/main/resources/reference/`, every file with a SHA-256 in
-`CHECKSUMS.txt` and a provenance note in `PROVENANCE.md`. **Nothing is downloaded at build time or
+Vendored under the core module's own package root,
+`stripe-einvoice-core/src/main/resources/com/housedevinci/einvoice/reference/` - not at the root of
+the classpath, where a library's `/reference/` is one jar ordering away from resolving somebody
+else's file of the same name. Every file has a SHA-256 in `CHECKSUMS.txt` and a provenance note in
+`PROVENANCE.md`. **Nothing is downloaded at build time or
 at run time.** Every checksum is recomputed on every build, and a stylesheet's checksum is
 recomputed again before it is compiled at run time: a stylesheet is executable code, run over
 documents that are filed with a tax authority, and a checksum nothing recomputes is a comment.

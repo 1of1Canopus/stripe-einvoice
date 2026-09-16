@@ -194,7 +194,8 @@ did not write, over XML, in the same JVM as the host application. Everything abo
 handled follows from that:
 
 - they are **vendored**, never downloaded, with a SHA-256 each in
-  `stripe-einvoice-core/src/main/resources/reference/CHECKSUMS.txt` and a provenance note per file;
+  `stripe-einvoice-core/src/main/resources/com/housedevinci/einvoice/reference/CHECKSUMS.txt` and a
+  provenance note per file;
 - the checksum is recomputed **before a stylesheet is compiled at run time**, not only by a test. A
   test proves the repository is intact; this proves the jar that is running is;
 - extension functions are disabled both portably (`FEATURE_SECURE_PROCESSING`) and by the

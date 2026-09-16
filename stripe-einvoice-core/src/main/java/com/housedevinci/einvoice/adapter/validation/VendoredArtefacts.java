@@ -18,7 +18,7 @@ import java.util.Map;
  * <p>Nothing is downloaded at build time or at run time. Everything is read from the classpath and
  * from nowhere else: {@link #open(String)} refuses a path that is not in the manifest, so a caller
  * cannot reach a classpath resource this module never vendored. The SHA-256 of every file is in
- * {@code reference/CHECKSUMS.txt}, which is itself on the classpath, and a test recomputes every
+ * {@code CHECKSUMS.txt} beside them, which is itself on the classpath, and a test recomputes every
  * one on every build.
  *
  * <p>A stylesheet is <b>executable code</b> and these are run over documents that will be filed
@@ -29,8 +29,15 @@ import java.util.Map;
  */
 public final class VendoredArtefacts {
 
-  /** Classpath prefix every vendored file sits under. */
-  public static final String ROOT = "/reference/";
+  /**
+   * Classpath prefix every vendored file sits under.
+   *
+   * <p>Under this module's own package root, not at the root of the classpath. A library that puts
+   * {@code /reference/} at the top level is one jar ordering away from resolving another library's
+   * file of the same name, and the whole point of this class is that only the files in the manifest
+   * are reachable.
+   */
+  public static final String ROOT = "/com/housedevinci/einvoice/reference/";
 
   /** The manifest, relative to {@link #ROOT}. */
   public static final String MANIFEST = "CHECKSUMS.txt";
@@ -78,7 +85,7 @@ public final class VendoredArtefacts {
       throw new EInvoiceException(
           ErrorCodes.ARTEFACT_TAMPERED,
           "a validation artefact was requested that this module does not vendor. Only the files in"
-              + " reference/CHECKSUMS.txt are reachable, so a classpath entry cannot stand in for"
+              + " the checksum manifest are reachable, so a classpath entry cannot stand in for"
               + " one of them");
     }
     InputStream in = VendoredArtefacts.class.getResourceAsStream(ROOT + relativePath);

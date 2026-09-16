@@ -2,7 +2,7 @@
 # Provenance, release tag, retrieval date and licence per file: PROVENANCE.md
 # PROVENANCE.md is itself in this list: it is the evidence for everything else, so editing it
 # without regenerating the manifest turns the build red on purpose. Regenerate with:
-#   cd stripe-einvoice-core/src/main/resources/reference && find . -type f | sort \
+#   cd stripe-einvoice-core/src/main/resources/com/housedevinci/einvoice/reference && find . -type f | sort \
 #     | grep -v CHECKSUMS | while read f; do \
 #         echo "$(shasum -a 256 "$f" | cut -d' ' -f1)  ${f#./}"; done
 # and put the two comment lines above back at the top.

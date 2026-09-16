@@ -122,7 +122,7 @@ was written:
 ## 5. Validators
 
 Offline, vendored, checksummed. Four artefacts, all Apache-2.0, under
-`stripe-einvoice-core/src/main/resources/reference/`:
+`stripe-einvoice-core/src/main/resources/com/housedevinci/einvoice/reference/`:
 
 | Artefact | Version | Source |
 |---|---|---|

@@ -25,7 +25,8 @@ official rules before it is archived**.
 | Artefacts | KoSIT validator configuration for XRechnung, release `v2026-08-31` | OpenPeppol release `2026.5` |
 
 The artefacts are **vendored** with a SHA-256 each, recorded in
-`stripe-einvoice-core/src/main/resources/reference/CHECKSUMS.txt` with a provenance note per file.
+`stripe-einvoice-core/src/main/resources/com/housedevinci/einvoice/reference/CHECKSUMS.txt`, with a
+provenance note per file.
 Nothing is downloaded at build time or at run time, every checksum is recomputed on every build,
 and the checksum of a stylesheet is recomputed again before it is compiled at run time. A
 stylesheet is executable code, and these are run over documents that go to a tax authority.
