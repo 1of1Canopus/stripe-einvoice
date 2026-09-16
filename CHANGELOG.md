@@ -158,6 +158,20 @@ All notable changes to this project are documented here. The format follows
 - An explicit `einvoice.issuance.enabled=false` is now honoured even when a webhook secret is
   otherwise configured, so the fail-fast startup refusal's own remedy - setting that property -
   actually works.
+- The screening function and the canonical XML writer now refuse the XML 1.0 non-characters
+  (U+FFFE, U+FFFF, U+FDD0..U+FDEF and the last two code points of every other plane) in the same
+  pass as C0 controls and unpaired surrogates. A buyer-controlled field carrying one of these
+  ordinary-looking code points used to survive both checks and produce bytes no XML 1.0 parser
+  could read, discovered only after this module's own schema stage refused to re-read what it had
+  just written. Legal C1 controls continue to pass.
+- An application whose configured validator can never actually run at all (no XSLT 2.0 processor
+  on the classpath, in this module's own implementation) now refuses before the allocator and, when
+  the issuance path is wired, at startup - rather than discovering the same application-wide fact
+  once per invoice, after a legal number is already spent.
+- `NOTICE` now names the third-party artefacts vendored under this module's own resources (the
+  OASIS UBL 2.1 schema set and the CEN EN 16931, XRechnung and Peppol schematron stylesheets),
+  each with its publisher, release and licence, alongside a build-time check that a newly vendored
+  artefact cannot ship without one.
 
 ### Notes
 
