@@ -16,6 +16,20 @@ public interface DocumentValidator {
 
   Report validate(byte[] bytes, DocumentInput input);
 
+  /**
+   * Whether this validator can run at all, as a fact about the application rather than about one
+   * invoice (D3-02). {@code true} by default, matching every validator that has no such
+   * data-independent condition; a validator whose ability to run depends on something present or
+   * absent at startup (an XSLT 2.0 processor on the classpath, for one) overrides this so the unit
+   * of work can refuse before the allocator runs, rather than discover the same fact once per
+   * invoice after a number is already spent. The same shape as {@link
+   * ArchiveStore#supportsAtomicCreate()}: a capability the port asks about itself, not a value it
+   * computes from the document.
+   */
+  default boolean canValidate() {
+    return true;
+  }
+
   enum Verdict {
     /** Every rule ran and every rule passed. */
     PASSED,

@@ -157,6 +157,12 @@ public final class En16931DocumentValidator implements DocumentValidator, AutoCl
     return schematron.processorAvailable();
   }
 
+  /** D3-02: the port's own capability question, answered from the same fact. */
+  @Override
+  public boolean canValidate() {
+    return processorAvailable();
+  }
+
   /** The profile this validator judges under. */
   public UblProfile profile() {
     return profile;

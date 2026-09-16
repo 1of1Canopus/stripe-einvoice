@@ -288,6 +288,24 @@ class CipherProbeIssuanceTest {
         .contains(eventId);
   }
 
+  // D3-02
+  @Test
+  void probe_a_configuration_that_can_never_validate_consumes_no_number() {
+    IssuanceTestHarness harness =
+        IssuanceTestHarness.createWith(
+            com.housedevinci.einvoice.application.TestValidators.notEvaluatedNoProcessor(
+                "EN16931-NO-XSLT-PROCESSOR"));
+    harness.source().with(TestInvoices.finalised("in_no_processor"));
+    String eventId = harness.receive("invoice.finalized", "in_no_processor");
+
+    IssuanceUnitOfWork.Outcome outcome = harness.unitOfWork().process(eventId);
+
+    assertThat(outcome.code()).isEqualTo(ErrorCodes.XSLT_PROCESSOR_MISSING);
+    assertThat(harness.numberedRows())
+        .describedAs("this application can never validate anything - not this invoice's problem")
+        .isZero();
+  }
+
   // D2-04
   @Test
   void probe_a_host_validator_that_throws_is_recorded_like_any_other_phase_failure() {

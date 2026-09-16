@@ -30,6 +30,10 @@ import org.springframework.core.env.Environment;
  * against the {@link Environment}, never the field default, since the property itself defaults to
  * {@code true}). Neither present, and this is a numbering-only host by every visible sign - one
  * WARN at every startup, never a failure.
+ *
+ * <p>Both beans present is not the end of the check (D3-02): a validator that reports it can never
+ * validate anything - {@link DocumentValidator#canValidate()} - is the same class of problem as a
+ * missing bean, refused the same way.
  */
 final class IssuanceIntakeWiringCheck implements InitializingBean {
 
@@ -53,6 +57,25 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
     boolean hasRenderer = beanFactory.getBeanNamesForType(DocumentRenderer.class).length > 0;
     boolean hasValidator = beanFactory.getBeanNamesForType(DocumentValidator.class).length > 0;
     if (hasRenderer && hasValidator) {
+      // D3-02: wired is not the same question as able to validate anything, ever. A validator
+      // whose canValidate() says no (an XSLT 2.0 processor missing from the classpath, in this
+      // module's own implementation) is the same class of problem as a missing bean: known before
+      // this application serves a single request, and every invoice pays for it with a legal
+      // number otherwise. Same treatment as the missing-bean case below.
+      DocumentValidator validator = beanFactory.getBean(DocumentValidator.class);
+      if (!validator.canValidate() && intakeIsConfigured()) {
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG,
+            "einvoice.stripe.webhook-secrets is configured, or einvoice.issuance.enabled is"
+                + " explicitly true, so this application is set up to receive Stripe events - but"
+                + " the configured DocumentValidator reports that it can never validate anything"
+                + " (no XSLT 2.0 processor on the classpath, in this module's own implementation)."
+                + " Allocating a legal number for a document nothing will ever validate would"
+                + " consume the series and archive nothing, so the issuance pipeline refuses to"
+                + " start rather than fail once per invoice after the number is already spent. Add"
+                + " a processor to the application, or set einvoice.issuance.enabled=false to run"
+                + " the numbering API only.");
+      }
       return;
     }
     String missing = missingBeans(hasRenderer, hasValidator);
