@@ -93,9 +93,12 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
           "einvoice.stripe.webhook-secrets is configured, or einvoice.issuance.enabled is"
               + " explicitly true, so this application is set up to receive Stripe events - but no "
               + missing
-              + " bean is in the context. The starter builds both from einvoice.seller.* and"
-              + " einvoice.documents.*, so the usual cause is that einvoice.seller.name is not"
-              + " set. Allocating a legal number with no way to produce a"
+              + " bean is in the context. The starter builds a DocumentRenderer and a"
+              + " DocumentValidator from einvoice.seller.* and einvoice.documents.*, so the usual"
+              + " cause there is that einvoice.seller.name is not set; it builds a"
+              + " StripeInvoiceSource when com.stripe:stripe-java is on the classpath (it is an"
+              + " optional dependency of this starter, so the application declares it) AND"
+              + " einvoice.stripe.api-key is set. Allocating a legal number with no way to produce a"
               + " validated document would consume the series and archive nothing, so the issuance"
               + " pipeline refuses to start rather than start silently with no endpoint, no sweeper"
               + " and no signal. Supply the missing bean(s), or set"
@@ -125,7 +128,7 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
       if (!missing.isEmpty()) {
         missing.append(" and ");
       }
-      missing.append("StripeInvoiceSource (einvoice.stripe.api-key is not set)");
+      missing.append("StripeInvoiceSource");
     }
     return missing.toString();
   }

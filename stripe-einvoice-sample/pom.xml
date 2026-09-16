@@ -31,6 +31,15 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-security</artifactId>
     </dependency>
+    <!--
+      The Stripe SDK. Optional in the starter, because a host may read invoices its own way; the
+      sample is the reference application and declares it, so the documented `spring-boot:run`
+      actually wires the authoritative reader instead of refusing at startup. MIT.
+    -->
+    <dependency>
+      <groupId>com.stripe</groupId>
+      <artifactId>stripe-java</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
