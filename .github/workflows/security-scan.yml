@@ -28,8 +28,13 @@ jobs:
       - name: Scan the resolved dependency graph
         run: |
           set -uo pipefail
-          "${RUNNER_TEMP}/bin/osv-scanner" scan source --recursive \
-            --format json --output "${RUNNER_TEMP}/osv.json" ./
+          "${RUNNER_TEMP}/bin/osv-scanner" scan source \
+            --data-source=native --maven-registry=https://repo.maven.apache.org/maven2 \
+            --format json --output-file "${RUNNER_TEMP}/osv.json" \
+            -L pom.xml:pom.xml \
+            -L pom.xml:stripe-einvoice-core/pom.xml \
+            -L pom.xml:stripe-einvoice-spring-boot-starter/pom.xml \
+            -L pom.xml:stripe-einvoice-sample/pom.xml
           rc=$?
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
             echo "::error::osv-scanner exited $rc: the weekly scan did not complete"

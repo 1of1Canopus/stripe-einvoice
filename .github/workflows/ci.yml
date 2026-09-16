@@ -207,11 +207,22 @@ jobs:
         run: tools/check-vulnerability-report.py --self-test
       - name: Install the pinned OSV-Scanner and verify its checksum
         run: tools/install-scanner.sh osv-scanner "${RUNNER_TEMP}/bin"
+      # Every pom is named explicitly, and the resolver is pointed at Maven Central rather than
+      # at deps.dev. Both were learned by running it: a recursive scan of this tree exits 127
+      # ("failed resolution") because deps.dev does not know this repository's own SNAPSHOT
+      # modules, nor every AWS SDK artifact the optional S3 store pulls in. With the native
+      # resolver those unresolvable coordinates are reported as "local/unscannable" and skipped,
+      # and everything a host actually downloads is resolved and scanned.
       - name: Scan the resolved dependency graph
         run: |
           set -uo pipefail
-          "${RUNNER_TEMP}/bin/osv-scanner" scan source --recursive \
-            --format json --output "${RUNNER_TEMP}/osv.json" ./
+          "${RUNNER_TEMP}/bin/osv-scanner" scan source \
+            --data-source=native --maven-registry=https://repo.maven.apache.org/maven2 \
+            --format json --output-file "${RUNNER_TEMP}/osv.json" \
+            -L pom.xml:pom.xml \
+            -L pom.xml:stripe-einvoice-core/pom.xml \
+            -L pom.xml:stripe-einvoice-spring-boot-starter/pom.xml \
+            -L pom.xml:stripe-einvoice-sample/pom.xml
           rc=$?
           # 0: scanned, nothing found. 1: scanned, findings - the severity step decides.
           # Anything else (127 error, 128 no packages found) means the scan did not happen.

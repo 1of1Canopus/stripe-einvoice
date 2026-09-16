@@ -466,8 +466,12 @@ jobs:
               cp "$jar" "$scan/"
             done
           done
-          # Every jar a host actually gets at runtime.
+          # Every jar a host actually gets at runtime, for the two PUBLISHED modules only. The
+          # sample is never published, and a release held back by an advisory in a dependency of
+          # a reference application nobody deploys is the noise that gets a gate switched off.
+          # The sample is not unscanned: the per-pull-request check covers the whole tree.
           ./mvnw -B -q dependency:copy-dependencies \
+            -pl stripe-einvoice-core,stripe-einvoice-spring-boot-starter \
             -Dmaven.repo.local="${{ runner.temp }}/m2repo" \
             -DincludeScope=runtime -DoutputDirectory="$scan"
           count="$(find "$scan" -name '*.jar' | wc -l | tr -d ' ')"

@@ -28,6 +28,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Tomcat pinned to 11.0.25.** Spring Boot 4.1.1 manages 11.0.24, which carries three CRITICAL
+  advisories (GHSA-9xv2-5v5q-p794, GHSA-h3x4-894j-xpx5, GHSA-gcx9-497g-6cp6) in the DIGEST and FORM
+  authenticators and in access control. The starter brings `tomcat-embed-core` in with the web
+  dependency the webhook controller needs, so this was not only the sample's problem. Found by the
+  new vulnerability gate on its first real run.
+
 - **A numbering-only host could not start.** The starter contributes a health group naming its own
   contributor, and the contributor was conditional on the issuance sweeper, so an application that
   added this library for numbering failed to start with `Health contributor 'einvoiceIssuance' ...
