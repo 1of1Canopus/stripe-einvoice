@@ -62,7 +62,9 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
           "einvoice.stripe.webhook-secrets is configured, or einvoice.issuance.enabled is"
               + " explicitly true, so this application is set up to receive Stripe events - but no "
               + missing
-              + " bean is in the context. Allocating a legal number with no way to produce a"
+              + " bean is in the context. The starter builds both from einvoice.seller.* and"
+              + " einvoice.documents.*, so the usual cause is that einvoice.seller.name is not"
+              + " set. Allocating a legal number with no way to produce a"
               + " validated document would consume the series and archive nothing, so the issuance"
               + " pipeline refuses to start rather than start silently with no endpoint, no sweeper"
               + " and no signal. Supply the missing bean(s), or set"
