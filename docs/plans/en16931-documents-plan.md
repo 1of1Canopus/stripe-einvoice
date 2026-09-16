@@ -153,7 +153,8 @@ anything it ships (`pom.xml` `includedLicenses`, `tools/check-third-party-licenc
   runs the real official suites on every build, and the licence gate (which excludes test scope)
   stays untouched.
 - README and the docs page say, in the quickstart, that the host adds the processor, name the
-  licence, and say what happens if it does not. QUESTIONS.md carries this as a numbered decision.
+  licence, and say what happens if it does not. The decision is recorded in the internal decision
+log as a numbered entry.
 
 ### Hardening (D-07, checklist lines 10-14)
 
@@ -236,7 +237,7 @@ Probes: `CipherProbeDocumentsTest` in core, `CipherProbeDocumentWiringTest` in t
   new golden files.
 - **Scope creep into a mechanism.** Reading BT-10 from Stripe metadata needs an allowlist mechanism
   that the spec does not describe. It is not built here; the value comes from configuration, and the
-  gap is a numbered question.
+  gap is a numbered entry in the internal decision log.
 
 ## 9. What is deliberately not in this PR
 

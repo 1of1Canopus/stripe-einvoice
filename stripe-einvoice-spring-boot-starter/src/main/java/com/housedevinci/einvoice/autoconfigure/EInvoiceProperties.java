@@ -438,7 +438,7 @@ public class EInvoiceProperties {
      * <p>It comes from configuration and from nothing a buyer or a dashboard user can write.
      * Reading it out of Stripe metadata or a checkout custom field would let a buyer-controlled
      * value reach a business term, which needs an explicit allowlist mechanism the spec does not
-     * describe (D-10). See QUESTIONS.md entry 18.
+     * describe (D-10).
      */
     private String buyerReference = "";
 

@@ -183,3 +183,50 @@ module is where that is set out.
 ## Reporting
 
 `security@housedevinci.com`. See `SECURITY.md`.
+
+---
+
+## The document writers and the validators
+
+**Third-party stylesheets are run as code.** The EN 16931, XRechnung and Peppol rules are
+schematron, and schematron is executed as XSLT. This module compiles and runs four stylesheets it
+did not write, over XML, in the same JVM as the host application. Everything about how they are
+handled follows from that:
+
+- they are **vendored**, never downloaded, with a SHA-256 each in
+  `stripe-einvoice-core/src/main/resources/reference/CHECKSUMS.txt` and a provenance note per file;
+- the checksum is recomputed **before a stylesheet is compiled at run time**, not only by a test. A
+  test proves the repository is intact; this proves the jar that is running is;
+- extension functions are disabled both portably (`FEATURE_SECURE_PROCESSING`) and by the
+  processor's own switch, so a stylesheet cannot reach Java;
+- external DTD, schema and stylesheet access is blanked, `document()` resolution throws, and the
+  transform runs under an output bound and a wall-clock timeout on a bounded pool.
+
+**Every XML input is untrusted**, including our own output: the bytes that are validated are the
+bytes that will be archived, and an archived document re-read for a re-validation is read through
+the same hardened parser. A DOCTYPE is a refusal, not an unresolved reference.
+
+**The validation findings this module exposes carry rule identifiers and severities, not text.** A
+handful of XRechnung rules interpolate values out of the document being judged into their own
+assertion text, and those findings are persisted, rendered and logged. The full text is reachable
+only through `En16931DocumentValidator.validateInDetail`, documented as carrying document content,
+for a caller that has decided it may see it.
+
+**Without an XSLT 2.0 processor this module issues nothing.** The processor is discovered by class
+name and is not a dependency, because the only practical one for the JVM is under a licence this
+project's own gate denies for anything it ships. With none present every validation reports
+`NOT_EVALUATED`, the issuance unit of work refuses, and the starter WARNs at every startup naming
+the class it looked for. An unevaluated rule is not a passed rule, and archiving a document no rule
+ever read would be worse than issuing none.
+
+**What the documents contain, and for how long.** An issued invoice carries the buyer's name,
+postal address and VAT identifier, by law, and it lives in the customer's own archive for the
+retention their tax authority requires. `customer_email` is deliberately not written to the
+document: it is buyer data that no business term here needs. Issued invoices are **outside erasure
+scope** - a legal retention obligation is what they exist under - so an erasure request does not and
+must not remove them. This module is, by design, an exporter of personal data into a long-lived
+archive, and that is a consequence of tax law rather than an oversight.
+
+**Conformance is not claimed.** What is claimed is that the output is accepted by the reference
+validators, that those validators are the official artefacts at the versions recorded, and that they
+run on every build. The host application is the issuer of the invoices; this is a library.

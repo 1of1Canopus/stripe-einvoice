@@ -8,6 +8,49 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **EN 16931 documents: XRechnung 3.0 and Peppol BIS Billing 3.0, in UBL.** A semantic model in the
+  domain package with zero third-party imports, a canonical UBL 2.1 writer, and a mapper from the
+  authoritative Stripe invoice. Every EN 16931 balance rule is an invariant of the model, so an
+  unbalanced document cannot be constructed, let alone written or archived.
+- **The official validator suites, vendored and run before anything is archived.** The CEN
+  EN 16931 schematron, the CIUS XRechnung 3.0.2 rules and the Peppol 2026.5 rules, each with a
+  recorded SHA-256 and a provenance note, nothing downloaded at build or run time, and every
+  checksum recomputed before a stylesheet is compiled. The only conformance claim this project makes
+  is that its output is accepted by these, and they run in CI on every build over every fixture.
+- **Parser and stylesheet hardening**, with a probe per control that is shown to be capable of going
+  red: DOCTYPE refused outright, external DTD, schema and stylesheet access blanked, extension
+  functions off, resolvers that throw rather than return empty, a bounded report and a wall-clock
+  timeout. A validation that could not run reports `NOT_EVALUATED`, which refuses the archive write;
+  there is no path that reports a pass without having executed the rules.
+- **One screening function between every free-text value and the bytes**, with a reflection test
+  over the model's own string components so a field added later is caught on the commit that adds
+  it. Markup is escaped; a control character, an unpaired surrogate, a bidi override or a value that
+  collapses to blank is refused.
+- **An explicit currency exponent table**, Stripe's minor unit beside ISO 4217's presentation
+  exponent, with the zero-decimal and three-decimal currencies listed by name. There is no default
+  of 2 anywhere; an unlisted currency is refused at mapping time.
+- **A versioned tax rule pack** that derives the EN 16931 category and its VATEX reason from the
+  upstream's own taxability reason, checks it against the parties' countries, and refuses on a
+  conflict rather than recategorising. Its id and version are recorded with the issuance.
+- **Identifier checking for both parties, the configured seller included**: the French VAT key and
+  the SIREN Luhn, a GLN's GS1 check digit, an IBAN's mod-97, ISO 3166 countries, and the Peppol
+  electronic address scheme list. A mistyped seller identifier fails startup by property name.
+- **Seller profile and document configuration** (`einvoice.seller.*`, `einvoice.documents.*`),
+  validated at startup against the chosen profile's own rules: the buyer reference XRechnung
+  requires, the contact and payment instructions it requires, the electronic addresses Peppol
+  requires. Each refusal names the property rather than the value.
+- **Golden files for five fixtures** - German, French, Belgian, reverse charge and a credit note -
+  compared byte for byte, and rendered again under another locale and time zone to prove the same
+  input produces the same bytes anywhere.
+
+### Changed
+
+- The sample no longer ships a placeholder writer. It receives a signed Stripe test-mode event and
+  archives a validator-clean Peppol BIS UBL invoice, then renders and validates an XRechnung for the
+  same invoice beside it.
+- `SourceInvoice` carries a line quantity and the upstream's per-rate tax treatment, both of which a
+  document needs and neither of which could be derived from what was there.
+
 - **The issuance unit of work.** One Stripe event is driven to one archived document or to none,
   with a record either way: a durable inbound record written before any routing decision, an
   authoritative re-fetch of every field a document carries, a totals recomputation compared against

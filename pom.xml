@@ -101,7 +101,7 @@
       decision, so the module asks for a processor by CLASS NAME at run time and reports
       NOT_EVALUATED - which the issuance unit of work treats as a refusal - when none is present.
       A host application that wants validated documents adds a processor itself, and the README,
-      the documents page and QUESTIONS.md entry 17 all say so.
+      the documents page and the internal decision log all say so.
     -->
     <saxon.version>13.0</saxon.version>
     <errorprone.version>2.50.0</errorprone.version>

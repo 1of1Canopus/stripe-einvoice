@@ -7,11 +7,62 @@ France (small firms issuing from 1 September 2027, reception since 1 September 2
 does not produce it, and Stripe's own documentation tells you to install a marketplace app or write
 the mapping yourself. Java shops on Stripe have had nothing.
 
-> **Status: under construction.** This repository is pre-release and nothing is published yet. Two
-> pieces are in place: the legal numbering series, and the issuance unit of work that drives one
-> Stripe event to one archived document or to none. The EN 16931 mapping and the XRechnung / Peppol
-> UBL writers follow, and until they do an application supplies its own document writer - the
-> starter refuses to wire the issuance path without one rather than archiving something it made up.
+> **Status: under construction.** This repository is pre-release and nothing is published yet.
+> Three pieces are in place: the legal numbering series, the issuance unit of work that drives one
+> Stripe event to one archived document or to none, and the EN 16931 documents themselves -
+> XRechnung 3.0 and Peppol BIS Billing 3.0 in UBL, judged by the official validator artefacts.
+
+## What the documents are
+
+One Stripe invoice becomes one EN 16931 document, written by this module and **judged by the
+official rules before it is archived**.
+
+| | XRechnung 3.0 (UBL) | Peppol BIS Billing 3.0 (UBL) |
+|---|---|---|
+| `einvoice.documents.profile` | `xrechnung-ubl` | `peppol-bis-ubl` |
+| Specification identifier (BT-24) | `urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0` | `urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:billing:3.0` |
+| Rules run | CEN EN 16931 schematron, then the CIUS XRechnung rules (`BR-DE-*`) | CEN EN 16931 schematron as OpenPeppol compiles it, then `PEPPOL-EN16931-*` including the code lists |
+| Artefacts | KoSIT validator configuration for XRechnung, release `v2026-08-31` | OpenPeppol release `2026.5` |
+
+The artefacts are **vendored** with a SHA-256 each, recorded in
+`stripe-einvoice-core/src/main/resources/reference/CHECKSUMS.txt` with a provenance note per file.
+Nothing is downloaded at build time or at run time, every checksum is recomputed on every build,
+and the checksum of a stylesheet is recomputed again before it is compiled at run time. A
+stylesheet is executable code, and these are run over documents that go to a tax authority.
+
+What the writer guarantees:
+
+| Property | How |
+|---|---|
+| The bytes that were validated are the bytes that are archived | One byte array: rendered, validated, hashed, stored. Never a re-serialisation of a model |
+| The same invoice renders the same bytes anywhere | Canonical XML 1.1 written directly, no clock, no default zone, no default locale. The determinism test renders each fixture again under a Thai-digit locale and a time zone across the date line and compares bytes |
+| A buyer's string cannot become markup | One canonical writer that escapes, and one screening function that refuses what escaping cannot make safe: C0 controls, unpaired surrogates, bidi overrides, a value that collapses to blank, anything past the business term's own length bound |
+| A wrong number cannot hide behind a valid document | Every EN 16931 balance rule (`BR-CO-10`, `-13`, `-14`, `-15`, `-16`) is an invariant of the model, so an unbalanced document cannot be constructed, let alone written |
+| An identifier is checked, not assumed | The French VAT key and the SIREN's Luhn, a GLN's GS1 check digit, an IBAN's mod-97, ISO 3166 for countries, the Peppol EAS list for electronic addresses - for **both** parties, the configured seller included |
+| A tax position is never inferred | The category comes from Stripe's own taxability reason through a versioned rule pack, which checks and never overrides; a zero rate with no VATEX reason, or a reverse charge whose parties contradict it, is a refusal naming the Stripe field |
+| An exponent is never assumed | An explicit currency table with Stripe's minor-unit exponent beside ISO 4217's presentation exponent. `JPY 10000` stays ten thousand; `HUF 1000` is charged as an integer and written with two decimals; an unlisted currency is refused |
+
+### The XSLT processor
+
+The EN 16931, XRechnung and Peppol schematron are **XSLT 2.0**, and the JDK ships an XSLT 1.0
+processor only. This module therefore needs one, and asks for it **by class name** rather than
+depending on it: the only practical XSLT 2.0 processor for the JVM is MPL-2.0, and this project's
+licence gate denies MPL for anything it ships.
+
+Add one to your application:
+
+```xml
+<dependency>
+  <groupId>net.sf.saxon</groupId>
+  <artifactId>Saxon-HE</artifactId>
+  <version>13.0</version>
+</dependency>
+```
+
+**Without a processor this module issues nothing.** Every validation reports `NOT_EVALUATED`, which
+the issuance unit of work treats as a refusal, and the starter says so at every startup with a WARN
+naming the class it looked for. An unevaluated rule is not a passed rule, and archiving a document
+no rule ever read would be worse than issuing none.
 
 ## What the numbering series does
 
@@ -76,19 +127,24 @@ re-picked automatically, because neither is cured by an upgrade.
 
 ### What it needs from you
 
+The writer and the validator are the starter's, built from `einvoice.seller.*` and
+`einvoice.documents.*` as soon as `einvoice.seller.name` is set. What is left for you:
+
 ```java
-@Bean DocumentRenderer renderer() { ... }   // the EN 16931 writers ship in the next increment
-@Bean DocumentValidator validator() { ... } // a verdict that is not PASSED refuses the archive write
 @Bean StripeInvoiceSource source() { ... }  // or set einvoice.stripe.api-key and take the SDK
 ```
 
-Without a renderer or a validator this whole half of the module does not start - allocating a
-number with no way to produce a validated document would consume a legal series and archive
-nothing. **How loudly depends on whether you plainly meant to receive events.** With
+You may still supply your own `DocumentRenderer` or `DocumentValidator` bean and ours backs off -
+a custom format is a paid service on top of this, and the ports are public so you are not blocked
+waiting for one.
+
+With neither ours nor yours, this whole half of the module does not start: allocating a number with
+no way to produce a validated document would consume a legal series and archive nothing. **How
+loudly depends on whether you plainly meant to receive events.** With
 `einvoice.stripe.webhook-secrets` configured, or `einvoice.issuance.enabled` set explicitly, the
-missing bean fails startup by name. With neither, this is a numbering-only host and it starts with
-one WARN naming what is missing, not a failure - set `einvoice.issuance.enabled=false` to say so on
-purpose and stop the WARN repeating.
+missing bean fails startup by name - the usual cause being that `einvoice.seller.name` is unset.
+With neither, this is a numbering-only host and it starts with one WARN naming what is missing, not
+a failure - set `einvoice.issuance.enabled=false` to say so on purpose and stop the WARN repeating.
 
 and, in your security configuration, the webhook path left unauthenticated - the HMAC over the
 exact bytes received is its authentication:
@@ -113,6 +169,25 @@ einvoice:
   seller:
     id: acme-fr
     tax-zone: Europe/Paris      # required, no default: it decides the invoice date and fiscal year
+    name: Atelier Riviere SAS   # BT-27. Setting it is what turns the document writer on
+    vat-id: FR25900000019       # checked at startup, check digit included
+    electronic-address: FR25900000019
+    electronic-address-scheme: "9957"   # Peppol EAS; mandatory for the Peppol profile
+    address:
+      line1: 12 rue des Lilas
+      city: Lyon
+      postal-code: "69003"
+      country: FR
+    contact:                    # mandatory for XRechnung (BR-DE-2, BR-DE-6, BR-DE-7)
+      name: Comptabilite
+      telephone: "+33 4 72 00 00 00"
+      email: factures@atelier-riviere.invalid
+    payment:                    # mandatory for XRechnung (BR-DE-1)
+      means-code: "58"
+      account-id: FR7630006000011234567890189
+  documents:
+    profile: peppol-bis-ubl     # or xrechnung-ubl
+    buyer-reference: PO-9912    # BT-10; mandatory for XRechnung (BR-DE-15), a Leitweg-ID for B2G
   numbering:
     prefix: "INV-{fiscalYear}-" # required, no default; {fiscalYear} is required when the series
                                 # resets each year (below) - never a static year, or the second
@@ -168,10 +243,10 @@ EINVOICE_WEBHOOK_SECRET=whsec_from_your_stripe_dashboard \
 ../mvnw spring-boot:run
 ```
 
-The sample ships a **placeholder** document writer whose root element is `PlaceholderDocument`, so
-that nothing it produces can be mistaken for an EN 16931 invoice. It exists to demonstrate the
-whole path end to end - signature, record, re-fetch, totals, number, archive, chain - until the real
-writers land.
+The sample receives a signed Stripe test-mode event and writes a **validator-clean Peppol BIS
+Billing 3.0 UBL invoice** to its archive, then renders and validates an XRechnung for the same
+invoice beside it. One profile per application means one legal original per invoice; the second is
+a call on the renderer, not a second archived document under the same number.
 
 ## Requirements
 
@@ -187,6 +262,8 @@ writers land.
 
 - `docs/index.md` - how the series works, every property, the series report, and the one thing to
   tell an auditor about a late invoice from a closing year.
+- `docs/documents.md` - the BT-to-Stripe mapping table field by field, the per-country notes with
+  their sources, the validator artefacts and their versions, and what is deliberately refused.
 - `SECURITY-NOTES.md` - what is protected, by what, and what is not.
 - `docs/schema-grants.sql` - the database role this module should run as.
 - `CHANGELOG.md`
@@ -197,5 +274,7 @@ FSL-1.1-ALv2 (see `LICENSE` and `NOTICE`): source-available, and it converts to 
 years after each version is published.
 
 **What this software is, legally.** It is a library. Your application is the issuer of the invoices
-it produces; we produce and validate documents. Have your accountant check the first invoices a new
-configuration issues.
+it produces; we produce and validate documents. The claim this project makes about conformance is
+exactly this and no more: **it produces output that the reference validators accept**, and those
+validators run in CI on every build over every fixture. Have your accountant check the first
+invoices a new configuration issues.

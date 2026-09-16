@@ -69,4 +69,4 @@ here: the only practical XSLT 2.0 processor for the JVM is Saxon-HE, which is MP
 repository's licence gate denies MPL for anything it ships. With no processor on the classpath the
 schematron validator reports `NOT_EVALUATED`, which the issuance unit of work treats as a refusal,
 so an application without one issues nothing rather than issuing something unvalidated. See
-`README.md`, `docs/documents.md` and `QUESTIONS.md` entry 17.
+`README.md` and `docs/documents.md`.
