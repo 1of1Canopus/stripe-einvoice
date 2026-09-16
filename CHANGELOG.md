@@ -108,6 +108,13 @@ All notable changes to this project are documented here. The format follows
   pin equals what that row recorded, matching what the README, the docs page and the security notes
   already promised. It previously never re-picked a refused row at all; `REFUSED_MODE` and
   `REFUSED_ACCOUNT` are still never re-picked automatically, since neither is cured by an upgrade.
+- An unexpected exception from a host-supplied `DocumentRenderer`, `DocumentValidator` or
+  `ArchiveStore` is now recorded as a terminal, non-retryable failure with a stable generic code
+  instead of leaving the inbound row `MAPPED` forever with no code and no recorded attempt. The
+  cause is logged server-side only, never returned to a caller.
+- An explicit `einvoice.issuance.enabled=false` is now honoured even when a webhook secret is
+  otherwise configured, so the fail-fast startup refusal's own remedy - setting that property -
+  actually works.
 
 ### Notes
 
