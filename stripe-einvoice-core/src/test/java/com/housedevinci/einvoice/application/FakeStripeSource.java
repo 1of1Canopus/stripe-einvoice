@@ -13,15 +13,20 @@ public final class FakeStripeSource implements StripeInvoiceSource {
 
   private final Map<String, SourceInvoice> invoices = new LinkedHashMap<>();
   private final AtomicInteger fetches = new AtomicInteger();
-  private RuntimeException failure;
+  private Throwable failure;
 
   public FakeStripeSource with(SourceInvoice invoice) {
     invoices.put(invoice.id(), invoice);
     return this;
   }
 
-  /** Stripe is down, rate-limited, or answering 5xx: an outage, never a verdict about the sale. */
-  public void breakWith(RuntimeException failure) {
+  /**
+   * Stripe is down, rate-limited, or answering 5xx: an outage, never a verdict about the sale.
+   *
+   * @param failure a {@code RuntimeException} for an outage probe, or a test's own {@code Error}
+   *     to simulate a crash that no ordinary exception handling reaches
+   */
+  public void breakWith(Throwable failure) {
     this.failure = failure;
   }
 
@@ -36,9 +41,7 @@ public final class FakeStripeSource implements StripeInvoiceSource {
   @Override
   public SourceInvoice fetchInvoice(String invoiceId) {
     fetches.incrementAndGet();
-    if (failure != null) {
-      throw failure;
-    }
+    throwIfSet();
     SourceInvoice invoice = invoices.get(invoiceId);
     if (invoice == null) {
       throw new EInvoiceException(
@@ -47,11 +50,18 @@ public final class FakeStripeSource implements StripeInvoiceSource {
     return invoice;
   }
 
+  private void throwIfSet() {
+    if (failure instanceof RuntimeException re) {
+      throw re;
+    }
+    if (failure instanceof Error err) {
+      throw err;
+    }
+  }
+
   @Override
   public java.util.List<String> finalisedInvoiceIds(java.time.Instant from, java.time.Instant to) {
-    if (failure != null) {
-      throw failure;
-    }
+    throwIfSet();
     return invoices.values().stream()
         .filter(SourceInvoice::finalised)
         .filter(

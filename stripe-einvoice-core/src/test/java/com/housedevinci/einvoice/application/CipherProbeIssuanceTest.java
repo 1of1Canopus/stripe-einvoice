@@ -288,6 +288,85 @@ class CipherProbeIssuanceTest {
         .contains(eventId);
   }
 
+  // D2-04
+  @Test
+  void probe_a_host_validator_that_throws_is_recorded_like_any_other_phase_failure() {
+    IssuanceTestHarness harness =
+        IssuanceTestHarness.createWith(
+            (bytes, input) -> {
+              throw new IllegalStateException("a bug in somebody else's validator");
+            });
+    harness.source().with(TestInvoices.finalised("in_validator_bug"));
+    String eventId = harness.receive("invoice.finalized", "in_validator_bug");
+
+    harness.unitOfWork().process(eventId);
+
+    InboundEvent row = harness.inbound().find(eventId).orElseThrow();
+    assertThat(row.state())
+        .describedAs("never left MAPPED, or the due query re-picks it for ever")
+        .isEqualTo(InboundState.FAILED_ISSUANCE);
+    assertThat(row.lastCode()).isEqualTo(ErrorCodes.VALIDATOR_FAILED);
+  }
+
+  @Test
+  void a_host_renderer_that_throws_is_recorded_like_any_other_phase_failure() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    harness.source().with(TestInvoices.finalised("in_renderer_bug"));
+    String eventId = harness.receive("invoice.finalized", "in_renderer_bug");
+
+    harness
+        .unitOfWorkWithRenderer(
+            input -> {
+              throw new NullPointerException("a bug in somebody else's renderer");
+            })
+        .process(eventId);
+
+    InboundEvent row = harness.inbound().find(eventId).orElseThrow();
+    assertThat(row.state()).isEqualTo(InboundState.FAILED_ISSUANCE);
+    assertThat(row.lastCode()).isEqualTo(ErrorCodes.RENDER_FAILED);
+  }
+
+  @Test
+  void a_host_archive_that_throws_is_recorded_like_any_other_phase_failure() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    harness.source().with(TestInvoices.finalised("in_archive_bug"));
+    String eventId = harness.receive("invoice.finalized", "in_archive_bug");
+
+    harness
+        .unitOfWorkWithArchive(
+            new com.housedevinci.einvoice.application.ArchiveStore() {
+              @Override
+              public boolean supportsAtomicCreate() {
+                return true;
+              }
+
+              @Override
+              public WriteResult putIfAbsent(ArchiveKey key, byte[] bytes) {
+                throw new RuntimeException("a bug in somebody else's archive store");
+              }
+
+              @Override
+              public java.util.Optional<byte[]> get(ArchiveKey key) {
+                return java.util.Optional.empty();
+              }
+
+              @Override
+              public List<String> list(String prefix, int limit) {
+                return List.of();
+              }
+
+              @Override
+              public String describe() {
+                return "a store that throws (test)";
+              }
+            })
+        .process(eventId);
+
+    InboundEvent row = harness.inbound().find(eventId).orElseThrow();
+    assertThat(row.state()).isEqualTo(InboundState.FAILED_ISSUANCE);
+    assertThat(row.lastCode()).isEqualTo(ErrorCodes.ARCHIVE_FAILED);
+  }
+
   @Test
   void probe_the_strict_reader_refuses_a_body_two_readers_could_disagree_about() {
     assertThatThrownBy(

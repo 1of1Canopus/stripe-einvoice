@@ -144,6 +144,44 @@ public final class IssuanceTestHarness {
         configurationFor(series, pinnedApiVersion));
   }
 
+  /**
+   * A unit of work with a substitute renderer, everything else unchanged - for a probe that needs
+   * P2's render step to fail in a way this module's own renderer never fails in (D2-04).
+   */
+  public IssuanceUnitOfWork unitOfWorkWithRenderer(
+      com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
+    return new IssuanceUnitOfWork(
+        inbound,
+        source,
+        store,
+        store,
+        store,
+        substituteRenderer,
+        validator,
+        archive,
+        clock,
+        configurationFor("DEFAULT", pinnedApiVersion));
+  }
+
+  /**
+   * A unit of work with a substitute archive, everything else unchanged - for a probe that needs
+   * P3's write to fail in a way this module's own archive stores never fail in (D2-04).
+   */
+  public IssuanceUnitOfWork unitOfWorkWithArchive(
+      com.housedevinci.einvoice.application.ArchiveStore substituteArchive) {
+    return new IssuanceUnitOfWork(
+        inbound,
+        source,
+        store,
+        store,
+        store,
+        renderer,
+        validator,
+        substituteArchive,
+        clock,
+        configurationFor("DEFAULT", pinnedApiVersion));
+  }
+
   private IssuanceUnitOfWork.Configuration configurationFor(String series, String apiVersion) {
     return new IssuanceUnitOfWork.Configuration(
         sellerId,

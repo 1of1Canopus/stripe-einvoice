@@ -20,8 +20,8 @@ public final class InMemoryArchiveStore implements ArchiveStore {
   private final Map<String, byte[]> objects = new LinkedHashMap<>();
   private final boolean overwrites;
   private final boolean declaresAtomic;
-  private RuntimeException failure;
-  private RuntimeException failureAfterWrite;
+  private Throwable failure;
+  private Throwable failureAfterWrite;
 
   public InMemoryArchiveStore() {
     this(false, true);
@@ -36,13 +36,18 @@ public final class InMemoryArchiveStore implements ArchiveStore {
     this.declaresAtomic = declaresAtomic;
   }
 
-  /** Makes every later write fail, for the crash and outage tests. */
-  public void failWith(RuntimeException failure) {
+  /**
+   * Makes every later write fail, for the crash and outage tests.
+   *
+   * @param failure a {@code RuntimeException} for a host-port-bug probe (D2-04), or a test's own
+   *     {@code Error} to simulate a crash that no ordinary exception handling reaches
+   */
+  public void failWith(Throwable failure) {
     this.failure = failure;
   }
 
   /** Stores the object and then dies: the P3 crash the recovery column of the design describes. */
-  public void failAfterWriteWith(RuntimeException failure) {
+  public void failAfterWriteWith(Throwable failure) {
     this.failureAfterWrite = failure;
   }
 
@@ -72,9 +77,7 @@ public final class InMemoryArchiveStore implements ArchiveStore {
 
   @Override
   public WriteResult putIfAbsent(ArchiveKey key, byte[] bytes) {
-    if (failure != null) {
-      throw failure;
-    }
+    throwIfSet(failure);
     byte[] existing = objects.get(key.value());
     if (existing != null && !overwrites) {
       if (MessageDigest.isEqual(existing, bytes)) {
@@ -84,10 +87,17 @@ public final class InMemoryArchiveStore implements ArchiveStore {
           ErrorCodes.ARCHIVE_CONTENT_CONFLICT, "the archive key already holds different bytes");
     }
     objects.put(key.value(), bytes.clone());
-    if (failureAfterWrite != null) {
-      throw failureAfterWrite;
-    }
+    throwIfSet(failureAfterWrite);
     return WriteResult.CREATED;
+  }
+
+  private static void throwIfSet(Throwable failure) {
+    if (failure instanceof RuntimeException re) {
+      throw re;
+    }
+    if (failure instanceof Error err) {
+      throw err;
+    }
   }
 
   @Override

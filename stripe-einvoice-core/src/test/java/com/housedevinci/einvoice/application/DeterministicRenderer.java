@@ -16,9 +16,13 @@ public final class DeterministicRenderer implements DocumentRenderer {
   private static final DateTimeFormatter ISO_DATE =
       DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.ROOT);
 
-  private RuntimeException failure;
+  private Throwable failure;
 
-  public void breakWith(RuntimeException failure) {
+  /**
+   * @param failure a {@code RuntimeException} for a host-port-bug probe (D2-04), or a test's own
+   *     {@code Error} to simulate a crash that no ordinary exception handling reaches
+   */
+  public void breakWith(Throwable failure) {
     this.failure = failure;
   }
 
@@ -28,8 +32,11 @@ public final class DeterministicRenderer implements DocumentRenderer {
 
   @Override
   public RenderedDocument render(DocumentInput input) {
-    if (failure != null) {
-      throw failure;
+    if (failure instanceof RuntimeException re) {
+      throw re;
+    }
+    if (failure instanceof Error err) {
+      throw err;
     }
     StringBuilder out = new StringBuilder();
     out.append("<Invoice>");

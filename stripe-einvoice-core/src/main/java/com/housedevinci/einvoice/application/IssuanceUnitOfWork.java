@@ -269,6 +269,12 @@ public final class IssuanceUnitOfWork {
             configuration.rulePackVersion());
 
     // P2: the exact bytes, and the validation of those exact bytes - never of a re-serialisation.
+    // Both ports are always a host's own code in 0.1.0 - the writers are the next change - and a
+    // bug in either (a null pointer, an XML library's own runtime exception) must not leave this
+    // event MAPPED forever: that is exactly the D2-01 state re-picked immediately, for ever, and
+    // never reaching a FAILED_* state the retry ceiling can govern. RuntimeException is caught
+    // alongside this module's own exception type; the cause is logged server-side only (checklist
+    // line 47), and the row gets a stable, generic code, never the cause.
     byte[] bytes;
     DocumentRenderer.RenderedDocument document;
     try {
@@ -276,8 +282,19 @@ public final class IssuanceUnitOfWork {
       bytes = document.bytes();
     } catch (EInvoiceException e) {
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), backoffFor(event));
+    } catch (RuntimeException e) {
+      log.error("einvoice: the document renderer threw an unexpected exception", e);
+      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.RENDER_FAILED, null);
     }
-    DocumentValidator.Report report = validator.validate(bytes, input);
+    DocumentValidator.Report report;
+    try {
+      report = validator.validate(bytes, input);
+    } catch (EInvoiceException e) {
+      return fail(event, InboundState.FAILED_ISSUANCE, e.code(), backoffFor(event));
+    } catch (RuntimeException e) {
+      log.error("einvoice: the document validator threw an unexpected exception", e);
+      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.VALIDATOR_FAILED, null);
+    }
     if (!report.archivable()) {
       String code =
           report.verdict() == DocumentValidator.Verdict.NOT_EVALUATED
@@ -325,6 +342,17 @@ public final class IssuanceUnitOfWork {
           "");
       Duration retryIn = ErrorCodes.ARCHIVE_UNAVAILABLE.equals(e.code()) ? backoffFor(event) : null;
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
+    } catch (RuntimeException e) {
+      // D2-04: a host-supplied ArchiveStore is the same class of risk as the renderer and the
+      // validator - always somebody else's code in 0.1.0.
+      log.error("einvoice: the archive store threw an unexpected exception", e);
+      writer.markFailed(
+          configuration.sellerId(),
+          configuration.mode(),
+          invoice.id(),
+          IssuanceState.FAILED_ARCHIVE,
+          "");
+      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.ARCHIVE_FAILED, null);
     }
 
     // P4: the document exists. Wrapped like P3 (D2-01): a crash or a store failure here falls

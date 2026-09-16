@@ -147,16 +147,36 @@ public final class ErrorCodes {
   /** The archive store cannot create an object only if it is absent, and is refused (I-06). */
   public static final String ARCHIVE_NOT_ATOMIC = "DEI-242";
 
+  /**
+   * A host-supplied {@code ArchiveStore} threw something other than this module's own exception
+   * type (D2-04, checklist line 47). The cause is logged server-side only; this code is what the
+   * row and any caller ever see. Terminal, not retryable: a host port's own bug does not improve by
+   * running again.
+   */
+  public static final String ARCHIVE_FAILED = "DEI-243";
+
   /** The exact bytes did not pass validation. The failing rule id is recorded. */
   public static final String VALIDATION_REFUSED = "DEI-250";
 
   /** A validation could not run. Never PASSED by construction (checklist lines 18 and 57). */
   public static final String VALIDATION_NOT_EVALUATED = "DEI-251";
 
+  /**
+   * A host-supplied {@code DocumentValidator} threw something other than this module's own
+   * exception type (D2-04, checklist line 47). The cause is logged server-side only. Terminal, not
+   * retryable, for the same reason {@link #ARCHIVE_FAILED} is.
+   */
+  public static final String VALIDATOR_FAILED = "DEI-252";
+
   /** The issuance worker is at capacity. The event stays RECEIVED and the sweeper takes it. */
   public static final String WORKER_SATURATED = "DEI-260";
 
-  /** A document renderer failed on input that mapping had already accepted. */
+  /**
+   * A document renderer failed on input that mapping had already accepted - including an
+   * unexpected {@code RuntimeException} from a host-supplied renderer, not only this module's own
+   * exception type (D2-04, checklist line 47). The cause is logged server-side only. Terminal, not
+   * retryable.
+   */
   public static final String RENDER_FAILED = "DEI-261";
 
   /** A finalised Stripe invoice has no issuance row at all. The finding D-09 exists for. */

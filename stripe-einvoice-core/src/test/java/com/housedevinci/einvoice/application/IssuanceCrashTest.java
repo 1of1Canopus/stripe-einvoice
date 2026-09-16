@@ -19,8 +19,15 @@ import org.junit.jupiter.api.Test;
  */
 class IssuanceCrashTest {
 
-  /** Not an EInvoiceException on purpose: nothing in the module may treat this as an outcome. */
-  static final class KillSignal extends RuntimeException {
+  /**
+   * Not an {@code EInvoiceException}, and deliberately not a {@code RuntimeException} either
+   * (D2-04): once a host-supplied renderer, validator or archive store's {@code RuntimeException}
+   * is caught and mapped to a stable code, a plain {@code RuntimeException} is no longer a faithful
+   * stand-in for "the process died here" - a real crash never runs a catch block at all, of any
+   * kind, so the honest simulation is a throwable ordinary exception handling does not reach. An
+   * {@code Error} is exactly that: nothing in this module, before or after D2-04, catches one.
+   */
+  static final class KillSignal extends Error {
     private static final long serialVersionUID = 1L;
 
     KillSignal() {
