@@ -92,12 +92,20 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
   }
 
   private boolean intakeIsConfigured() {
+    // D2-05: an explicit false wins over everything else, including a webhook secret sitting in
+    // a shared configuration server from an earlier rollout. Without this, the secrets arm below
+    // returns true first, the pipeline fails to start, and the refusal's own remedy - "set
+    // einvoice.issuance.enabled=false to run the numbering API only" - is refused too, because the
+    // operator has already done exactly that.
+    if (environment.containsProperty("einvoice.issuance.enabled")
+        && !properties.getIssuance().isEnabled()) {
+      return false;
+    }
     if (!properties.getStripe().getWebhookSecrets().isEmpty()) {
       return true;
     }
     // The property itself defaults to true, so only an explicit setting - present in the
-    // environment, regardless of value - counts as the operator saying something (N.B: an
-    // explicit false is not "configured", it is the opposite; short-circuited by isEnabled()).
+    // environment, regardless of value - counts as the operator saying something.
     return environment.containsProperty("einvoice.issuance.enabled")
         && properties.getIssuance().isEnabled();
   }

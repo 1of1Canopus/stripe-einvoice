@@ -142,6 +142,29 @@ class IssuanceWiringTest {
         .run(context -> assertThat(context).hasFailed());
   }
 
+  // D2-05
+  @Test
+  void probe_an_explicitly_disabled_intake_starts_even_with_secrets_configured() {
+    // base() carries a webhook secret, which on its own means "configured". An explicit
+    // einvoice.issuance.enabled=false must win over it - a shared configuration server or a
+    // rollback is the ordinary shape of this, and without the fix the refusal's own remedy ("set
+    // einvoice.issuance.enabled=false") does not work, because the operator has already done it.
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithoutRenderer.class)
+        .withPropertyValues(base())
+        .withPropertyValues("einvoice.issuance.enabled=false")
+        .run(
+            context ->
+                assertThat(context.getStartupFailure())
+                    .describedAs(
+                        "an explicit einvoice.issuance.enabled=false must be honoured even with a"
+                            + " webhook secret configured")
+                    .isNull());
+  }
+
   @Test
   void an_explicitly_disabled_issuance_with_no_secret_and_no_renderer_only_warns() {
     new ApplicationContextRunner()
