@@ -5,3 +5,48 @@ Licensed under the Functional Source License, Version 1.1, ALv2 Future License
 (FSL-1.1-ALv2). See LICENSE for the full text. The Software converts to the
 Apache License, Version 2.0 on the second anniversary of the date each version
 is made available.
+
+================================================================================
+Third-party material vendored under
+com/housedevinci/einvoice/reference/ (stripe-einvoice-core)
+================================================================================
+
+This jar carries reference validation artefacts published by third parties,
+read from the classpath at run time and never fetched over the network. The
+SHA-256 of every file is checked against a recorded manifest on every build
+(CHECKSUMS.txt, beside them); full provenance, release tag, retrieval date and
+licence per file is in PROVENANCE.md, in the same location.
+
+1. OASIS UBL 2.1 XSD (ubl/2.1/, 15 files)
+   Source: OASIS Universal Business Language (UBL) 2.1 OASIS Standard.
+   https://docs.oasis-open.org/ubl/os-UBL-2.1/UBL-2.1.html
+   Copyright (c) OASIS Open 2013. All Rights Reserved. Distributed under the
+   OASIS IPR Policy (https://www.oasis-open.org/policies-guidelines/ipr/).
+   Each file carries the OASIS copyright notice in its own header, unmodified.
+
+2. CEN EN 16931 schematron, UBL syntax
+   (schematron/en16931/EN16931-UBL-validation.xsl)
+   Source: Koordinierungsstelle fuer IT-Standards (KoSIT) XRechnung validator
+   configuration release v2026-08-31, itself compiled from the European
+   Commission's reference validation artefacts for EN 16931
+   (ConnectingEurope/eInvoicing-EN16931).
+   Licence: Apache License, Version 2.0.
+
+3. CIUS XRechnung 3.0.2 schematron, UBL syntax
+   (schematron/xrechnung/XRechnung-UBL-validation.xsl)
+   Source: Koordinierungsstelle fuer IT-Standards (KoSIT), on behalf of the
+   IT-Planungsrat, XRechnung validator configuration release v2026-08-31,
+   XRechnung version 3.0.2. https://xeinkauf.de/xrechnung/
+   Licence: Apache License, Version 2.0.
+
+4. Peppol BIS Billing 3.0 schematron, UBL syntax
+   (schematron/peppol/CEN-EN16931-UBL.xslt, schematron/peppol/PEPPOL-EN16931-UBL.xslt)
+   Source: OpenPeppol, release 2026.5, as redistributed in phive-rules-peppol
+   4.5.6 (com.helger.phive.rules:phive-rules-peppol).
+   Licence: Apache License, Version 2.0.
+
+Attribution notices for material licensed under the Apache License, Version
+2.0 are carried per this NOTICE section as required by section 4(d) of that
+licence; the full licence text is at
+https://www.apache.org/licenses/LICENSE-2.0. Nothing above modifies the terms
+of the FSL-1.1-ALv2 licence this project's own source is distributed under.
