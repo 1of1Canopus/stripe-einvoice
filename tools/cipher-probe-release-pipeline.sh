@@ -1469,7 +1469,8 @@ probe_the_release_signs_artifacts_it_never_scanned() {
   work="$(mktemp -d)"
   cat >"$work/grype.json" <<'REPORT'
 {"matches":[{"vulnerability":{"id":"CVE-synthetic-critical","severity":"Critical"},
-             "artifact":{"name":"vulnerable","version":"1.0","type":"java-archive"}}]}
+             "artifact":{"name":"vulnerable","version":"1.0","type":"java-archive"}}],
+ "artifacts":[{"name":"vulnerable","version":"1.0","type":"java-archive"}]}
 REPORT
   tools/check-vulnerability-report.py --format grype --report "$work/grype.json" --fail-on high \
     >>"$PROBE_CAPTURE" 2>&1
@@ -1506,6 +1507,25 @@ probe_an_unreadable_scan_report_counts_as_clean() {
 }
 
 # ---------------------------------------------------------------------------
+# D4-01 - the same "scanned nothing renders as clean" defect S7 refuses for OSV, on the Grype
+#      side: an empty "matches" array with an empty (or absent) "artifacts" array is a report of a
+#      scan that looked at nothing, indistinguishable from a clean tree unless "artifacts" is
+#      checked too.
+#      Weak while the gate exits 0 on it.
+# ---------------------------------------------------------------------------
+a_grype_report_that_scanned_nothing_is_refused() {
+  local work rc
+  work="$(mktemp -d)"
+  printf '{"matches":[],"source":{"type":"directory","target":"/nonexistent"},"artifacts":[]}' \
+    > "$work/grype-empty.json"
+  tools/check-vulnerability-report.py --format grype --report "$work/grype-empty.json" \
+    --fail-on high >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]   # an empty scan reported as clean: weak
+}
+
+# ---------------------------------------------------------------------------
 # S8 - a MEDIUM finding disappears: it does not fail the release (by decision) and nothing
 #      writes it down either, so the release notes cannot carry a decision for it.
 #      Weak while a MEDIUM finding leaves no line in the summary file.
@@ -1515,7 +1535,8 @@ probe_a_medium_finding_is_never_written_down() {
   work="$(mktemp -d)"
   cat >"$work/grype.json" <<'REPORT'
 {"matches":[{"vulnerability":{"id":"CVE-synthetic-medium","severity":"Medium"},
-             "artifact":{"name":"vulnerable","version":"1.0","type":"java-archive"}}]}
+             "artifact":{"name":"vulnerable","version":"1.0","type":"java-archive"}}],
+ "artifacts":[{"name":"vulnerable","version":"1.0","type":"java-archive"}]}
 REPORT
   tools/check-vulnerability-report.py --format grype --report "$work/grype.json" --fail-on high \
     --summary-file "$work/below.txt" >>"$PROBE_CAPTURE" 2>&1
@@ -1667,6 +1688,7 @@ probe probe_licence_gate_self_test_is_not_run_by_ci          "S4 nothing in CI r
 probe probe_high_severity_passes_the_pull_request_gate       "S5 a HIGH advisory does not fail a pull request"    probe_a_high_severity_dependency_passes_the_pull_request_gate
 probe probe_release_signs_artifacts_it_never_scanned         "S6 nothing scans what the release signs"            probe_the_release_signs_artifacts_it_never_scanned
 probe probe_unreadable_scan_report_counts_as_clean           "S7 a scan that did not run reads as clean"          probe_an_unreadable_scan_report_counts_as_clean
+probe a_grype_report_that_scanned_nothing_is_refused         "D4-01 an empty Grype scan reads as clean"           a_grype_report_that_scanned_nothing_is_refused
 probe probe_medium_finding_is_never_written_down             "S8 a MEDIUM finding leaves no record"               probe_a_medium_finding_is_never_written_down
 probe probe_weekly_deep_scan_red_or_silent_without_a_key     "S9 the weekly run is red, or skips in silence"      probe_the_weekly_deep_scan_is_red_or_silent_without_a_key
 probe probe_scanner_downloads_are_unverified                 "S10 a tampered scanner binary installs"             probe_scanner_downloads_are_installed_without_verification

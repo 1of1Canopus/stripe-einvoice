@@ -59,6 +59,11 @@ All notable changes to this project are documented here. The format follows
   spring-boot:run` cannot resolve its sibling modules; the README now installs first, and leads with
   the one command that produces a validated Peppol document and a validated XRechnung from a clean
   clone with no Stripe account (about two minutes, measured).
+- **A Grype report that scanned nothing passed as a clean release.** The vulnerability gate already
+  refused an OSV report listing no packages at all; the same emptiness through Grype's own
+  `artifacts` array - absent or empty - exited 0. Both formats now refuse a report of a scan that
+  looked at nothing with the same message, on the same reasoning: a scanner exit that means "we
+  could not scan" must never be indistinguishable from a clean tree.
 
 ### Changed
 
