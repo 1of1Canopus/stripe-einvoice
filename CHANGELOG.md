@@ -64,6 +64,7 @@ All notable changes to this project are documented here. The format follows
   `artifacts` array - absent or empty - exited 0. Both formats now refuse a report of a scan that
   looked at nothing with the same message, on the same reasoning: a scanner exit that means "we
   could not scan" must never be indistinguishable from a clean tree.
+- **The release gate named the wrong scanner when a Grype report listed no artifacts.** The message now states Grype's own causes (jars not staged, wrong input path, empty SBOM) instead of OSV-Scanner's flag. Wording only; the refusal itself is unchanged (second security pass, INFO).
 
 ### Changed
 
