@@ -129,3 +129,77 @@ One correction, with its probe. Pass 2 is the last pass on this branch.
 
 1. **D4-01** - the Grype arm refuses a report that scanned nothing, exit 2, with a self-test case
    beside the OSV one. Probe: `a_grype_report_that_scanned_nothing_is_refused`.
+
+---
+
+## 2026-09-20 - pass 2 (final)
+
+Commit `a9dd7d8`. Pass 2 of 2: no third pass.
+
+### Verdict
+
+**NOT MERGEABLE**, on a one-line list. D4-01 is closed, correctly and with a probe that is a real
+detector. The single item below is a wrong word inside the message the fix added, and it is the only
+thing between this branch and merge.
+
+| Severity | Count | Ids |
+|---|---|---|
+| HIGH | 0 | - |
+| MEDIUM | 0 | - |
+| LOW | 0 | - |
+| INFO | 1 | D4-02 |
+
+### What was run
+
+| Check | Result |
+|---|---|
+| `git diff 7906f8f..a9dd7d8 --stat` | three files - the checker, the probe suite, the changelog. Nothing else in the branch moved |
+| `./mvnw -B verify` | BUILD SUCCESS, 459 tests (346 core, 109 starter, 4 sample) |
+| `CIPHER_PROBE_MAVEN=1 tools/cipher-probe-release-pipeline.sh` | **74 fixed, 0 weak** |
+| Four report cases and two mutations of my own | all as intended |
+
+### D4-01, re-verified
+
+| Case | Result |
+|---|---|
+| Grype report, `matches: []` **and** `artifacts: []` | **exit 2**, "lists no packages at all" - the finding is closed |
+| Grype report, `artifacts` present, `matches: []` | **exit 0**, "1 package(s) were scanned" - the honest clean case still passes, which is the half a careless fix would have broken |
+| Grype report with a HIGH finding and an artifact | **exit 1** - the severity path still runs through the new guard |
+| `--self-test` | covers both empty-scan arms by name: "osv empty scan is not a pass" and "grype empty scan is not a pass (D4-01)", 0 failures |
+
+**The probe is a detector, not a decoration.** With the new `if scanned == 0` reverted to `if False`,
+`a_grype_report_that_scanned_nothing_is_refused` reads **WEAK**; with it restored, **FIXED**. I ran
+both directions rather than the green one.
+
+**The severity fixtures are not tautologies.** I broke `bucket()` to return `LOW` for every score and
+re-ran the self-test: five cases fail, including the CRITICAL and MEDIUM ones. The arithmetic and the
+ranking are genuinely exercised, and the artifacts entry added to the fixtures did not turn them into
+checks of themselves - the full `run()` path with an artifact present still reports the HIGH and exits
+1, which is the case that matters.
+
+---
+
+#### D4-02 · INFO · the refusal points a Grype operator at a flag that belongs to the other scanner
+
+The new Grype arm reuses the OSV arm's message verbatim: *"Either resolution produced nothing or the
+scanner was not run with `--all-packages`; either way this is not evidence of a clean tree."*
+`--all-packages` is OSV-Scanner's flag. Grype has no such option, so the one sentence an operator gets
+when the release gate stops them sends them looking through the wrong tool's help.
+
+The right causes for this arm are already written, correctly, in the docstring of the function the fix
+added - a target path that does not exist, a bad scope, a broken catalog. They just did not reach the
+message.
+
+**Repro.** `printf '{"matches":[],"artifacts":[]}'` through `--format grype`: exit 2, with
+`--all-packages` in the text.
+
+**Required change.** Make the middle clause format-specific: keep the OSV wording on the OSV arm, and
+on the Grype arm name what actually produces an empty artifact list (the scan target resolved to
+nothing - a path that does not exist, or a scope that matched no packages). The first and last clauses
+stay identical, because the conclusion is identical. One string, no behaviour change; the existing
+self-test case keeps passing.
+
+### Fix list
+
+1. **D4-02** - the empty-scan message names the cause for the scanner that produced the report. No new
+   probe; the existing `--self-test` case and the shell probe both stay green.
