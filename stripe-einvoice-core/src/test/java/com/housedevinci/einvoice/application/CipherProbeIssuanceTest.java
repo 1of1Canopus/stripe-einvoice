@@ -298,12 +298,34 @@ class CipherProbeIssuanceTest {
     harness.source().with(TestInvoices.finalised("in_no_processor"));
     String eventId = harness.receive("invoice.finalized", "in_no_processor");
 
-    IssuanceUnitOfWork.Outcome outcome = harness.unitOfWork().process(eventId);
+    java.util.concurrent.atomic.AtomicInteger preflights =
+        new java.util.concurrent.atomic.AtomicInteger();
+    DocumentRenderer counting =
+        new DocumentRenderer() {
+          @Override
+          public RenderedDocument render(DocumentInput input) {
+            throw new IllegalStateException("never reached");
+          }
+
+          @Override
+          public PreflightReport preflight(MappingInput input) {
+            preflights.incrementAndGet();
+            return PreflightReport.passed();
+          }
+        };
+
+    IssuanceUnitOfWork.Outcome outcome = harness.unitOfWorkWithRenderer(counting).process(eventId);
 
     assertThat(outcome.code()).isEqualTo(ErrorCodes.XSLT_PROCESSOR_MISSING);
     assertThat(harness.numberedRows())
         .describedAs("this application can never validate anything - not this invoice's problem")
         .isZero();
+    assertThat(preflights)
+        .describedAs(
+            "the preflight runs after canValidate(): a fact about the application is settled"
+                + " before one invoice's fields are screened")
+        .hasValue(0);
+    assertThat(outcome.preflight()).isEmpty();
   }
 
   // D2-04

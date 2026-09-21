@@ -73,8 +73,14 @@ class HostileStringTest {
             invoice.taxMinor(),
             invoice.totalMinor(),
             true);
+    return reinput(base, hostile);
+  }
+
+  static DocumentInput reinput(DocumentInput base, SourceInvoice invoice) {
     return new DocumentInput(
-        hostile, base.seriesKey(), base.legalNumber(), base.issueDate(), base.rulePackVersion());
+        new com.housedevinci.einvoice.application.MappingInput(
+            invoice, base.seriesKey(), base.issueDate(), base.rulePackVersion()),
+        base.legalNumber());
   }
 
   private static byte[] render(DocumentInput input) {
@@ -162,13 +168,7 @@ class HostileStringTest {
             invoice.taxMinor(),
             invoice.totalMinor(),
             true);
-    DocumentInput input =
-        new DocumentInput(
-            hostile,
-            base.seriesKey(),
-            base.legalNumber(),
-            base.issueDate(),
-            base.rulePackVersion());
+    DocumentInput input = reinput(base, hostile);
     assertThatThrownBy(
             () ->
                 new En16931DocumentRenderer(

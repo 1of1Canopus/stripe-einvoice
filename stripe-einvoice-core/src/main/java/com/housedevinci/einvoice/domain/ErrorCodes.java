@@ -177,6 +177,21 @@ public final class ErrorCodes {
    */
   public static final String RENDER_FAILED = "DEI-261";
 
+  /**
+   * A renderer's pre-allocation preflight threw instead of answering. Fail closed: the same bug
+   * would throw in the render a moment later, where it costs a legal number. Terminal, not
+   * retryable, cause logged server-side only.
+   */
+  public static final String PREFLIGHT_FAILED = "DEI-262";
+
+  /**
+   * The wired renderer implements no preflight, so every invoice it maps is numbered before its
+   * fields are screened - the cost this module removed. Not a failure of any one document: a
+   * standing fact about the application, raised once per start as a compliance finding so that a
+   * month of documents produced under the weaker path leaves more than a line in a boot log.
+   */
+  public static final String PREFLIGHT_NOT_SUPPORTED = "DEI-263";
+
   /** A finalised Stripe invoice has no issuance row at all. The finding D-09 exists for. */
   public static final String RECON_MISSING_ISSUANCE = "DEI-270";
 

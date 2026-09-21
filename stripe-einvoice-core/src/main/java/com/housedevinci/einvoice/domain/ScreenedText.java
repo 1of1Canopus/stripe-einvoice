@@ -1,6 +1,7 @@
 package com.housedevinci.einvoice.domain;
 
 import java.text.Normalizer;
+import java.util.Locale;
 
 /**
  * The one screening function every free-text value passes through before it reaches a document, a
@@ -78,7 +79,7 @@ public final class ScreenedText {
                 + " contains a control character at index "
                 + i
                 + " (U+"
-                + String.format("%04X", (int) c)
+                + String.format(Locale.ROOT, "%04X", (int) c)
                 + ")");
       }
       if (c == 0x7F) {
@@ -92,7 +93,7 @@ public final class ScreenedText {
                 + " contains a bidirectional override or isolate character at index "
                 + i
                 + " (U+"
-                + String.format("%04X", (int) c)
+                + String.format(Locale.ROOT, "%04X", (int) c)
                 + ")");
       }
       if (Character.isHighSurrogate(c)) {
@@ -108,7 +109,7 @@ public final class ScreenedText {
                   + " contains an XML non-character at index "
                   + i
                   + " (U+"
-                  + String.format("%06X", codePoint)
+                  + String.format(Locale.ROOT, "%06X", codePoint)
                   + ")");
         }
         i++;
@@ -122,7 +123,7 @@ public final class ScreenedText {
                 + " contains an XML non-character at index "
                 + i
                 + " (U+"
-                + String.format("%04X", (int) c)
+                + String.format(Locale.ROOT, "%04X", (int) c)
                 + ")");
       }
     }

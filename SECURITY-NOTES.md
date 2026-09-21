@@ -179,16 +179,46 @@ module is where that is set out.
   a bug in a host's own port does not improve by running again, and a stack trace never reaches a
   caller. This is deliberately narrower than "the process crashed": an `Error` still propagates
   uncaught, exactly as before.
-- **A buyer-controlled mapped field that fails screening is refused after the allocator has already
-  run (D3-01).** The screening function and the canonical XML writer refuse a value no XML 1.0
-  parser could read - the non-characters, alongside the C0 controls and unpaired surrogates they
-  already refused - but that refusal happens during rendering, in the phase after a legal number is
-  allocated, not before it. The cost is one legal number, recorded as a chained `FAILED_ISSUANCE`
-  disposition with the rule id, visible in the series report and closable by an operator void - the
-  same shape as every other data-dependent mapping refusal this module already accepts, and bounded
-  by the buyer's own purchases rather than open-ended. A pre-allocation check that closes this before
-  the number is spent is planned as its own change (QUESTIONS 22): it needs a new port method called
-  before phase 1, which is a mechanism this fix pass does not build.
+- **A mapping refusal costs no legal number; five kinds of post-allocation refusal still do
+  (D3-01, D3-05).** Every refusal that depends on the invoice's own data - a buyer-controlled field
+  no XML 1.0 parser could read, an unsupported currency, a tax rate no EN 16931 category can be
+  established for, a missing required term, an incomplete seller profile, a document that does not
+  balance, and every term the target profile requires beyond EN 16931 itself (BT-49 and BT-34 for
+  Peppol, BR-DE-1, BR-DE-2, BR-DE-8, BR-DE-9, BR-DE-10 and BR-DE-15 for XRechnung, and both
+  parties' VAT identifiers on a reverse-charge supply) - is taken **before** the allocator, by
+  running the render path's own mapping with no number in existence. Those profile rules used to
+  live only in the writer, which the preflight does not run, so a buyer with no VAT identifier
+  passed the preflight and cost a number at the writer; they now run in the mapper, with the
+  writer's copy kept for a host that calls the writer directly. The event ends `FAILED_MAPPING` with the mapper's own code and leaves no
+  issuance row, no chain entry, no archived object and no advance of the series counter. That
+  refusal is final: a finalised invoice's fields are frozen, so the same run would reach the same
+  verdict; the remedy is a corrected upstream invoice, which arrives as a new event. The sweeper
+  never re-picks the row.
+
+  What still costs a number, and needs an operator void: a rule only the complete numbered document
+  can be checked against; a renderer or writer fault that is not a mapping decision; archive
+  unavailability, a write-once conflict or a read-back mismatch; a store failure after the bytes
+  exist; and an upstream void after issuance, which is a credit-note case rather than a refusal.
+  Each of those needs the number to exist or is an infrastructure fault, and none is buyer-
+  controlled input.
+
+  Every one of them puts the number's fate on the row: the issuance row moves out of `NUMBERED` to
+  a failure disposition, and the inbound event row carries the code - and, where there is one, the
+  failing rule id. A renderer or writer fault used to be the exception, leaving the number in
+  `NUMBERED` with nothing recorded until the reconciliation sweep's stuck check reported a count
+  hours later; it now records the same disposition a validation refusal does, with the render code
+  where the rule id goes. No chained event is appended at a failure disposition - the chain carries
+  issuance and void - so the series report and the event row are where a failed number is read.
+  Whether a `NUMBER_ABANDONED` chain entry is required for the numbering-gap justification is an
+  open question, tracked and dated on the module's internal open-questions log, to be decided
+  before the 0.1.0 tag.
+
+  **A third-party renderer that does not implement the preflight keeps the old cost.** The port's
+  default answers `NOT_SUPPORTED` rather than refusing, so an implementation written before the
+  method existed goes on issuing exactly as it did; allocation then still precedes mapping for that
+  application. It is never silent: the renderer is named in a startup warning, a compliance finding
+  is raised once per application start, and every outcome carries the verdict. The renderer this
+  module ships always implements it.
 
 ## Reporting
 

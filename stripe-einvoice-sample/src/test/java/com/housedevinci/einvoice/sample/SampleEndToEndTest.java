@@ -178,12 +178,13 @@ class SampleEndToEndTest {
         source.fetchInvoice("in_xrechnung_demo");
     com.housedevinci.einvoice.application.DocumentInput input =
         new com.housedevinci.einvoice.application.DocumentInput(
-            invoice,
-            new com.housedevinci.einvoice.domain.SeriesKey(
-                "acme-fr", "DEFAULT", 2026, com.housedevinci.einvoice.domain.Mode.LIVE),
-            new com.housedevinci.einvoice.domain.LegalNumber("INV-2026-000900", 900L),
-            java.time.LocalDate.of(2026, 2, 1),
-            "sample");
+            new com.housedevinci.einvoice.application.MappingInput(
+                invoice,
+                new com.housedevinci.einvoice.domain.SeriesKey(
+                    "acme-fr", "DEFAULT", 2026, com.housedevinci.einvoice.domain.Mode.LIVE),
+                java.time.LocalDate.of(2026, 2, 1),
+                "sample"),
+            new com.housedevinci.einvoice.domain.LegalNumber("INV-2026-000900", 900L));
 
     com.housedevinci.einvoice.adapter.xml.UblProfile profile =
         com.housedevinci.einvoice.adapter.xml.UblProfile.XRECHNUNG_UBL;

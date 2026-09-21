@@ -1,7 +1,5 @@
 package com.housedevinci.einvoice.adapter.xml;
 
-import com.housedevinci.einvoice.domain.EInvoiceException;
-import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.Percentage;
 import com.housedevinci.einvoice.domain.en16931.Contact;
 import com.housedevinci.einvoice.domain.en16931.DocumentLine;
@@ -206,71 +204,22 @@ public final class UblDocumentWriter {
    * refusal names the missing field and the property that fills it, rather than quoting a rule id
    * in German at an operator who has never read the CIUS.
    */
+  /**
+   * The profile's own presence rules, as a second line of defence.
+   *
+   * <p>The mapper runs the same body before it returns an unnumbered document, so on this module's
+   * own path these have already passed and no number was spent finding out. This call stays for the
+   * host that holds a writer and calls it directly: a rule that is only enforced upstream is a rule
+   * a direct caller does not have.
+   */
   private void requireProfileRequirements(EnInvoice invoice) {
-    if (profile.requiresBuyerReference() && invoice.buyerReferenceValue().isEmpty()) {
-      throw new EInvoiceException(
-          ErrorCodes.MAPPING_INCOMPLETE,
-          profile.displayName()
-              + " requires a buyer reference (BT-10, BR-DE-15). Set"
-              + " einvoice.documents.buyer-reference");
-    }
-    if (profile.requiresPaymentAndContact()) {
-      if (invoice.paymentValue().isEmpty()) {
-        throw new EInvoiceException(
-            ErrorCodes.MAPPING_INCOMPLETE,
-            profile.displayName()
-                + " requires payment instructions (BG-16, BR-DE-1). Set"
-                + " einvoice.seller.payment.means-code and einvoice.seller.payment.account-id");
-      }
-      if (invoice.seller().contactValue().isEmpty()) {
-        throw new EInvoiceException(
-            ErrorCodes.MAPPING_INCOMPLETE,
-            profile.displayName()
-                + " requires a seller contact (BG-6, BR-DE-2). Set einvoice.seller.contact.*");
-      }
-      requireBuyerAddressDetail(invoice);
-    }
-    if (profile.requiresElectronicAddress()) {
-      if (invoice.seller().electronicAddressValue().isEmpty()) {
-        throw new EInvoiceException(
-            ErrorCodes.MAPPING_INCOMPLETE,
-            profile.displayName()
-                + " requires the seller's electronic address (BT-34, PEPPOL-EN16931-R020). Set"
-                + " einvoice.seller.electronic-address and .electronic-address-scheme");
-      }
-      if (invoice.buyer().electronicAddressValue().isEmpty()) {
-        throw new EInvoiceException(
-            ErrorCodes.MAPPING_INCOMPLETE,
-            profile.displayName()
-                + " requires the buyer's electronic address (BT-49, PEPPOL-EN16931-R010). It is"
-                + " derived from the buyer's VAT identifier when one is on the invoice, or"
-                + " configured at einvoice.documents.buyer-electronic-address (stripe field:"
-                + " customer_tax_ids)");
-      }
-    }
-    if (invoice.hasReverseChargeOrIntraCommunity()) {
-      if (invoice.seller().vatIdentifierValue().isEmpty()
-          || invoice.buyer().vatIdentifierValue().isEmpty()) {
-        throw new EInvoiceException(
-            ErrorCodes.MAPPING_INCOMPLETE,
-            "a reverse-charge or intra-Community supply names both parties' VAT identifiers"
-                + " (BR-AE-*, BR-IC-*): the buyer accounts for the VAT, and a document that does"
-                + " not identify them cannot say who (stripe field: customer_tax_ids)");
-      }
-    }
-  }
-
-  private void requireBuyerAddressDetail(EnInvoice invoice) {
-    PostalAddress address = invoice.buyer().address();
-    if (address.line1Value().isEmpty()
-        || address.cityValue().isEmpty()
-        || address.postCodeValue().isEmpty()) {
-      throw new EInvoiceException(
-          ErrorCodes.MAPPING_INCOMPLETE,
-          profile.displayName()
-              + " requires the buyer's street, city and post code (BR-DE-8, BR-DE-9, BR-DE-10)."
-              + " Stripe froze the address it had at finalisation (stripe field: customer_address)");
-    }
+    UblProfileRequirements.require(
+        profile,
+        invoice.buyerReferenceValue(),
+        invoice.paymentValue(),
+        invoice.seller(),
+        invoice.buyer(),
+        invoice.hasReverseChargeOrIntraCommunity());
   }
 
   private static void party(CanonicalXmlWriter w, Party party, boolean seller) {

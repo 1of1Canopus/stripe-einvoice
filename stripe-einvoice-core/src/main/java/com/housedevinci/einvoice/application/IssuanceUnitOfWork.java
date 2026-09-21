@@ -81,6 +81,7 @@ public final class IssuanceUnitOfWork {
   private final DocumentRenderer renderer;
   private final DocumentValidator validator;
   private final ArchiveStore archive;
+  private final PreflightSupport preflightSupport;
   private final Clock clock;
   private final Configuration configuration;
 
@@ -123,8 +124,32 @@ public final class IssuanceUnitOfWork {
     }
   }
 
-  /** What one run concluded. Ids and codes only: no buyer field, no amount (checklist line 45). */
-  public record Outcome(String eventId, InboundState state, String code, String legalNumber) {}
+  /**
+   * What one run concluded. Ids and codes only: no buyer field, no amount (checklist line 45).
+   *
+   * @param preflight what the renderer answered before the number was allocated, empty when the run
+   *     stopped before the preflight - never silently absent when it answered {@code
+   *     NOT_SUPPORTED}, which is the whole point of carrying it
+   */
+  public record Outcome(
+      String eventId,
+      InboundState state,
+      String code,
+      String legalNumber,
+      Optional<PreflightReport.Verdict> preflight) {
+
+    public Outcome {
+      preflight = preflight == null ? Optional.empty() : preflight;
+    }
+
+    public Outcome(String eventId, InboundState state, String code, String legalNumber) {
+      this(eventId, state, code, legalNumber, Optional.empty());
+    }
+
+    public Outcome withPreflight(PreflightReport.Verdict verdict) {
+      return new Outcome(eventId, state, code, legalNumber, Optional.ofNullable(verdict));
+    }
+  }
 
   public IssuanceUnitOfWork(
       InboundEventStore inbound,
@@ -135,6 +160,7 @@ public final class IssuanceUnitOfWork {
       DocumentRenderer renderer,
       DocumentValidator validator,
       ArchiveStore archive,
+      PreflightSupport preflightSupport,
       Clock clock,
       Configuration configuration) {
     this.inbound = Objects.requireNonNull(inbound, "inbound");
@@ -145,6 +171,7 @@ public final class IssuanceUnitOfWork {
     this.renderer = Objects.requireNonNull(renderer, "renderer");
     this.validator = Objects.requireNonNull(validator, "validator");
     this.archive = Objects.requireNonNull(archive, "archive");
+    this.preflightSupport = Objects.requireNonNull(preflightSupport, "preflightSupport");
     this.clock = Objects.requireNonNull(clock, "clock");
     this.configuration = Objects.requireNonNull(configuration, "configuration");
   }
@@ -220,8 +247,6 @@ public final class IssuanceUnitOfWork {
     } catch (EInvoiceException refused) {
       return fail(event, InboundState.FAILED_MAPPING, refused.code(), null);
     }
-    inbound.transition(eventId, InboundState.MAPPED, "", clock.instant(), null);
-
     if (!validator.canValidate()) {
       // D3-02: this is a fact about the application, known before it serves a single request, not
       // a fact about this invoice. Discovering it in P2, after the allocator has already run,
@@ -231,6 +256,53 @@ public final class IssuanceUnitOfWork {
       return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.XSLT_PROCESSOR_MISSING, null);
     }
 
+    // The preflight (D3-01). Every screen the render will apply, applied now, with no number in
+    // existence: a buyer-controlled field this module cannot put on a document is refused here and
+    // costs nothing. One MappingInput, constructed once and handed to both passes, so the two
+    // cannot disagree about the invoice, the series or the issue date.
+    MappingInput mapping =
+        new MappingInput(invoice, seriesKey(issueDate), issueDate, configuration.rulePackVersion());
+    PreflightReport report = preflight(mapping);
+    if (report.refused()) {
+      // FAILED_MAPPING, with the mapper's own code, and no NUMBERED row, chain entry or archive
+      // object. Terminal with an empty successor set: a finalised invoice's fields are frozen, so
+      // re-running changes nothing and the sweeper does not re-pick it.
+      return fail(event, InboundState.FAILED_MAPPING, report.code(), null)
+          .withPreflight(report.verdict());
+    }
+    if (report.verdict() == PreflightReport.Verdict.NOT_SUPPORTED) {
+      // The compatibility path: allocation proceeds exactly as it did before this method existed,
+      // and the fact is recorded rather than swallowed.
+      preflightSupport.notSupported(
+          configuration.sellerId(), configuration.mode(), renderer.getClass().getName());
+    }
+    // MAPPED now means what it says: the mapping ran, over every screen, and produced a document
+    // model. Before the preflight existed this row went MAPPED as soon as the totals agreed, and
+    // the mapping itself was first attempted after a number had been allocated.
+    inbound.transition(eventId, InboundState.MAPPED, "", clock.instant(), null);
+    return issue(event, invoice, mapping).withPreflight(report.verdict());
+  }
+
+  /**
+   * The renderer's answer, with a host implementation's own bug turned into a refusal.
+   *
+   * <p>Fail closed: a {@code RuntimeException} out of a preflight is the same bug that would come
+   * out of the render a moment later, where it costs a legal number. No retry - a host port's own
+   * bug does not improve by running again - and the cause is logged server-side only.
+   */
+  private PreflightReport preflight(MappingInput mapping) {
+    try {
+      return renderer.preflight(mapping);
+    } catch (EInvoiceException refusal) {
+      return PreflightReport.refused(refusal.code());
+    } catch (RuntimeException e) {
+      log.error("einvoice: the document renderer's preflight threw an unexpected exception", e);
+      return PreflightReport.refused(ErrorCodes.PREFLIGHT_FAILED);
+    }
+  }
+
+  /** P1 to P4: everything from the number onwards. */
+  private Outcome issue(InboundEvent event, SourceInvoice invoice, MappingInput mapping) {
     // P1: the number. Every refusal that depends on data has already happened, so a number is
     // consumed only for an invoice this module has decided it can document. Wrapped like every
     // other phase (D2-01): unwrapped, a refusal here left the row MAPPED with attempts 0 and no
@@ -241,7 +313,7 @@ public final class IssuanceUnitOfWork {
       issuance =
           allocator.allocate(
               new AllocationRequest(
-                  seriesKey(issueDate),
+                  mapping.seriesKey(),
                   invoice.id(),
                   invoice.accountId(),
                   invoice.number(),
@@ -269,13 +341,9 @@ public final class IssuanceUnitOfWork {
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
     }
 
-    DocumentInput input =
-        new DocumentInput(
-            invoice,
-            issuance.seriesKey(),
-            issuance.legalNumber(),
-            issueDate,
-            configuration.rulePackVersion());
+    // The same MappingInput the preflight approved, plus the number. Not a re-derivation: a second
+    // derivation of the issue date is a second date rule, and two date rules drift.
+    DocumentInput input = new DocumentInput(mapping, issuance.legalNumber());
 
     // P2: the exact bytes, and the validation of those exact bytes - never of a re-serialisation.
     // Both ports are always a host's own code in 0.1.0 - the writers are the next change - and a
@@ -290,10 +358,10 @@ public final class IssuanceUnitOfWork {
       document = renderer.render(input);
       bytes = document.bytes();
     } catch (EInvoiceException e) {
-      return fail(event, InboundState.FAILED_ISSUANCE, e.code(), backoffFor(event));
+      return renderRefused(event, invoice, e.code(), backoffFor(event));
     } catch (RuntimeException e) {
       log.error("einvoice: the document renderer threw an unexpected exception", e);
-      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.RENDER_FAILED, null);
+      return renderRefused(event, invoice, ErrorCodes.RENDER_FAILED, null);
     }
     DocumentValidator.Report report;
     try {
@@ -431,6 +499,38 @@ public final class IssuanceUnitOfWork {
           issuance.legalNumber());
     }
     return fail(event, InboundState.COMPLETED, "", null, issuance.legalNumber());
+  }
+
+  /**
+   * A render that refused after the number was allocated (D5-03).
+   *
+   * <p>The number's fate goes on its own row, exactly as a validation refusal's does: without this
+   * the issuance stayed {@code NUMBERED} - a legal number allocated, no document, no reason
+   * recorded and nothing to void against - until the reconciliation sweep's stuck check noticed a
+   * count, hours later, without a cause. The disposition is {@code FAILED_VALIDATION} because that
+   * is what it means to an operator: this number will never carry a document and needs a void. The
+   * render's own code goes where a schematron rule id goes, so the row says which. A distinct
+   * {@code FAILED_RENDER} state would read better and is an enum value, a successor edge, an {@code
+   * open()} case, the trigger guard and a migration - its own change, not a line here.
+   *
+   * <p>One statement, one store call, outside any transaction of ours: the same shape the
+   * validation refusal already uses, so the allocator design's "never two locks in one transaction"
+   * rule is untouched.
+   */
+  private Outcome renderRefused(
+      InboundEvent event, SourceInvoice invoice, String code, Duration retryIn) {
+    writer.markFailed(
+        configuration.sellerId(),
+        configuration.mode(),
+        invoice.id(),
+        IssuanceState.FAILED_VALIDATION,
+        code);
+    // The cause goes where a schematron rule id goes on the same disposition, so an operator
+    // looking at a failed number reads one row and learns which refusal it was.
+    InboundEvent updated =
+        inbound.transition(
+            event.eventId(), InboundState.FAILED_ISSUANCE, code, code, clock.instant(), retryIn);
+    return new Outcome(updated.eventId(), updated.state(), code, null);
   }
 
   /** Empty when the archived bytes still hash to what the row recorded; a code when they do not. */

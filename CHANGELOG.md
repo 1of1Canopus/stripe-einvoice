@@ -8,6 +8,32 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **An invoice this module cannot document is refused before it consumes a legal number.** The
+  mapping that screens every buyer-controlled field now runs as a pre-allocation preflight on the
+  renderer port (`DocumentRenderer.preflight`), over the render path's own body rather than a second
+  list of checks, so a hostile or unmappable field ends the event in `FAILED_MAPPING` with no
+  issuance row, no chain entry, no archived object and no advance of the series counter. What still
+  costs a number - a rule only the numbered document can be checked against, a renderer or writer
+  fault, an archive failure, an upstream void after issuance - is listed in `SECURITY-NOTES.md`. A
+  mapping refusal is final; the remedy is a corrected upstream invoice, which arrives as a new event.
+- **The profile's own mandatory terms are checked before the number too.** XRechnung's and
+  Peppol's presence rules - the buyer's and seller's electronic address, the buyer reference, the
+  payment instruction, the seller contact, the buyer's street, city and post code, and both
+  parties' VAT identifiers on a reverse-charge supply - used to be enforced only in the writer,
+  which runs after the allocator. Two of them are decided by the buyer's own frozen data, so a
+  buyer with no VAT identifier passed the preflight and then cost a legal number. They now run in
+  the mapper, in the same body both passes share; the writer keeps its copy for a host that calls
+  it directly.
+- **A number consumed by a renderer or writer fault says so on its row.** It used to be left in
+  `NUMBERED` with no recorded reason until the reconciliation sweep's stuck check noticed a count;
+  it now records the same disposition a validation refusal does, with the render code where the
+  rule id goes, so an operator can find it and void it.
+- **A renderer without a preflight is announced rather than assumed.** The port's default answers
+  `NOT_SUPPORTED` so that a renderer written before the method existed keeps working; that
+  application is told at startup, in a compliance finding raised once per start (`DEI-263`), and on
+  every outcome. Two new error codes: `DEI-262` for a preflight that threw, `DEI-263` for a renderer
+  that implements none.
+
 - **An XSLT 2.0 processor ships with the module, so a default install validates.** Saxon-HE is a
   runtime dependency of the core module; nothing to add, and no configuration to read first. It is
   MPL-2.0, admitted by the licence gate for that one coordinate and that one licence family, with
@@ -68,6 +94,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `DocumentRenderer.render` is still handed a `DocumentInput`, but a `DocumentInput` is now the
+  `MappingInput` the preflight approved plus the legal number, rather than five separate
+  components. The render input therefore *is* the preflight input plus the number, so the two
+  passes cannot be given different invoices, series or issue dates. Hosts that build a
+  `DocumentInput` themselves change one constructor call; nothing is released yet.
+- The inbound `MAPPED` state now means the mapping ran and produced a document model. It used to be
+  written as soon as the totals agreed, while the mapping itself was first attempted after a number
+  had been allocated.
 - A probe that runs an inner build or an external command now prints the last 30 lines of that
   command's output when it reports WEAK, and a probe that could not run at all says why on its own
   line. A swallowed transient failure and a real weakness used to look identical.

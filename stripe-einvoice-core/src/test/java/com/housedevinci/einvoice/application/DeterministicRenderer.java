@@ -30,6 +30,17 @@ public final class DeterministicRenderer implements DocumentRenderer {
     this.failure = null;
   }
 
+  /**
+   * This renderer maps nothing, so there is nothing it can refuse before a number exists: it
+   * answers PASSED and leaves the failure injection to the render, which is where the probes that
+   * use {@link #breakWith} expect it. The renderer with a real preflight is the module's own; a
+   * renderer with none at all is {@code RendererWithoutPreflight}.
+   */
+  @Override
+  public PreflightReport preflight(MappingInput input) {
+    return PreflightReport.passed();
+  }
+
   @Override
   public RenderedDocument render(DocumentInput input) {
     if (failure instanceof RuntimeException re) {

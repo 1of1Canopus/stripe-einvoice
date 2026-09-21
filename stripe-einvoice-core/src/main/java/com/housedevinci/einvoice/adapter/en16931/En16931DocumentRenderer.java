@@ -4,9 +4,13 @@ import com.housedevinci.einvoice.adapter.xml.UblDocumentWriter;
 import com.housedevinci.einvoice.adapter.xml.UblProfile;
 import com.housedevinci.einvoice.application.DocumentInput;
 import com.housedevinci.einvoice.application.DocumentRenderer;
+import com.housedevinci.einvoice.application.MappingInput;
+import com.housedevinci.einvoice.application.PreflightReport;
+import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.en16931.EnInvoice;
 import com.housedevinci.einvoice.domain.en16931.PartyIdentifier;
 import com.housedevinci.einvoice.domain.en16931.SellerProfile;
+import com.housedevinci.einvoice.domain.en16931.UnnumberedInvoice;
 import java.util.Objects;
 
 /**
@@ -39,13 +43,31 @@ public final class En16931DocumentRenderer implements DocumentRenderer {
 
   @Override
   public RenderedDocument render(DocumentInput input) {
-    EnInvoice invoice = mapper.map(input);
-    return new RenderedDocument(writer.write(invoice), "xml", profile.renderedProfile());
+    return new RenderedDocument(writer.write(model(input)), "xml", profile.renderedProfile());
+  }
+
+  /**
+   * The mapping, run and thrown away.
+   *
+   * <p>It is the render path's own first stage - {@link StripeInvoiceMapper#map} - so every screen
+   * the render applies is applied here, by construction rather than by agreement. The writer is
+   * deliberately not run: every string that reaches it arrived through a screened business term, so
+   * a writer refusal implies a mapper refusal. That is an invariant and a probe asserts it.
+   */
+  @Override
+  public PreflightReport preflight(MappingInput input) {
+    try {
+      mapper.map(input);
+      return PreflightReport.passed();
+    } catch (EInvoiceException refusal) {
+      return PreflightReport.refused(refusal.code());
+    }
   }
 
   /** The semantic model, for a caller that wants to inspect it rather than the bytes. */
   public EnInvoice model(DocumentInput input) {
-    return mapper.map(input);
+    UnnumberedInvoice unnumbered = mapper.map(input.unnumbered());
+    return unnumbered.numbered(input.legalNumber());
   }
 
   /** The profile this renderer writes under. */
