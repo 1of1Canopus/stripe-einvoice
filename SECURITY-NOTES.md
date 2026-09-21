@@ -207,11 +207,22 @@ module is where that is set out.
   failing rule id. A renderer or writer fault used to be the exception, leaving the number in
   `NUMBERED` with nothing recorded until the reconciliation sweep's stuck check reported a count
   hours later; it now records the same disposition a validation refusal does, with the render code
-  where the rule id goes. No chained event is appended at a failure disposition - the chain carries
-  issuance and void - so the series report and the event row are where a failed number is read.
-  Whether a `NUMBER_ABANDONED` chain entry is required for the numbering-gap justification is an
-  open question, tracked and dated on the module's internal open-questions log, to be decided
-  before the 0.1.0 tag.
+  where the rule id goes. **A burned number is also chained**: the `FAILED_VALIDATION` disposition
+  appends a chained event, in the same transaction as the state change, carrying the failing
+  validation rule id or the render refusal's code - so the justification for a gap in the issued
+  sequence lives in the tamper-evident record and not only on a row that can legitimately change,
+  and the verifier's cross-check reports a burned row written out of band as `BROKEN`.
+  `FAILED_ARCHIVE` is not chained: it is retryable rather than a disposition, and its eventual fate
+  - issued or voided unused - is.
+
+  **A mapping refusal can be re-run only by an explicit, privileged operator call.** The pipeline
+  and the sweeper still treat it as final. The module ships a service the host calls from its own
+  admin action, behind its own authorization - no HTTP endpoint and no actuator operation, for the
+  same reason the void has none - which accepts one event at a time, refuses any state other than a
+  mapping refusal, refuses outright if a legal number already exists for that invoice, re-opens the
+  row and then runs the ordinary pipeline, preflight included. Two simultaneous calls on one event
+  produce one run and one number. Who asked, when and why is recorded durably with the operator's
+  screened reason.
 
   **A third-party renderer that does not implement the preflight keeps the old cost.** The port's
   default answers `NOT_SUPPORTED` rather than refusing, so an implementation written before the

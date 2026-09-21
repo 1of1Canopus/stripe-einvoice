@@ -234,7 +234,8 @@ authorization.
 | Is anything wrong right now? | `GET /actuator/health/einvoice` - operational conditions only: a silent sweeper, a stale reconciliation, a chain that does not verify. It is deliberately outside `readiness` and `liveness`, so a business condition can never take your application out of the load balancer |
 | What needs a human? | `GET /actuator/einvoicefindings` - open compliance findings with their codes and subjects. Acknowledge one through `IssuanceFindingService`, with a reason that is recorded; the finding is never deleted |
 | Stripe moved its API version | The refused events are on `einvoice_inbound_event` with their bodies. Update the pin to match, restart, and the sweeper's due query re-picks exactly the rows whose recorded version now equals it, and replays them through the same path |
-| A document failed validation | The number stays allocated with the failing rule id recorded beside the event. An operator voids it through `IssuanceVoidService` with a reason, and the series report explains the hole |
+| A document failed validation | The number stays allocated with the failing rule id recorded beside the event and in the hash chain, so the gap it leaves is explained by the tamper-evident record. An operator voids it through `IssuanceVoidService` with a reason, and the series report explains the hole |
+| A seller profile was incomplete and invoices were refused | Correct the profile, then call the privileged `IssuanceReprocess` for each refused event. It runs the ordinary pipeline, preflight included, never touches an invoice that already has a number, and records who asked and why |
 
 ### Run the sample
 

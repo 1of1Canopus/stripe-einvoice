@@ -8,6 +8,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **An operator can re-run one refused event after correcting the configuration that refused it.**
+  A mapping refusal stays final for the pipeline and for the sweeper; what is new is an explicit,
+  privileged `IssuanceReprocess` bean the host calls from its own admin action, for one event at a
+  time, only from `FAILED_MAPPING`, and never for an invoice that already carries a number. It
+  re-opens the row and then runs the ordinary pipeline - intake, routing, the authoritative
+  re-fetch, the preflight, the allocator - so it cannot skip a screen. An incomplete seller profile
+  is a defect of the application, not of the invoice, and every invoice refused while it was wrong
+  would otherwise have needed a new upstream event the seller cannot cause. There is **no HTTP
+  endpoint and no actuator operation** for it, by the same reasoning as the void. Who asked, when
+  and why is recorded durably as a compliance finding (`DEI-265`) with the operator's screened
+  reason; the re-opened row carries `DEI-264`.
+- **A legal number burned by a validation or render refusal is now explained inside the hash
+  chain.** `FAILED_VALIDATION` appends a chained event carrying the failing rule id or the refusal
+  code, in the same transaction as the state change, so the justification for a gap in the issued
+  sequence no longer lives only on a mutable row. The chain verifier's cross-check covers those
+  rows too, so a burned number invented out of band is reported `BROKEN`. `FAILED_ARCHIVE` is
+  deliberately not chained: it is retryable rather than a disposition, and its eventual fate -
+  issued or voided - is chained.
+
 - **An invoice this module cannot document is refused before it consumes a legal number.** The
   mapping that screens every buyer-controlled field now runs as a pre-allocation preflight on the
   renderer port (`DocumentRenderer.preflight`), over the render path's own body rather than a second
