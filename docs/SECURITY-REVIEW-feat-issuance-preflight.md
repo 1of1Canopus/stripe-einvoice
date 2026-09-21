@@ -265,3 +265,175 @@ a separate import.
 - `PreflightReport` refuses a `REFUSED` verdict with an empty code, copies its findings list, and
   carries ids and codes only. `Outcome.preflight()` is an `Optional`, never null.
 - Public text carries roles only. No agent or person name in any file on the branch.
+
+---
+
+## Pass 2 (2026-09-21)
+
+Second and last pass on `feat/issuance-preflight`, HEAD `ed85a3e`. Full `verify` on a clean
+worktree with the containers up: **486 tests, 0 failures, 0 errors, 0 skipped**, BUILD SUCCESS
+(the 496 in this worktree's surefire reports includes the ten pass-2 probe tests below, which are
+not committed to the branch). Coverage, probe scripts, reference guard and the CI checks are as
+reported by the verifier and were not re-measured here.
+
+**Verdict: MERGE WITH FIXES.** The HIGH and both MEDIUMs are closed, each confirmed by running a
+probe rather than by reading the diff. Two LOW and one INFO are new, all three found by a probe
+that is red on this HEAD. None of them is a bypass and none needs a third pass: a fix pass that
+lands them can go to merge on the verifier's numbers.
+
+### Closure of the pass-1 findings
+
+| Id | Closure | Evidence |
+|----|---------|----------|
+| D5-01 HIGH | **Closed.** | `UblProfileRequirements.require` is one body called by the mapper (before it returns the unnumbered document) and by the writer (as a second line of defence), with the same six arguments read off the same document in both places, and one `profile` field shared by the mapper and the writer inside `En16931DocumentRenderer`. `CipherProbePr5Test` green: `outcome=FAILED_MAPPING DEI-221 preflight=REFUSED numbered=0 counter=-1->-1` - the buyer with no tax id now costs nothing. |
+| D5-02 MEDIUM | **Closed.** | The walk reaches `[plain, optional, strings[], metadata, metadata{}, array, nested.deep]`, and the unknown-shape branch is an `AssertionError`, not a skip. |
+| D5-03 MEDIUM | **Closed in the code, not in the probe.** | Both catch paths now call `renderRefused`, which writes the disposition before it fails the event. See D7-01 for the probe. |
+| D5-04 LOW | **Closed for what the rules name.** | The preflight rule now refuses the fixture, and it refuses it *as the rule*, not as a copy. See D7-02 for what the rules still do not name. |
+
+### The one more buyer-controlled field, looked for and not found
+
+`probe_every_buyer_controlled_term_agrees_between_the_passes` - 2000 iterations over the five
+upstream terms the branch's own property test does not vary (buyer tax id BT-48/BT-49, buyer
+country BT-55, buyer email, buyer line 1, upstream currency), each filled with strings drawn from
+an alphabet of XML metacharacters, C0 controls, `U+0085`, `U+00A0`, `U+200B`, `U+2028`, lone
+surrogates, `U+FFFE`, `U+FFFF` and `U+FEFF`, under both profiles. Census:
+`construction=349 refused=1136 passed=515 leaks=0`. 515 values reached the writer after a `PASSED`
+preflight and every one of them produced bytes. Not vacuous, and no disagreement. `attribute()`
+runs the same `requireValidText` as `text()`, so the `schemeID` route is screened as well.
+
+### D5-02, the shapes pass 1 did not have fixtures for
+
+`CipherProbePr7bWalkTest`, four assertions, all green on this HEAD:
+
+- a record inside a `Map` value is reached: `InMapValue.byKey{}.deep`;
+- `Optional<List<Leaf>>` **fails the build** - `argument()` refuses a type argument that is not a
+  plain class rather than skipping it, which is the default-deny P-02 asked for;
+- a sealed interface component fails the build the same way;
+- an enum component yields no string path and smuggles none: an enum constant's fields are not
+  upstream data, so stopping there is a refusal by design, not a gap.
+
+### D5-03, the residual: no chained event at a failure disposition - ruling
+
+**Acceptable at 0.1.0, as a documented limitation, on condition that it becomes a dated QUESTIONS
+item before the tag (D7-03).** It is not a bypass: the number's fate is now on the issuance row and
+on the inbound event row, and the series report reads both. What it is, is an *evidence* boundary,
+and the module sells the chain as the evidence. A number that was allocated and then burned leaves
+a gap in the chained sequence whose only explanation lives on a mutable row; the chain itself
+cannot tell an auditor that number 3 was burned by a render fault rather than removed. That is a
+compliance-facing design decision with a date attached (the numbering rules require a gap to be
+explainable), not a defect of this branch, and it is the kind of decision that must be written
+down with an owner rather than left in a notes paragraph. Hence INFO, not "closed".
+
+### D5-04, the changed probe - ruling
+
+**The change is legitimate and is a strengthening, not a softening.** My probe carried a *copy* of
+the rule's method list, so tightening the real rule could never turn it green; a control's test
+that duplicates the control tests nothing. The builder replaced the copy with the rule itself:
+`DeterminismRules.moduleWide()` and `DeterminismRules.preflightPath()` are defined once, applied by
+`ArchitectureTest` to the module and by the probe to `CipherNonDeterministicFixture` - same rule
+object, same fixture, same message. Verified: the probe prints `rule refused the fixture = true`
+and the printed rule text contains the overloads I asked for (`LocalDate.now(ZoneId)`,
+`ZonedDateTime.now()`, `OffsetDateTime.now()`, `LocalTime.now()`, `Year.now()`,
+`Clock.systemUTC()`, `System.currentTimeMillis()`, `System.nanoTime()`,
+`Locale.getDefault(Category)`, `Date.<init>()`). Accepted. The only thing I hold against the new
+shape is that the two rules drifted apart, which is D7-02.
+
+### New findings
+
+---
+
+#### D7-01 - LOW - the probe that guards the D5-03 fix passes with the fix removed
+
+`probe_a_number_consumed_by_a_render_refusal_carries_a_disposition` uses the buyer-with-no-tax-id
+fixture. That fixture is now refused at the preflight by the D5-01 fix, so no issuance row is ever
+created and the assertion `state != "NUMBERED"` is satisfied by the absence of a row. Its own
+printed output says so: `D5-03: numbered=0 state=<none>`. The probe no longer exercises the code
+path it was written for; the two findings' fixtures collided.
+
+**Repro** - mutation, in this worktree, restored afterwards. Both `renderRefused(...)` calls in
+`IssuanceUnitOfWork.issue` reverted to the pre-fix
+`fail(event, InboundState.FAILED_ISSUANCE, ...)`:
+
+```
+D5-03: numbered=0 state=<none>                     <- branch probe still GREEN
+D7-03 unchecked=false ... numbered=1 state=NUMBERED <- new probe RED
+D7-03 unchecked=true  ... numbered=1 state=NUMBERED <- new probe RED
+```
+
+With the fix in place the new probe prints
+`numbered=1 state=FAILED_VALIDATION preflight=Optional[PASSED]` on both catch paths, with
+`DEI-221` and `DEI-261` respectively on the event row. So the control is correct; it is unguarded.
+
+**Exact fix** (fix pass). Add `CipherProbePr7bDispositionTest` (in
+the review's own probe set) to
+`stripe-einvoice-core/src/test/java/com/housedevinci/einvoice/application/`. It drives a renderer
+whose `preflight` returns `PreflightReport.passed()` and whose `render` throws - once an
+`EInvoiceException`, once an unchecked one - so the number is allocated first and both catch paths
+are covered. Keep the existing D5-03 probe or delete it; it asserts nothing either way, and if it
+is kept it must be renamed to say it covers the preflight refusal.
+
+---
+
+#### D7-02 - LOW - the two determinism rules disagree about `Clock.systemDefaultZone()`, and neither names the locale-dependent formatters
+
+`preflightPath()` lists `Clock.systemDefaultZone()`. `moduleWide()` does not list it at all. So the
+same call is fatal in `adapter.en16931` and `domain.en16931` and allowed everywhere else -
+`application`, `adapter.jdbc`, the starter - which is where the issue date and the series clock
+actually live. The rule that is supposed to be the wider of the two is the weaker one for that
+call, and the asymmetry is invisible because each rule is only ever checked against material that
+does not make the call.
+
+Beyond it, neither rule names three environment readers that are as locale- and machine-dependent
+as `LocalDate.now()`: `String.format(String, Object...)` without a `Locale` (the module formats
+money; `Money.toString` already uses `Locale.ROOT`, so the convention exists and is unenforced),
+`String.toUpperCase()` / `toLowerCase()` without a `Locale`, and `Calendar.getInstance()`.
+
+**Repro** - `CipherProbePr7bDeterminismTest`, two assertions red on this HEAD:
+
+```
+D7-04 moduleWide refused = allowed
+D7-04 Clock.systemDefaultZone(): moduleWide=allowed preflightPath(as written, other packages)=refused
+```
+
+**Exact fix** (fix pass, one line each). In `DeterminismRules.moduleWide()` add
+`callMethod(java.time.Clock.class, "systemDefaultZone")`; in **both** rules add
+`callMethod(String.class, "format", String.class, Object[].class)`,
+`callMethod(String.class, "toUpperCase")`, `callMethod(String.class, "toLowerCase")` and
+`callMethod(java.util.Calendar.class, "getInstance")`. Then extend
+`CipherNonDeterministicFixture` with one method per added call so the existing probe covers them,
+and keep the two lists in sync by construction if it is cheap - a shared `List` of conditions that
+both rules apply is one edit and removes this class of drift.
+
+*Attempted and not a finding:* a refusal message that differs by default locale.
+`ScreenedText.screen` formats a code point with `String.format("%04X", ...)`, but the `X`
+conversion does not localise and the index is concatenated, so the message is byte-identical under
+`hi-IN-u-nu-deva` and `Locale.ROOT`
+(`probe_a_refusal_message_does_not_depend_on_the_default_locale`, green). No current call is
+locale-dependent; D7-02 is a guard gap, not an observed divergence, which is why it is LOW.
+
+---
+
+#### D7-03 - INFO - the chain-gap limitation needs a dated owner, not a notes paragraph
+
+`SECURITY-NOTES.md` now states that no chained event is appended at a failure disposition. Correct
+and welcome. What is missing is the decision: the chain is the module's tamper-evident record, and
+the justification for a gap in the allocated sequence currently lives only on a mutable issuance
+row. That is a choice with a compliance consequence and it should be owned in writing, on the internal open-questions list, before the 0.1.0 tag.
+
+**Exact fix** (docs only). Add to the module's internal open-questions list: "A legal number burned by
+a validation or render refusal leaves a gap in the chained sequence with no chained entry
+explaining it; the disposition is on the issuance row only. Decide before 0.1.0 whether a
+`NUMBER_ABANDONED` chain entry is required for the numbering-gap justification." Dated, with the
+0.1.0 release-candidate pass named as the checkpoint. No code change on this branch.
+
+### Checked again and still clean
+
+- Both `MappingInput`/`DocumentInput` construction sites unchanged; the profile the mapper screens
+  under and the profile the writer writes under are the same field of the same renderer.
+- `renderRefused` is one store call plus one event transition outside any transaction of ours, the
+  same shape the validation refusal already uses; the allocator's "never two locks in one
+  transaction" rule is untouched.
+- `FAILED_VALIDATION` is a legal successor of `NUMBERED` in the enum and in the
+  `schema-postgresql.sql` trigger guard, and is not `open()`, so a burned number counts as awaiting
+  a void rather than as stuck. Verified by the new probe reaching it through the real store.
+- Public text on the branch carries roles only; no agent or person name.
