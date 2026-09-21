@@ -210,7 +210,8 @@ module is where that is set out.
   where the rule id goes. No chained event is appended at a failure disposition - the chain carries
   issuance and void - so the series report and the event row are where a failed number is read.
   Whether a `NUMBER_ABANDONED` chain entry is required for the numbering-gap justification is an
-  open question, tracked and dated in `QUESTIONS.md` #27, to be decided before the 0.1.0 tag.
+  open question, tracked and dated on the module's internal open-questions log, to be decided
+  before the 0.1.0 tag.
 
   **A third-party renderer that does not implement the preflight keeps the old cost.** The port's
   default answers `NOT_SUPPORTED` rather than refusing, so an implementation written before the
