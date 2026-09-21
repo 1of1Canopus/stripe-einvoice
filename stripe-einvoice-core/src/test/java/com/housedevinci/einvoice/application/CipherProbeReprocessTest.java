@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.housedevinci.einvoice.adapter.jdbc.IssuanceTestHarness;
-import com.housedevinci.einvoice.adapter.jdbc.PostgresSupport;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.InboundState;
@@ -248,7 +247,7 @@ class CipherProbeReprocessTest {
   }
 
   // -------------------------------------------------------------------------------------------
-  // Probe 8. Who asked, when, and why - durably, not in a log line.
+  // Probe 8. Who asked, when, and why - in the append-only record, not in a log line.
   // -------------------------------------------------------------------------------------------
 
   @Test
@@ -260,24 +259,17 @@ class CipherProbeReprocessTest {
 
     harness.reprocessWith(renderer).reprocess(request(eventId));
 
-    assertThat(harness.findingRows(eventId)).isEqualTo(1);
-    assertThat(
-            PostgresSupport.scalar(
-                "SELECT count(*) FROM einvoice_finding WHERE subject_id = '"
-                    + eventId
-                    + "' AND code = '"
-                    + ErrorCodes.REPROCESSED
-                    + "' AND acknowledged_at IS NOT NULL AND ack_reason LIKE '%"
-                    + ACTOR
-                    + "%' AND ack_reason LIKE '%VAT identifier corrected%'"))
-        .isEqualTo(1);
-    // The row also says the event was re-opened deliberately, not by a retry.
-    assertThat(
-            PostgresSupport.scalar(
-                "SELECT count(*) FROM einvoice_inbound_event WHERE event_id = '"
-                    + eventId
-                    + "' AND state = 'COMPLETED'"))
-        .isEqualTo(1);
+    var records = harness.reprocessRecords(eventId);
+    assertThat(records).hasSize(2);
+    var requested = records.get(0);
+    assertThat(requested.kind()).isEqualTo("REQUESTED");
+    assertThat(requested.actor()).isEqualTo(ACTOR);
+    assertThat(requested.reason()).isEqualTo(REASON);
+    var concluded = records.get(1);
+    assertThat(concluded.kind()).isEqualTo("CONCLUDED");
+    assertThat(concluded.requestSeq()).hasValue(requested.seq());
+    assertThat(concluded.outcomeState()).isEqualTo(InboundState.COMPLETED.name());
+    assertThat(concluded.legalNumber()).isNotEmpty();
   }
 
   // -------------------------------------------------------------------------------------------

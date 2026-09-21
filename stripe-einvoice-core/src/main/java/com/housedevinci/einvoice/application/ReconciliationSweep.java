@@ -62,6 +62,7 @@ public final class ReconciliationSweep {
   private final FindingStore findings;
   private final java.time.Clock clock;
   private final Settings settings;
+  private final ReprocessLedger reprocessLedger;
   private final IssuanceUnitOfWork.Configuration configuration;
 
   /**
@@ -91,10 +92,16 @@ public final class ReconciliationSweep {
       int archiveMissing,
       int archiveDrift,
       int orphanObjects,
-      int stuckIssuances) {
+      int stuckIssuances,
+      int unfinishedReprocesses) {
 
     public int total() {
-      return missingIssuance + archiveMissing + archiveDrift + orphanObjects + stuckIssuances;
+      return missingIssuance
+          + archiveMissing
+          + archiveDrift
+          + orphanObjects
+          + stuckIssuances
+          + unfinishedReprocesses;
     }
   }
 
@@ -104,6 +111,7 @@ public final class ReconciliationSweep {
       InboundEventStore inbound,
       ArchiveStore archive,
       FindingStore findings,
+      ReprocessLedger reprocessLedger,
       java.time.Clock clock,
       Settings settings,
       IssuanceUnitOfWork.Configuration configuration) {
@@ -112,6 +120,7 @@ public final class ReconciliationSweep {
     this.inbound = inbound;
     this.archive = archive;
     this.findings = findings;
+    this.reprocessLedger = reprocessLedger;
     this.clock = clock;
     this.settings = settings;
     this.configuration = configuration;
@@ -173,17 +182,31 @@ public final class ReconciliationSweep {
       }
     }
 
-    Result result = new Result(now, checked, missing, archiveMissing, drift, orphans, stuck);
+    // R-03: a REQUESTED row with no CONCLUDED means one thing - a process that died between the
+    // privileged re-open and the end of its run - because a run that throws still concludes with
+    // the code that escaped. That is an operator's problem: the event may be running again with
+    // nobody watching the outcome, so it is a finding on the event id rather than a log line.
+    int unfinished = 0;
+    for (ReprocessLedger.ReprocessRecord open :
+        reprocessLedger.unfinished(now.minus(settings.alertAfter()), settings.pageSize())) {
+      unfinished++;
+      record(ErrorCodes.RECON_REPROCESS_UNFINISHED, open.eventId(), now);
+    }
+
+    Result result =
+        new Result(now, checked, missing, archiveMissing, drift, orphans, stuck, unfinished);
     log.info(
         "einvoice: reconciliation checked {} finalised invoices and raised {} findings"
-            + " (missing {}, archive missing {}, drift {}, orphan {}, stuck {})",
+            + " (missing {}, archive missing {}, drift {}, orphan {}, stuck {},"
+            + " unfinished reprocess {})",
         checked,
         result.total(),
         missing,
         archiveMissing,
         drift,
         orphans,
-        stuck);
+        stuck,
+        unfinished);
     return result;
   }
 

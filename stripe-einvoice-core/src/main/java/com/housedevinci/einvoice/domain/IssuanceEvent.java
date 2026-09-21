@@ -101,9 +101,9 @@ public record IssuanceEvent(
         base.archiveKey(),
         base.rulePackVersion(),
         base.voidReason(),
-        ruleId == null || ruleId.isBlank()
-            ? base.voidRuleId()
-            : Identifiers.validate("failure rule id", ruleId, 64),
+        // Normalised, never validated: this runs inside the transaction that records a consumed
+        // number's burn, and a refusal here would strand the number (D9-02).
+        ruleId == null || ruleId.isBlank() ? base.voidRuleId() : RuleIds.normalise(ruleId),
         base.chainVersion(),
         base.keyId(),
         base.prevHash(),

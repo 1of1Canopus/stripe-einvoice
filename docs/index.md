@@ -104,9 +104,20 @@ cause. So the remedy is this explicit, privileged call, for one event at a time.
 - It re-opens the row and then runs the ordinary pipeline. It cannot skip the preflight, and a
   re-run that refuses again costs nothing, exactly as the first run did.
 - Two simultaneous calls on one event produce one run and one number.
-- `actor` and `reason` are mandatory and screened. They are recorded durably as compliance finding
-  `DEI-265` on the event id; the re-opened row carries `DEI-264`, so an event running again says
-  why rather than looking like a retry.
+- `actor` and `reason` are mandatory, screened and **refused rather than shortened** if they are
+  over their bound (64 and 500 characters). They are never concatenated: the record holds them as
+  two columns.
+- Every call writes to `einvoice_reprocess_request`: a `REQUESTED` row **in the same transaction as
+  the re-open itself**, so an event running again is always attributed, and a `CONCLUDED` row when
+  the run ends - with the outcome, or with the code of an exception that escaped. A `REQUESTED`
+  with no `CONCLUDED` therefore means one thing: the process died mid-run, and the reconciliation
+  sweep raises `DEI-276` for it.
+- **What that table is, exactly.** It is append-only against the application role: `SELECT` and
+  `INSERT` only, with triggers refusing `UPDATE`, `DELETE` and `TRUNCATE`, one conclusion per
+  request enforced by a partial unique index, and the two length bounds enforced by `CHECK`
+  constraints beside the in-code screen. It is **not hash-chained**: a role that owns the schema can
+  disable the trigger and alter a row, and no verifier in this module will report that. The
+  issuance chain is the tamper-evident record; this table is not.
 
 ## Properties
 

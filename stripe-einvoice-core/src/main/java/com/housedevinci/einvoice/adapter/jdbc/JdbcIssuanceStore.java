@@ -950,8 +950,9 @@ public final class JdbcIssuanceStore
                   c.prepareStatement(
                       "SELECT seller_id, mode, series, fiscal_year, stripe_invoice_id,"
                           + " legal_number, state FROM einvoice_issuance"
-                          + " WHERE state IN ('ISSUED', 'VOID_UNUSED', 'FAILED_VALIDATION')"
-                          + " ORDER BY id");
+                          + " WHERE state IN ("
+                          + disposedStates()
+                          + ") ORDER BY id");
               ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
               disposed.add(
@@ -984,6 +985,18 @@ public final class JdbcIssuanceStore
                 : Optional.<Anchor>empty();
           }
         });
+  }
+
+  /**
+   * The settled states, from the enum itself (D9-04). A literal list here and a predicate in the
+   * domain were two definitions of one thing, and the one with the SQL in it is the one that goes
+   * stale. Built from {@code IssuanceState.values()}, so the next chained state is added once.
+   */
+  private static String disposedStates() {
+    return java.util.Arrays.stream(IssuanceState.values())
+        .filter(IssuanceState::disposed)
+        .map(state -> "'" + state.name() + "'")
+        .collect(java.util.stream.Collectors.joining(", "));
   }
 
   private static Issuance readIssuance(ResultSet rs) throws SQLException {

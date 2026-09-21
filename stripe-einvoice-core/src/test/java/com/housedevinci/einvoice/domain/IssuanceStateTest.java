@@ -44,6 +44,11 @@ class IssuanceStateTest {
     }
     assertThat(IssuanceState.ISSUED.disposed()).isTrue();
     assertThat(IssuanceState.VOID_UNUSED.disposed()).isTrue();
+    // D7-03 made the burn a chained disposition too, and D9-04 made this predicate the one
+    // definition of that: the verifier's cross-check query is built from it.
+    assertThat(IssuanceState.FAILED_VALIDATION.disposed()).isTrue();
+    assertThat(IssuanceState.FAILED_VALIDATION.open()).isFalse();
+    assertThat(IssuanceState.FAILED_ARCHIVE.disposed()).isFalse();
     assertThat(IssuanceState.NUMBERED.open()).isTrue();
   }
 

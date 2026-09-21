@@ -56,10 +56,14 @@ public final class JdbcInboundEventStore implements InboundEventStore {
           + " END WHERE event_id = ?";
 
   /**
-   * The privileged re-open (QUESTIONS 26). Conditional on the state, so the eligibility check and
-   * the write are one statement and two simultaneous operator calls produce exactly one winner.
-   * {@code attempts} is cleared because this is a new decision by a human, not the next attempt of
-   * the old one, and the retry ceiling is measured from arrival either way.
+   * The privileged re-open (QUESTIONS 26), run by {@code JdbcReprocessLedger} in the same
+   * transaction as the record of who asked (D9-03) - which is why the statement lives here, beside
+   * the table it writes, and is executed there, beside the row that attributes it.
+   *
+   * <p>Conditional on the state, so the eligibility check and the write are one statement and two
+   * simultaneous operator calls produce exactly one winner. {@code attempts} is cleared because
+   * this is a new decision by a human, not the next attempt of the old one, and the retry ceiling
+   * is measured from arrival either way.
    */
   static final String REOPEN_FOR_REPROCESS =
       "UPDATE einvoice_inbound_event SET state = 'RECEIVED', last_code = ?, updated_at = ?,"
@@ -230,19 +234,6 @@ public final class JdbcInboundEventStore implements InboundEventStore {
                       new EInvoiceException(
                           ErrorCodes.INBOUND_UNREADABLE,
                           "no inbound event is recorded under that id"));
-        });
-  }
-
-  @Override
-  public boolean reopenForReprocess(String eventId, String code, Instant now) {
-    return unitOfWork.inTransaction(
-        unit -> {
-          try (PreparedStatement ps = unit.connection().prepareStatement(REOPEN_FOR_REPROCESS)) {
-            ps.setString(1, code == null ? "" : code);
-            ps.setObject(2, ts(Timestamps.toStorage(now)));
-            ps.setString(3, eventId);
-            return ps.executeUpdate() == 1;
-          }
         });
   }
 

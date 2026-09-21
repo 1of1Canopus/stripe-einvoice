@@ -200,13 +200,6 @@ public final class ErrorCodes {
    */
   public static final String REPROCESS_REQUESTED = "DEI-264";
 
-  /**
-   * The finding code for that privileged action: subject is the event id, and the acknowledgement
-   * carries who asked and why. Raised and acknowledged in the same call - it is a record of a
-   * decision, not an open action item.
-   */
-  public static final String REPROCESSED = "DEI-265";
-
   /** A finalised Stripe invoice has no issuance row at all. The finding D-09 exists for. */
   public static final String RECON_MISSING_ISSUANCE = "DEI-270";
 
@@ -221,6 +214,14 @@ public final class ErrorCodes {
 
   /** A number allocated and open past {@code einvoice.issuance.alert-after}. */
   public static final String RECON_STUCK_ISSUANCE = "DEI-273";
+
+  /**
+   * A privileged reprocess was recorded as requested and never concluded: the process died between
+   * the re-open and the end of the run (R-03). Every run that throws still writes its conclusion,
+   * so this means a dead process and nothing else - the event may have gone on without anybody
+   * seeing where it stopped.
+   */
+  public static final String RECON_REPROCESS_UNFINISHED = "DEI-276";
 
   /** Reconciliation has not completed within two intervals. No result is never "healthy". */
   public static final String RECON_STALE = "DEI-274";

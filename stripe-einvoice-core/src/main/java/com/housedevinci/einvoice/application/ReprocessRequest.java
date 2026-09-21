@@ -21,15 +21,19 @@ public record ReprocessRequest(String eventId, String actor, String reason) {
   /** The reason's bound, the same as a void reason's and a finding acknowledgement's. */
   public static final int MAX_REASON_CHARS = ComplianceFinding.MAX_REASON_CHARS;
 
+  /** The actor's bound, matching the record's own column and its CHECK constraint. */
+  public static final int MAX_ACTOR_BYTES = 64;
+
   public ReprocessRequest {
+    // Refused, never truncated, and before a single statement runs: an over-long actor or reason
+    // is an operator's input error, and shortening it silently would store something nobody wrote.
     Identifiers.validate("stripe event id", eventId);
-    actor = Identifiers.validate("reprocess actor", actor, 64);
+    actor = Identifiers.validate("reprocess actor", actor, MAX_ACTOR_BYTES);
     reason = ScreenedText.screen("reprocess reason", reason, MAX_REASON_CHARS);
   }
 
-  /** What the durable record says: who asked, and why, in one screened, bounded line. */
-  public String justification() {
-    String line = actor + ": " + reason;
-    return line.length() <= MAX_REASON_CHARS ? line : line.substring(0, MAX_REASON_CHARS);
-  }
+  // No justification(): the record holds the actor and the reason as two columns. A single
+  // composed line had to be bounded again after composition, and bounding it meant truncating a
+  // value both screens had accepted - which cut a surrogate pair in half and threw between the
+  // re-open and the record (D9-01), and could not be split back into who and why anyway (D9-05).
 }

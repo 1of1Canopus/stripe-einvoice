@@ -4,6 +4,7 @@ import com.housedevinci.einvoice.adapter.file.FilesystemArchiveStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcFindingStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcInboundEventStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore;
+import com.housedevinci.einvoice.adapter.jdbc.JdbcReprocessLedger;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcUnitOfWork;
 import com.housedevinci.einvoice.application.ArchiveStore;
 import com.housedevinci.einvoice.application.DocumentRenderer;
@@ -15,6 +16,7 @@ import com.housedevinci.einvoice.application.IssuanceReprocess;
 import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
 import com.housedevinci.einvoice.application.PreflightSupport;
 import com.housedevinci.einvoice.application.ReconciliationSweep;
+import com.housedevinci.einvoice.application.ReprocessLedger;
 import com.housedevinci.einvoice.application.StripeInvoiceSource;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
@@ -200,9 +202,20 @@ public class EInvoiceIssuanceAutoConfiguration {
       IssuanceUnitOfWork unitOfWork,
       InboundEventStore inbound,
       JdbcIssuanceStore store,
-      FindingStore findings,
+      ReprocessLedger ledger,
       Clock clock) {
-    return new IssuanceReprocess(unitOfWork, inbound, store, findings, clock);
+    return new IssuanceReprocess(unitOfWork, inbound, store, ledger, clock);
+  }
+
+  /**
+   * The durable record of every privileged re-open (D9-03). Always wired, even where the intake is
+   * not: the table is written only by the reprocess, and a host that has one without the other
+   * would have the action with no record of it.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public ReprocessLedger einvoiceReprocessLedger(JdbcUnitOfWork unitOfWork) {
+    return new JdbcReprocessLedger(unitOfWork);
   }
 
   @Bean
@@ -225,6 +238,7 @@ public class EInvoiceIssuanceAutoConfiguration {
       InboundEventStore inbound,
       ArchiveStore archive,
       FindingStore findings,
+      ReprocessLedger reprocessLedger,
       Clock clock,
       EInvoiceProperties properties) {
     return new ReconciliationSweep(
@@ -233,6 +247,7 @@ public class EInvoiceIssuanceAutoConfiguration {
         inbound,
         archive,
         findings,
+        reprocessLedger,
         clock,
         new ReconciliationSweep.Settings(
             properties.getReconcile().getWindow(),

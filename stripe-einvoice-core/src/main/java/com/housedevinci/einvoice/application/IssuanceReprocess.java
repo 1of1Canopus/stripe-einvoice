@@ -1,14 +1,15 @@
 package com.housedevinci.einvoice.application;
 
-import com.housedevinci.einvoice.domain.ComplianceFinding;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
+import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
 import com.housedevinci.einvoice.domain.Issuance;
 import com.housedevinci.einvoice.domain.LegalNumber;
 import java.time.Clock;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,19 +43,19 @@ public final class IssuanceReprocess {
   private final IssuanceUnitOfWork unitOfWork;
   private final InboundEventStore inbound;
   private final IssuanceReader reader;
-  private final FindingStore findings;
+  private final ReprocessLedger ledger;
   private final Clock clock;
 
   public IssuanceReprocess(
       IssuanceUnitOfWork unitOfWork,
       InboundEventStore inbound,
       IssuanceReader reader,
-      FindingStore findings,
+      ReprocessLedger ledger,
       Clock clock) {
     this.unitOfWork = Objects.requireNonNull(unitOfWork, "unitOfWork");
     this.inbound = Objects.requireNonNull(inbound, "inbound");
     this.reader = Objects.requireNonNull(reader, "reader");
-    this.findings = Objects.requireNonNull(findings, "findings");
+    this.ledger = Objects.requireNonNull(ledger, "ledger");
     this.clock = Objects.requireNonNull(clock, "clock");
   }
 
@@ -90,7 +91,7 @@ public final class IssuanceReprocess {
   public Result reprocess(ReprocessRequest request) {
     Objects.requireNonNull(request, "request");
     String eventId = request.eventId();
-    var event =
+    InboundEvent event =
         inbound
             .find(eventId)
             .orElseThrow(
@@ -125,44 +126,74 @@ public final class IssuanceReprocess {
           ErrorCodes.ISSUANCE_ALREADY_CLAIMED,
           existing);
     }
-    if (!inbound.reopenForReprocess(eventId, ErrorCodes.REPROCESS_REQUESTED, clock.instant())) {
+    OptionalLong requestSeq =
+        ledger.reopenAndRecord(
+            request,
+            configuration.sellerId(),
+            configuration.mode(),
+            ErrorCodes.REPROCESS_REQUESTED,
+            clock.instant());
+    if (requestSeq.isEmpty()) {
       // Another call moved the row between the read and the update. One winner, by the database's
-      // own row lock, and the loser runs nothing at all.
+      // own row lock, and the loser runs nothing and records nothing.
       var current = inbound.find(eventId);
       return refused(
           Disposition.REFUSED_NOT_ELIGIBLE,
           eventId,
-          current.map(e -> e.state()).orElse(event.state()),
-          current.map(e -> e.lastCode()).orElse(ErrorCodes.REPROCESS_REQUESTED),
+          current.map(InboundEvent::state).orElse(event.state()),
+          current.map(InboundEvent::lastCode).orElse(ErrorCodes.REPROCESS_REQUESTED),
           reader.findBySource(configuration.sellerId(), configuration.mode(), event.objectId()));
     }
-    // Recorded before the run, so a crash in the middle still leaves who asked and why. The
-    // findings table is this module's operator-facing, never-deleted record; an acknowledgement is
-    // already "who decided, when, why", so the request's justification goes there rather than into
-    // a second table. Ids and codes only: the actor and reason are screened and bounded.
-    findings.record(
-        ComplianceFinding.of(
-            configuration.sellerId(),
-            configuration.mode(),
-            ErrorCodes.REPROCESSED,
-            eventId,
-            clock.instant()));
-    findings.acknowledge(
-        configuration.sellerId(),
-        configuration.mode(),
-        ErrorCodes.REPROCESSED,
-        eventId,
-        request.justification(),
-        clock.instant());
+    // The re-open and the record of who asked committed together (D9-03): from here on there is no
+    // ordering of failures that leaves an event running again with nobody recorded as having asked
+    // for it. The log line carries ids only; the actor and the reason are in the record.
     log.info("einvoice: event {} re-opened for reprocessing by {}", eventId, request.actor());
 
-    IssuanceUnitOfWork.Outcome outcome = unitOfWork.process(eventId);
+    long seq = requestSeq.getAsLong();
+    IssuanceUnitOfWork.Outcome outcome;
+    try {
+      outcome = unitOfWork.process(eventId);
+    } catch (EInvoiceException e) {
+      // R-04: a run that threw still concludes, with the code that escaped, so an unconcluded
+      // request means one thing only - a process that died - which is what makes DEI-276 readable.
+      conclude(seq, event, configuration, Optional.empty(), e.code(), null);
+      throw e;
+    } catch (RuntimeException e) {
+      conclude(seq, event, configuration, Optional.empty(), ErrorCodes.INBOUND_UNREADABLE, null);
+      throw e;
+    }
+    conclude(
+        seq,
+        event,
+        configuration,
+        Optional.of(outcome.state()),
+        outcome.code(),
+        outcome.legalNumber());
     return new Result(
         Disposition.REPROCESSED,
         outcome.eventId(),
         outcome.state(),
         outcome.code(),
         outcome.legalNumber());
+  }
+
+  private void conclude(
+      long requestSeq,
+      InboundEvent event,
+      IssuanceUnitOfWork.Configuration configuration,
+      Optional<InboundState> state,
+      String code,
+      String legalNumber) {
+    ledger.conclude(
+        requestSeq,
+        new ReprocessLedger.ReprocessRecord.Outcome(
+            event.eventId(),
+            configuration.sellerId(),
+            configuration.mode(),
+            state,
+            code,
+            legalNumber),
+        clock.instant());
   }
 
   private static Result refused(

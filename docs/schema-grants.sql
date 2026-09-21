@@ -36,6 +36,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON einvoice_inbound_event TO einvoice_runti
 -- every sweep, acknowledged with a reason, and purged with the events it refers to.
 GRANT SELECT, INSERT, UPDATE, DELETE ON einvoice_finding TO einvoice_runtime;
 
+-- The privileged reprocess record: append-only against this role, SELECT and INSERT only, with the
+-- triggers refusing UPDATE, DELETE and TRUNCATE. It is not hash-chained: a role that owns the
+-- schema can disable the trigger and rewrite a row, and nothing in this module will report that.
+GRANT SELECT, INSERT ON einvoice_reprocess_request TO einvoice_runtime;
+GRANT USAGE ON SEQUENCE einvoice_reprocess_request_seq_seq TO einvoice_runtime;
+
 -- Deliberately NOT granted: DELETE and TRUNCATE on the four ledger tables, and any DDL anywhere.
 -- There is no code path in this module that needs them, and a legal ledger that can be deleted by
 -- the application that writes it proves nothing about what it once held.

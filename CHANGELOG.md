@@ -16,9 +16,16 @@ All notable changes to this project are documented here. The format follows
   re-fetch, the preflight, the allocator - so it cannot skip a screen. An incomplete seller profile
   is a defect of the application, not of the invoice, and every invoice refused while it was wrong
   would otherwise have needed a new upstream event the seller cannot cause. There is **no HTTP
-  endpoint and no actuator operation** for it, by the same reasoning as the void. Who asked, when
-  and why is recorded durably as a compliance finding (`DEI-265`) with the operator's screened
-  reason; the re-opened row carries `DEI-264`.
+  endpoint and no actuator operation** for it, by the same reasoning as the void.
+- **Every privileged re-open is recorded in a new append-only table, `einvoice_reprocess_request`.**
+  A `REQUESTED` row with the operator's actor and reason - separate columns, screened, refused
+  rather than shortened - written in the same transaction as the re-open, and a `CONCLUDED` row with
+  the outcome or the escaping error code. No update path: a later call appends, it never overwrites.
+  A request with no conclusion means a dead process and raises the new finding `DEI-276`. The table
+  is append-only against the application role and is **not** hash-chained, which the docs say in
+  those words. The earlier plan to record this as an acknowledged compliance finding is dropped with
+  it: **`DEI-265` no longer exists**, because an upsert keyed on the subject cannot hold two
+  operators' decisions.
 - **A legal number burned by a validation or render refusal is now explained inside the hash
   chain.** `FAILED_VALIDATION` appends a chained event carrying the failing rule id or the refusal
   code, in the same transaction as the state change, so the justification for a gap in the issued

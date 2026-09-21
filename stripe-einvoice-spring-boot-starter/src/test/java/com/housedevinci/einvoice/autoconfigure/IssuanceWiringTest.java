@@ -80,7 +80,8 @@ class IssuanceWiringTest {
                   .hasSingleBean(com.housedevinci.einvoice.application.IssuanceReprocess.class);
               assertThat(context.getBeanNamesForType(Object.class))
                   .filteredOn(name -> name.toLowerCase(java.util.Locale.ROOT).contains("reprocess"))
-                  .containsExactly("einvoiceIssuanceReprocess");
+                  .containsExactlyInAnyOrder(
+                      "einvoiceIssuanceReprocess", "einvoiceReprocessLedger");
               // No controller, no actuator operation and no scheduled method reaches it: the
               // findings endpoint and the webhook controller are the module's only annotated
               // operations, and neither mentions the reprocess in its name or its signature.
