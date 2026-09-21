@@ -185,7 +185,9 @@ class IssuanceOperationsTest {
 
               EInvoiceHealthIndicator fresh =
                   new EInvoiceHealthIndicator(
-                      sweeper, context.getBean(EInvoiceProperties.class), Clock.systemUTC());
+                      java.util.Optional.of(sweeper),
+                      context.getBean(EInvoiceProperties.class),
+                      Clock.systemUTC());
               assertThat(fresh.health().getStatus().getCode()).isEqualTo("UP");
               assertThat(fresh.health().getDetails()).containsKeys("lastSweep", "chain");
 
@@ -193,7 +195,7 @@ class IssuanceOperationsTest {
               // point of the watcher is to notice silence.
               EInvoiceHealthIndicator stale =
                   new EInvoiceHealthIndicator(
-                      sweeper,
+                      java.util.Optional.of(sweeper),
                       context.getBean(EInvoiceProperties.class),
                       Clock.fixed(Instant.now().plus(Duration.ofDays(1)), ZoneOffset.UTC));
               assertThat(stale.health().getStatus().getCode()).isEqualTo("DOWN");
@@ -210,7 +212,9 @@ class IssuanceOperationsTest {
               sweeper.verifyChainOnce();
               EInvoiceHealthIndicator health =
                   new EInvoiceHealthIndicator(
-                      sweeper, context.getBean(EInvoiceProperties.class), Clock.systemUTC());
+                      java.util.Optional.of(sweeper),
+                      context.getBean(EInvoiceProperties.class),
+                      Clock.systemUTC());
               assertThat(health.health().getDetails()).doesNotContainKey("lastReconciliation");
             });
   }

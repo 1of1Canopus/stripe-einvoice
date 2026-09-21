@@ -20,8 +20,10 @@
 #
 # Exit code is 0 once every probe has flipped to FIXED, 1 while any weakness is still
 # there (`[ "$pass" -eq 0 ]` on the last line). The header of this file used to claim the
-# opposite; the code was always right and the sentence was wrong. This file is evidence,
-# not a CI gate: nothing in .github/ runs it.
+# opposite; the code was always right and the sentence was wrong. Since the N12 fix this
+# suite IS a CI gate: the `cipher-probes` job in .github/workflows/ci.yml runs it
+# unconditionally on every push and pull request, and three probes below assert that that
+# job cannot be disabled by a comment, by `if: false`, or by a rename.
 #
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -29,13 +31,41 @@ cd "$(dirname "$0")/.."
 WF=.github/workflows/release.yml
 pass=0; flipped=0
 
+# Checklist line 71. A probe that shells out to an inner build, a script or any external
+# command writes that command's output HERE - `>>"$PROBE_CAPTURE" 2>&1`, never
+# `>>"$PROBE_CAPTURE" 2>&1` - and the reporter below prints the last 30 lines of it whenever the
+# probe reads WEAK. A transient runner failure inside an inner Maven build used to be
+# indistinguishable from the weakness the probe is looking for, because the output that said
+# which one it was had been thrown away.
+#
+# A probe that cannot run at all (no Docker, no `zip`, CIPHER_PROBE_MAVEN unset) sets
+# PROBE_SKIP_REASON and returns 0: unverifiable counts as WEAK, and now says why on the same
+# line rather than in a stray stderr echo.
+PROBE_CAPTURE=""
+PROBE_SKIP_REASON=""
+export PROBE_CAPTURE PROBE_SKIP_REASON
+
 probe() { # probe <name> <"still weak" message>; body returns 0 when the weakness is present
   local name="$1" msg="$2"; shift 2
+  PROBE_CAPTURE="$(mktemp)"
+  PROBE_SKIP_REASON=""
   if "$@"; then
     printf 'WEAK    %-52s %s\n' "$name" "$msg"; pass=$((pass + 1))
+    if [ -n "$PROBE_SKIP_REASON" ]; then
+      printf '        unverifiable: %s\n' "$PROBE_SKIP_REASON"
+    fi
+    if [ -s "$PROBE_CAPTURE" ]; then
+      printf '        --- last 30 lines of this probe%s inner command output ---\n' "'s"
+      tail -n 30 "$PROBE_CAPTURE" | sed 's/^/        | /'
+      printf '        --- end of inner command output ---\n'
+    elif [ -z "$PROBE_SKIP_REASON" ]; then
+      printf '        (no inner command output was captured for this probe)\n'
+    fi
   else
     printf 'FIXED   %-52s\n' "$name"; flipped=$((flipped + 1))
   fi
+  rm -f "$PROBE_CAPTURE"
+  PROBE_CAPTURE=""
 }
 
 # ---------------------------------------------------------------------------
@@ -59,7 +89,7 @@ probe_multiline_version_accepted() {
   GITHUB_EVENT_NAME=workflow_dispatch \
   INPUT_VERSION="$(printf '0.1.0\nmalicious=1')" \
   GITHUB_OUTPUT="$out" \
-  bash -c "$step" >/dev/null 2>&1
+  bash -c "$step" >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   # Weak: the step exited 0 (accepted the input) and the injected extra line landed in
   # $GITHUB_OUTPUT. Fixed: the step rejected the multiline input (non-zero exit).
@@ -188,7 +218,7 @@ probe_nothing_forbids_maven_debug_in_the_release_job() {
 #      wrong reason.
 # ---------------------------------------------------------------------------
 probe_licence_gate_accepts_a_dual_apache_or_gpl_dependency() {
-  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { echo "        (skipped: set CIPHER_PROBE_MAVEN=1)" >&2; return 0; }
+  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe runs an inner Maven build; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
   local work rc; work=$(mktemp -d)
   cat > "$work/syn.pom" <<'EOF'
 <project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>
@@ -203,11 +233,11 @@ EOF
   (
     cd "$work/tree" || exit 1
     ./mvnw -B -q org.apache.maven.plugins:maven-install-plugin:3.1.4:install-file \
-      -Dfile="$work/syn.jar" -DpomFile="$work/syn.pom" >/dev/null 2>&1 || exit 1
+      -Dfile="$work/syn.jar" -DpomFile="$work/syn.pom" >>"$PROBE_CAPTURE" 2>&1 || exit 1
     perl -0pi -e 's{<dependencies>}{<dependencies>\n    <dependency><groupId>example.synthetic</groupId><artifactId>syn-dual</artifactId><version>1.0</version></dependency>}' \
       stripe-einvoice-core/pom.xml
     ./mvnw -B -pl stripe-einvoice-core -am verify \
-      -DskipTests -Dspotless.check.skip=true -Djacoco.skip=true -Denforcer.skip=true >/dev/null 2>&1
+      -DskipTests -Dspotless.check.skip=true -Djacoco.skip=true -Denforcer.skip=true >>"$PROBE_CAPTURE" 2>&1
   )
   rc=$?
   rm -rf "$work"
@@ -234,7 +264,7 @@ licence_verdict() { # licence_verdict <notices line>
   # N1: the script now takes the module build directory and packaging as arguments (it
   # checks one module's own notices, not a tree-wide `find`); jar is the packaging exercised
   # by every synthetic case below.
-  "$work/tools/check-third-party-licences.sh" "$work/mod/target" jar >/dev/null 2>&1
+  "$work/tools/check-third-party-licences.sh" "$work/mod/target" jar >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   rm -rf "$work"
   return "$rc"
@@ -293,12 +323,12 @@ probe_denial_pass_crashes_on_an_empty_licence_token() {
 #      means the parent's pass is reading stale evidence.
 # ---------------------------------------------------------------------------
 probe_verify_fails_on_a_clean_checkout() {
-  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { echo "        (skipped: set CIPHER_PROBE_MAVEN=1)" >&2; return 0; }
+  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe runs an inner Maven build; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
   local work rc
   work=$(mktemp -d)
   git clone -q --no-hardlinks . "$work/tree" || { rm -rf "$work"; return 1; }
   ( cd "$work/tree" && ./mvnw -B verify \
-      -DskipTests -Dspotless.check.skip=true -Djacoco.skip=true >/dev/null 2>&1 )
+      -DskipTests -Dspotless.check.skip=true -Djacoco.skip=true >>"$PROBE_CAPTURE" 2>&1 )
   rc=$?
   rm -rf "$work"
   [ "$rc" -ne 0 ]   # non-zero on a clean checkout == the weakness is present
@@ -325,7 +355,7 @@ probe_verify_fails_on_a_clean_checkout() {
 # produces against those checksums. Weak while either sources jar differs.
 # ---------------------------------------------------------------------------
 probe_sources_jar_differs_from_a_build_that_actually_ran_tests() {
-  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { echo "        (skipped: set CIPHER_PROBE_MAVEN=1)" >&2; return 0; }
+  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe runs an inner Maven build; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
   local work rc
   work=$(mktemp -d)
   git clone -q --no-hardlinks . "$work/tree" || { rm -rf "$work"; return 1; }
@@ -340,7 +370,7 @@ probe_sources_jar_differs_from_a_build_that_actually_ran_tests() {
       expected="$(awk -v n="$name" '$2==n{print $1}' repro-sha.txt)" &&
       [ -n "$expected" ] && [ "$actual" = "$expected" ] || exit 1
     done
-  ) >/dev/null 2>&1
+  ) >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   rm -rf "$work"
   [ "$rc" -ne 0 ]   # a mismatch, a missing jar, or a build failure: weakness present (WEAK)
@@ -388,8 +418,8 @@ probe_debug_guard_misses_the_slf4j_log_level() {
   guard=$(awk '/- name: Refuse Maven debug output in this job/{i=1} i&&/run: \|/{r=1;next} r&&/^      - name:/{exit} r{print}' "$WF")
   [ -n "$guard" ] || return 0
   MAVEN_ARGS='' MAVEN_OPTS='-Dorg.slf4j.simpleLogger.defaultLogLevel=debug' \
-    bash -c "$guard" >/dev/null 2>&1 && return 0    # guard passed a debug setting: weak
-  MAVEN_ARGS='' MAVEN_OPTS='--errors' bash -c "$guard" >/dev/null 2>&1 && return 0
+    bash -c "$guard" >>"$PROBE_CAPTURE" 2>&1 && return 0    # guard passed a debug setting: weak
+  MAVEN_ARGS='' MAVEN_OPTS='--errors' bash -c "$guard" >>"$PROBE_CAPTURE" 2>&1 && return 0
   return 1
 }
 
@@ -410,7 +440,7 @@ probe_debug_guard_refuses_its_own_maven_opts_pin() {
   maven_args=$(awk -F'"' '/^  MAVEN_ARGS:/{print $2; exit}' "$WF")
   maven_opts=$(awk -F'"' '/^  MAVEN_OPTS:/{print $2; exit}' "$WF")
   [ -n "$maven_opts" ] || return 0   # env pin vanished: cannot prove the fix, count as weak
-  MAVEN_ARGS="$maven_args" MAVEN_OPTS="$maven_opts" bash -c "$guard" >/dev/null 2>&1
+  MAVEN_ARGS="$maven_args" MAVEN_OPTS="$maven_opts" bash -c "$guard" >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   [ "$rc" -ne 0 ]   # guard refused the workflow's own declared MAVEN_ARGS/MAVEN_OPTS: weak
 }
@@ -640,7 +670,7 @@ probe_denial_pass_coordinate_can_be_forged_by_the_dependency_url() {
 Lists of 1 third-party dependencies.
      (Apache-2.0) (GPL-3.0) evil-url (example.synth:evil-b:1.0 - http://x/(ch.qos.logback:logback-core:1.5.6 - y))
 EOF
-  tools/check-third-party-licences.sh "$d" jar >/dev/null 2>&1
+  tools/check-third-party-licences.sh "$d" jar >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   rm -rf "$d"
   [ "$rc" -eq 0 ]   # exit 0 on a GPL-3.0 line: still weak
@@ -753,7 +783,7 @@ probe_denial_pass_coordinate_can_be_forged_by_a_trailing_group() {
 Lists of 1 third-party dependencies.
      (GPL-3.0) evil-trailing (example.synth:evil-c:1.0 - http://x) (ch.qos.logback:logback-core:1.5.6 - http://y)
 EOF
-  tools/check-third-party-licences.sh "$d" jar >/dev/null 2>&1
+  tools/check-third-party-licences.sh "$d" jar >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   rm -rf "$d"
   [ "$rc" -eq 0 ]   # exit 0 on a GPL-3.0 line: still weak
@@ -808,17 +838,17 @@ probe_dco_exempts_an_octopus_merge_carrying_unsigned_content() {
     git checkout -q main && git checkout -q -b b && echo b > b.txt && git add -A
     git commit -q -m "$(printf 'feat: b\n\nSigned-off-by: T <t@e.com>')"
     git checkout -q main
-    git merge -q --no-commit --no-ff a b >/dev/null 2>&1 || true
+    git merge -q --no-commit --no-ff a b >>"$PROBE_CAPTURE" 2>&1 || true
     # content present in NO parent, and no Signed-off-by trailer anywhere
     echo BACKDOOR > evil.txt && git add -A
     git commit -q -m "Merge branches 'a' and 'b'"
-  ) >/dev/null 2>&1 || { rm -rf "$repo"; return 0; }
+  ) >>"$PROBE_CAPTURE" 2>&1 || { rm -rf "$repo"; return 0; }
 
   local base head
   base="$(git -C "$repo" rev-list --max-parents=0 HEAD)"
   head="$(git -C "$repo" rev-parse HEAD)"
   ( cd "$repo" && BASE_SHA="$base" HEAD_SHA="$head" \
-      bash -c "$body" ) >/dev/null 2>&1
+      bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   rm -rf "$repo"
   # exit 0 means the gate accepted an octopus merge carrying unsigned-off content: WEAK.
@@ -864,16 +894,16 @@ probe_dco_step_aborts_silently_on_a_conflicted_back_merge() {
     git rev-parse HEAD > .base
     git checkout -q feature
     # both sides edited the same line: the automatic merge conflicts, git merge-tree exits 1
-    git merge --no-commit --no-ff main >/dev/null 2>&1 || true
+    git merge --no-commit --no-ff main >>"$PROBE_CAPTURE" 2>&1 || true
     printf 'resolved\n' > c.txt && git add c.txt
     git commit -q -m "$(printf "Merge branch 'main' into feature\n\nSigned-off-by: T <t@e.com>")"
-  ) >/dev/null 2>&1 || { rm -rf "$repo"; return 0; }
+  ) >>"$PROBE_CAPTURE" 2>&1 || { rm -rf "$repo"; return 0; }
 
   local base head
   base="$(cat "$repo/.base")"
   head="$(git -C "$repo" rev-parse HEAD)"
   ( cd "$repo" && BASE_SHA="$base" HEAD_SHA="$head" \
-      bash -c "$body" ) >/dev/null 2>&1
+      bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   rm -rf "$repo"
   # every commit in this range carries a Signed-off-by. Non-zero means the step aborted
@@ -939,7 +969,7 @@ _preflight_verdict() { # _preflight_verdict <gh stub body>; echoes the step's ex
   stub="$(mktemp -d)"
   printf '#!/usr/bin/env bash\n%s\n' "$1" > "$stub/gh"
   chmod +x "$stub/gh"
-  ( PATH="$stub:$PATH" GITHUB_REPOSITORY=1of1Canopus/stripe-einvoice bash -c "$body" ) >/dev/null 2>&1
+  ( PATH="$stub:$PATH" GITHUB_REPOSITORY=1of1Canopus/stripe-einvoice bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   rm -rf "$stub"
   echo "$rc"
@@ -1027,7 +1057,7 @@ _replay_verdict() { # _replay_verdict <curl stub body>; echoes the step's exit c
   printf '#!/usr/bin/env bash\n%s\n' "$1" > "$stub/curl"
   chmod +x "$stub/curl"
   ( PATH="$stub:$PATH" CENTRAL_USERNAME=probe CENTRAL_TOKEN=probe VERSION=9.9.9-cipher-probe \
-      bash -c "$body" ) >/dev/null 2>&1
+      bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   rm -rf "$stub"
   echo "$rc"
@@ -1184,7 +1214,7 @@ _bundle_comparison_run() { # _bundle_comparison_run <project dir with target/cen
 # it; fixed if both are present.
 # ---------------------------------------------------------------------------
 probe_bundle_comparison_dies_on_an_unrecorded_entry() {
-  command -v zip >/dev/null 2>&1 || { echo "        (skipped: zip not installed)" >&2; return 0; }
+  command -v zip >>"$PROBE_CAPTURE" 2>&1 || { PROBE_SKIP_REASON="zip is not installed, so the synthetic jar this probe needs cannot be built"; return 0; }
   local work layout out rc_file rc weak=1
   work="$(mktemp -d)"
   layout="$work/bundle-src"
@@ -1220,7 +1250,7 @@ probe_bundle_comparison_dies_on_an_unrecorded_entry() {
 probe_reference_guard_pattern_is_defined_more_than_once() {
   local files n
   files="$(git ls-files)"
-  n="$(grep -lE "QUESTIONS\\\\\.md\|STATUS\\\\\.md" <<<"$files" >/dev/null 2>&1; grep -c . /dev/null)"
+  n="$(grep -lE "QUESTIONS\\\\\.md\|STATUS\\\\\.md" <<<"$files" >>"$PROBE_CAPTURE" 2>&1; grep -c . /dev/null)"
   # Count the tracked files that carry a pattern definition line.
   n=0
   while IFS= read -r f; do
@@ -1303,7 +1333,7 @@ probe_sources_jar_contents_are_never_asserted() {
 # sources jar that is otherwise clean and carries exactly that one entry.
 # ---------------------------------------------------------------------------
 probe_sources_jar_assertion_is_extension_only_not_path_based() {
-  command -v zip >/dev/null 2>&1 || { echo "        (skipped: zip not installed)" >&2; return 0; }
+  command -v zip >>"$PROBE_CAPTURE" 2>&1 || { PROBE_SKIP_REASON="zip is not installed, so the synthetic jar this probe needs cannot be built"; return 0; }
   local body work rc
   body="$(step_body "$CI" 'Confirm each sources jar holds sources, resources and the licence texts only')"
   [ -n "$body" ] || return 0
@@ -1314,16 +1344,269 @@ probe_sources_jar_assertion_is_extension_only_not_path_based() {
   : > "$work/src/META-INF/LICENSE"
   : > "$work/src/META-INF/NOTICE"
   : > "$work/src/classes/META-INF/spring-configuration-metadata.json"
-  ( cd "$work/src" && zip -q -r "$work/stripe-einvoice-core/target/stripe-einvoice-core-0.1.0-sources.jar" . ) >/dev/null 2>&1
+  ( cd "$work/src" && zip -q -r "$work/stripe-einvoice-core/target/stripe-einvoice-core-0.1.0-sources.jar" . ) >>"$PROBE_CAPTURE" 2>&1
   cp "$work/stripe-einvoice-core/target/stripe-einvoice-core-0.1.0-sources.jar" \
      "$work/stripe-einvoice-spring-boot-starter/target/stripe-einvoice-spring-boot-starter-0.1.0-sources.jar"
-  ( cd "$work" && bash -c "$body" ) >/dev/null 2>&1
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   rm -rf "$work"
   # Weak: the step passed (exit 0) despite the build-output path. Fixed: it refused (non-zero).
   [ "$rc" -eq 0 ]
 }
 
+
+# ===========================================================================
+# PR 4 (release wiring). Same rule as every block above: each probe asserts a
+# WEAKNESS and reads WEAK while that weakness is present.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# S1 - the published artifacts carry no XSLT 2.0 processor, so a default install
+#      reports NOT_EVALUATED on every document, refuses every issuance, and the library
+#      only works for a host that read the README and added a dependency itself. Asks
+#      Maven for the module's real runtime dependency set - the pom text is not the
+#      question, the resolved scope is.
+#      Weak while no XSLT 2.0 processor is on the runtime classpath of the core module.
+# ---------------------------------------------------------------------------
+probe_published_artifacts_ship_no_xslt2_processor() {
+  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe runs an inner Maven build; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
+  local list
+  ./mvnw -B dependency:list -DincludeScope=runtime -pl stripe-einvoice-core >>"$PROBE_CAPTURE" 2>&1 || return 0
+  list="$(tail -n 400 "$PROBE_CAPTURE")"
+  # Saxon-HE, or any other processor a maintainer substitutes, at runtime or compile scope.
+  grep -qE 'Saxon-HE:jar:[^:]+:(runtime|compile)' <<<"$list" && return 1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# S2 - the MPL carve-out is not scoped to one coordinate: a SECOND dependency under the
+#      same licence walks through the gate on the back of the decision that was made about
+#      Saxon-HE alone. Runs the real gate over a synthetic notices file.
+#      Weak while a foreign coordinate declaring MPL-2.0 passes.
+# ---------------------------------------------------------------------------
+probe_mpl_carve_out_is_not_scoped_to_one_coordinate() {
+  local d rc
+  d="$(mktemp -d)"
+  cat >"$d/THIRD-PARTY-NOTICES.txt" <<'NOTICES'
+Lists of 1 third-party dependencies.
+     (MPL-2.0) some-other-mpl-library (example.synth:other-mpl:1.0 - http://x)
+NOTICES
+  tools/check-third-party-licences.sh "$d" jar >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$d"
+  [ "$rc" -eq 0 ]   # the gate accepted a second MPL dependency: weak
+}
+
+# ---------------------------------------------------------------------------
+# S3 - the carve-out is scoped to the coordinate but not to the LICENCE, so the accepted
+#      dependency becomes a hole for every denied licence: a future Saxon-HE release (or a
+#      repository that serves a forged pom for that coordinate) declaring GPL-3.0 would pass.
+#      Weak while Saxon-HE under a denied licence other than MPL passes.
+# ---------------------------------------------------------------------------
+probe_mpl_carve_out_admits_any_denied_licence_on_that_coordinate() {
+  local d rc
+  d="$(mktemp -d)"
+  cat >"$d/THIRD-PARTY-NOTICES.txt" <<'NOTICES'
+Lists of 1 third-party dependencies.
+     (GPL-3.0) Saxon-HE (net.sf.saxon:Saxon-HE:13.0 - http://www.saxonica.com/)
+NOTICES
+  tools/check-third-party-licences.sh "$d" jar >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$d"
+  [ "$rc" -eq 0 ]   # the gate accepted a GPL-3.0 declaration on the carved-out coordinate: weak
+}
+
+# ---------------------------------------------------------------------------
+# S4 - the licence gate has a --self-test (the N2/F2/G1 table, and since this change the four
+#      coordinate+licence cases) that nothing in .github/ runs. A self-test only a human runs
+#      by hand is the N12 shape: it is evidence, not a gate.
+#      Weak while no CI job invokes it.
+# ---------------------------------------------------------------------------
+probe_licence_gate_self_test_is_not_run_by_ci() {
+  grep -rq 'check-third-party-licences.sh --self-test' .github/workflows/ && return 1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# S5 - nothing stops a pull request that adds a dependency with a known HIGH or CRITICAL
+#      vulnerability. Runs the REAL severity step from ci.yml against a synthetic report
+#      carrying one HIGH finding (a CVSS 7.5 vector, computed from the vector exactly as
+#      the gate does), rather than asserting that some job name appears in the YAML.
+#      Weak while that step exits 0 on a HIGH finding.
+# ---------------------------------------------------------------------------
+probe_a_high_severity_dependency_passes_the_pull_request_gate() {
+  local body work rc
+  body="$(step_body "$CI" 'Fail on a known HIGH or CRITICAL vulnerability')"
+  [ -n "$body" ] || return 0   # no such step: nothing gates a pull request
+  work="$(mktemp -d)"
+  cat >"$work/osv.json" <<'REPORT'
+{"results":[{"source":{"path":"pom.xml"},"packages":[{
+  "package":{"name":"org.example:vulnerable","version":"1.0","ecosystem":"Maven"},
+  "vulnerabilities":[{"id":"GHSA-synthetic-high","severity":[
+    {"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"}]}]}]}]}
+REPORT
+  RUNNER_TEMP="$work" bash -c "$body" >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]   # the gate accepted a HIGH finding: weak
+}
+
+# ---------------------------------------------------------------------------
+# S6 - a release is signed and uploaded without anyone having looked for known
+#      vulnerabilities in what is being signed. Two halves, both required: the artifacts
+#      must be scanned BEFORE the step that signs (position in the job, which is a property
+#      of the file and can only be read there), and the decision the scan feeds must
+#      actually refuse. The second half runs the shared gate against a synthetic Grype
+#      report with a CRITICAL finding - the same binary the release step invokes.
+#      Weak while either half is missing.
+# ---------------------------------------------------------------------------
+probe_the_release_signs_artifacts_it_never_scanned() {
+  local scan_line sign_line work rc
+  scan_line="$(grep -n 'name: Scan the artifacts this release is about to sign' "$WF" | head -1 | cut -d: -f1)"
+  sign_line="$(grep -n 'name: Verify, licence check, sign, upload' "$WF" | head -1 | cut -d: -f1)"
+  [ -n "$scan_line" ] && [ -n "$sign_line" ] || return 0        # no scan step at all: weak
+  [ "$scan_line" -lt "$sign_line" ] || return 0                  # scan after the signature: weak
+  work="$(mktemp -d)"
+  cat >"$work/grype.json" <<'REPORT'
+{"matches":[{"vulnerability":{"id":"CVE-synthetic-critical","severity":"Critical"},
+             "artifact":{"name":"vulnerable","version":"1.0","type":"java-archive"}}],
+ "artifacts":[{"name":"vulnerable","version":"1.0","type":"java-archive"}]}
+REPORT
+  tools/check-vulnerability-report.py --format grype --report "$work/grype.json" --fail-on high \
+    >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]   # a CRITICAL finding did not stop the release: weak
+}
+
+# ---------------------------------------------------------------------------
+# S7 - a scanner that could not run is indistinguishable from a clean scan. Three shapes of
+#      "no answer" - an empty file, a truncated one, and a syntactically valid report with
+#      no result section - each run through the real gate.
+#      Weak while any of them exits 0.
+# ---------------------------------------------------------------------------
+probe_an_unreadable_scan_report_counts_as_clean() {
+  local work weak=1
+  work="$(mktemp -d)"
+  : > "$work/empty.json"
+  printf '{"results": [' > "$work/truncated.json"
+  printf '{"scanner":"osv","version":"2"}' > "$work/no-results.json"
+  # A syntactically perfect report of a scan that looked at nothing. Without --all-packages an
+  # OSV report lists only VULNERABLE packages, so a resolution that silently produced nothing
+  # renders exactly like a clean tree - the vacuous pass this whole script exists to refuse.
+  printf '{"results":[{"source":{"path":"pom.xml"},"packages":[]}]}' > "$work/no-packages.json"
+  local f
+  for f in empty truncated no-results no-packages; do
+    if tools/check-vulnerability-report.py --format osv --report "$work/$f.json" --fail-on high >>"$PROBE_CAPTURE" 2>&1; then
+      echo "the gate accepted $f.json as a clean scan" >>"$PROBE_CAPTURE"
+      weak=0
+    fi
+  done
+  rm -rf "$work"
+  [ "$weak" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# D4-01 - the same "scanned nothing renders as clean" defect S7 refuses for OSV, on the Grype
+#      side: an empty "matches" array with an empty (or absent) "artifacts" array is a report of a
+#      scan that looked at nothing, indistinguishable from a clean tree unless "artifacts" is
+#      checked too.
+#      Weak while the gate exits 0 on it.
+# ---------------------------------------------------------------------------
+a_grype_report_that_scanned_nothing_is_refused() {
+  local work rc
+  work="$(mktemp -d)"
+  printf '{"matches":[],"source":{"type":"directory","target":"/nonexistent"},"artifacts":[]}' \
+    > "$work/grype-empty.json"
+  tools/check-vulnerability-report.py --format grype --report "$work/grype-empty.json" \
+    --fail-on high >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]   # an empty scan reported as clean: weak
+}
+
+# ---------------------------------------------------------------------------
+# S8 - a MEDIUM finding disappears: it does not fail the release (by decision) and nothing
+#      writes it down either, so the release notes cannot carry a decision for it.
+#      Weak while a MEDIUM finding leaves no line in the summary file.
+# ---------------------------------------------------------------------------
+probe_a_medium_finding_is_never_written_down() {
+  local work rc
+  work="$(mktemp -d)"
+  cat >"$work/grype.json" <<'REPORT'
+{"matches":[{"vulnerability":{"id":"CVE-synthetic-medium","severity":"Medium"},
+             "artifact":{"name":"vulnerable","version":"1.0","type":"java-archive"}}],
+ "artifacts":[{"name":"vulnerable","version":"1.0","type":"java-archive"}]}
+REPORT
+  tools/check-vulnerability-report.py --format grype --report "$work/grype.json" --fail-on high \
+    --summary-file "$work/below.txt" >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  if [ "$rc" -ne 0 ]; then rm -rf "$work"; return 0; fi   # a MEDIUM failed the release: also wrong
+  if [ -s "$work/below.txt" ]; then rm -rf "$work"; return 1; fi
+  rm -rf "$work"
+  return 0   # nothing written down: weak
+}
+
+# ---------------------------------------------------------------------------
+# S9 - the weekly deep scan fails the week because no NVD key exists, so the scheduled run
+#      is permanently red and the OSV findings beside it go unread; or it skips in silence,
+#      which is worse. Runs the real step body with no key and requires BOTH: it does not
+#      fail, and it says out loud that it skipped.
+#      Weak while it fails, or while it is silent.
+# ---------------------------------------------------------------------------
+probe_the_weekly_deep_scan_is_red_or_silent_without_a_key() {
+  local body work rc out
+  body="$(step_body .github/workflows/security-scan.yml 'Say whether this deep scan can run at all')"
+  [ -n "$body" ] || return 0
+  work="$(mktemp -d)"
+  : > "$work/out"; : > "$work/summary"
+  ( cd "$work" && NVD_API_KEY="" GITHUB_OUTPUT="$work/out" GITHUB_STEP_SUMMARY="$work/summary" \
+      bash -c "$body" ) >"$work/log" 2>&1
+  rc=$?
+  cat "$work/log" >>"$PROBE_CAPTURE" 2>/dev/null || true
+  out="$(cat "$work/log" "$work/summary" 2>/dev/null)"
+  if [ "$rc" -ne 0 ]; then rm -rf "$work"; return 0; fi                    # red for a known reason: weak
+  grep -q 'available=false' "$work/out" 2>/dev/null || { rm -rf "$work"; return 0; }
+  grep -qi 'skipped' <<<"$out" || { rm -rf "$work"; return 0; }            # silent skip: weak
+  rm -rf "$work"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# S10 - the pinned scanner binaries are fetched without being verified, so whatever the
+#       release page serves on the day is what decides whether a release is safe to publish.
+#       Runs the REAL installer against a local file:// URL (a copy of the script with the
+#       download location redirected - the production script has no such switch, on purpose)
+#       with the right checksum and then with a tampered payload.
+#       Weak while a tampered payload installs.
+# ---------------------------------------------------------------------------
+probe_scanner_downloads_are_installed_without_verification() {
+  local work script good_sha rc
+  command -v curl >>"$PROBE_CAPTURE" 2>&1 || { PROBE_SKIP_REASON="curl is not installed, so the installer cannot be exercised"; return 0; }
+  work="$(mktemp -d)"
+  printf 'not really a scanner\n' > "$work/payload"
+  if command -v sha256sum >/dev/null 2>&1; then good_sha="$(sha256sum "$work/payload" | cut -d" " -f1)"
+  else good_sha="$(shasum -a 256 "$work/payload" | cut -d" " -f1)"; fi
+  script="$work/install-scanner.sh"
+  # Redirect the download to the local payload and make the "does it run" check a no-op:
+  # this probe is about the checksum, not about whether a text file is a scanner.
+  sed -e "s#url=\"https://github.com/google/osv-scanner/releases/download/[^\"]*\"#url=\"file://$work/payload\"#" \
+      -e 's#"\$dest/osv-scanner" --version >/dev/null#true#' \
+      tools/install-scanner.sh > "$script"
+  chmod +x "$script"
+  # 1. the honest case: the recorded checksum matches the payload, so it installs.
+  sed -i.bak "s/^OSV_SHA256_linux_amd64=.*/OSV_SHA256_linux_amd64=\"$good_sha\"/;s/^OSV_SHA256_linux_arm64=.*/OSV_SHA256_linux_arm64=\"$good_sha\"/;s/^OSV_SHA256_darwin_arm64=.*/OSV_SHA256_darwin_arm64=\"$good_sha\"/" "$script"
+  if ! "$script" osv-scanner "$work/bin" >>"$PROBE_CAPTURE" 2>&1; then
+    echo "the installer refused a payload matching its own recorded checksum" >>"$PROBE_CAPTURE"
+    rm -rf "$work"; return 0
+  fi
+  # 2. the tampered case: same recorded checksum, different bytes on the wire.
+  printf 'tampered\n' > "$work/payload"
+  "$script" osv-scanner "$work/bin" >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]   # a tampered payload installed: weak
+}
 
 echo "the security review release-pipeline probes  (WEAK = finding still open)"
 echo
@@ -1396,6 +1679,19 @@ probe probe_licence_carve_out_can_outlive_its_dependency     "a dead licence car
 probe probe_release_dryrun_skips_the_tests                   "the dry run asserts on jars a release never makes"  probe_release_dryrun_skips_the_tests
 probe probe_sources_jar_contents_are_never_asserted          "nothing asserts what a sources jar contains"        probe_sources_jar_contents_are_never_asserted
 probe probe_sources_jar_allowlist_is_extension_only          "RP-3 the sources-jar check is extension-only"       probe_sources_jar_assertion_is_extension_only_not_path_based
+
+echo
+probe probe_artifacts_ship_no_xslt2_processor                "S1 a default install can validate nothing"          probe_published_artifacts_ship_no_xslt2_processor
+probe probe_mpl_carve_out_is_not_coordinate_scoped           "S2 a second MPL dependency passes the gate"         probe_mpl_carve_out_is_not_scoped_to_one_coordinate
+probe probe_mpl_carve_out_admits_any_licence_on_saxon        "S3 GPL on the carved-out coordinate passes"         probe_mpl_carve_out_admits_any_denied_licence_on_that_coordinate
+probe probe_licence_gate_self_test_is_not_run_by_ci          "S4 nothing in CI runs the licence gate self-test"    probe_licence_gate_self_test_is_not_run_by_ci
+probe probe_high_severity_passes_the_pull_request_gate       "S5 a HIGH advisory does not fail a pull request"    probe_a_high_severity_dependency_passes_the_pull_request_gate
+probe probe_release_signs_artifacts_it_never_scanned         "S6 nothing scans what the release signs"            probe_the_release_signs_artifacts_it_never_scanned
+probe probe_unreadable_scan_report_counts_as_clean           "S7 a scan that did not run reads as clean"          probe_an_unreadable_scan_report_counts_as_clean
+probe a_grype_report_that_scanned_nothing_is_refused         "D4-01 an empty Grype scan reads as clean"           a_grype_report_that_scanned_nothing_is_refused
+probe probe_medium_finding_is_never_written_down             "S8 a MEDIUM finding leaves no record"               probe_a_medium_finding_is_never_written_down
+probe probe_weekly_deep_scan_red_or_silent_without_a_key     "S9 the weekly run is red, or skips in silence"      probe_the_weekly_deep_scan_is_red_or_silent_without_a_key
+probe probe_scanner_downloads_are_unverified                 "S10 a tampered scanner binary installs"             probe_scanner_downloads_are_installed_without_verification
 
 echo
 echo "still weak: $pass    fixed: $flipped"

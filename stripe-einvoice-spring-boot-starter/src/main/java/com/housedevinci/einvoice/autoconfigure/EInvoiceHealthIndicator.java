@@ -29,12 +29,21 @@ import org.springframework.boot.health.contributor.HealthIndicator;
  */
 public class EInvoiceHealthIndicator implements HealthIndicator {
 
-  private final IssuanceSweeper sweeper;
+  private final Optional<IssuanceSweeper> sweeper;
   private final EInvoiceProperties properties;
   private final Clock clock;
 
+  /**
+   * @param sweeper empty on a numbering-only host, where the issuance pipeline is deliberately not
+   *     wired. The contributor still has to exist there: the starter declares a health group naming
+   *     it, and Boot refuses to start when a group names a contributor that does not exist - which
+   *     is precisely how this was found, by running the documented quick start from a clean clone.
+   *     Reporting "not configured" is honest in that case, because an application whose intake IS
+   *     configured and whose pipeline is not wired never reaches here: it is refused at startup by
+   *     IssuanceIntakeWiringCheck.
+   */
   public EInvoiceHealthIndicator(
-      IssuanceSweeper sweeper, EInvoiceProperties properties, Clock clock) {
+      Optional<IssuanceSweeper> sweeper, EInvoiceProperties properties, Clock clock) {
     this.sweeper = sweeper;
     this.properties = properties;
     this.clock = clock;
@@ -44,6 +53,17 @@ public class EInvoiceHealthIndicator implements HealthIndicator {
   public Health health() {
     Health.Builder health = Health.up();
     boolean down = false;
+
+    if (sweeper.isEmpty()) {
+      return health
+          .withDetail("issuance", "not configured")
+          .withDetail(
+              "detail",
+              "this application runs the numbering API only; no Stripe intake, sweeper or archive"
+                  + " is wired. An application that meant to issue is refused at startup instead.")
+          .build();
+    }
+    IssuanceSweeper sweeper = this.sweeper.get();
 
     Optional<Instant> lastSweep = sweeper.lastSweepAt();
     health.withDetail("lastSweep", lastSweep.map(Instant::toString).orElse("never"));

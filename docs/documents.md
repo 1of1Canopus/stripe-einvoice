@@ -75,24 +75,27 @@ One informational finding is expected today and is not silenced:
 
 ### The XSLT processor
 
-The schematron is XSLT 2.0 and the JDK ships an XSLT 1.0 processor. This module asks for a
-processor **by class name** (`einvoice.documents.xslt-processor`, default
-`net.sf.saxon.TransformerFactoryImpl`) instead of depending on one: the only practical XSLT 2.0
-processor for the JVM is MPL-2.0, and this project's licence gate denies MPL for anything it ships.
+The schematron is XSLT 2.0 and the JDK ships an XSLT 1.0 processor, so the core module carries
+`net.sf.saxon:Saxon-HE` as a **runtime** dependency. Nothing to add: a default install validates.
 
-Add one to your application:
+The processor is still resolved **by class name** (`einvoice.documents.xslt-processor`, default
+`net.sf.saxon.TransformerFactoryImpl`) through JAXP, and no class here imports a Saxon type. Two
+reasons that seam stays:
 
-```xml
-<dependency>
-  <groupId>net.sf.saxon</groupId>
-  <artifactId>Saxon-HE</artifactId>
-  <version>13.0</version>
-</dependency>
-```
+1. it is what `DocumentValidator.canValidate()` asks - "is a processor of that name loadable, and
+   can it be configured securely" - which is how an application that could never validate is
+   refused **before** a legal number is allocated rather than once per invoice after one is spent;
+2. it is how a host substitutes its own XSLT 2.0 processor: exclude the dependency, add another,
+   set the property.
 
-Without one, every validation reports `NOT_EVALUATED`, the issuance unit of work treats that as a
-refusal, and **the application issues nothing**. The starter says so with a WARN at every startup,
-naming the class it looked for. An unevaluated rule is not a passed rule.
+Exclude it and put nothing in its place and every validation reports `NOT_EVALUATED`, the issuance
+unit of work treats that as a refusal, and **the application issues nothing** - an application whose
+intake is configured refuses to start instead. An unevaluated rule is not a passed rule.
+
+Saxon-HE is MPL-2.0, the only dependency of this project under that licence, admitted by the
+licence gate for that coordinate alone (see `tools/check-third-party-licences.sh`). It brings
+`org.xmlresolver:xmlresolver` (Apache-2.0) with it; the resolvers this module installs still throw
+on every resolution attempt, so neither one can reach the file system or the network.
 
 ### How the stylesheets are run
 
@@ -266,11 +269,10 @@ rounding at the writer changes what the seller charged.
 
 ## 6. Per-country notes
 
-| Country | What applies, and from when | Source |
-|---|---|---|
-| **France** | Reception of structured invoices from 1 September 2026; issuance for small firms from 1 September 2027. Invoices flow through partner platforms (PDP). | Article 289 bis CGI; DGFiP "Facturation électronique" programme pages |
-| **Germany** | Reception mandatory since 1 January 2025; issuance phased 2027-2028. B2G has required XRechnung since 2020, with a **Leitweg-ID** (BT-10) the authority issues. | Wachstumschancengesetz; E-Rechnungsverordnung; `https://xeinkauf.de/xrechnung/versionen-und-bundles/` |
-| **Belgium** | Structured B2B e-invoicing since 1 January 2026, over Peppol. | Law of 6 February 2024 |
+**The dates live in one place, [`mandates.md`](mandates.md)**, where every one of them carries a
+source URL and the date this project last retrieved it, and where a date that could not be confirmed
+against an official source says "not confirmed" instead of guessing. They were repeated here, once,
+with neither URLs nor retrieval dates, which is how a table goes quietly stale.
 
 Two practical consequences this module enforces rather than documents:
 
@@ -281,9 +283,8 @@ Two practical consequences this module enforces rather than documents:
   more; the module derives one from the party's VAT identifier where it knows the country's scheme,
   and refuses rather than inventing one where it does not.
 
-Deadlines move. These rows are dated and sourced so the reader can check them rather than trust
-them, and they are not legal advice: your accountant checks the first invoices a new configuration
-issues.
+Deadlines move, which is why they are sourced and dated in `mandates.md` rather than asserted here.
+None of it is legal advice: your accountant checks the first invoices a new configuration issues.
 
 ---
 

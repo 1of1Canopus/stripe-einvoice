@@ -2,6 +2,7 @@ package com.housedevinci.einvoice.autoconfigure;
 
 import com.housedevinci.einvoice.application.DocumentRenderer;
 import com.housedevinci.einvoice.application.DocumentValidator;
+import com.housedevinci.einvoice.application.StripeInvoiceSource;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import org.slf4j.Logger;
@@ -56,7 +57,14 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
   public void afterPropertiesSet() {
     boolean hasRenderer = beanFactory.getBeanNamesForType(DocumentRenderer.class).length > 0;
     boolean hasValidator = beanFactory.getBeanNamesForType(DocumentValidator.class).length > 0;
-    if (hasRenderer && hasValidator) {
+    // The authoritative reader is the third bean the pipeline cannot run without, and it was not
+    // asked about here until a fresh clone of the sample proved why it has to be: with a webhook
+    // secret configured and no einvoice.stripe.api-key, the renderer and the validator both exist,
+    // this check passed, and the application started with an endpoint that recorded events nothing
+    // would ever fetch, number or archive. That is the same defect D2-02 closed for the other two
+    // beans, closed here the same way and with the same remedy.
+    boolean hasSource = beanFactory.getBeanNamesForType(StripeInvoiceSource.class).length > 0;
+    if (hasRenderer && hasValidator && hasSource) {
       // D3-02: wired is not the same question as able to validate anything, ever. A validator
       // whose canValidate() says no (an XSLT 2.0 processor missing from the classpath, in this
       // module's own implementation) is the same class of problem as a missing bean: known before
@@ -78,20 +86,33 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
       }
       return;
     }
-    String missing = missingBeans(hasRenderer, hasValidator);
+    String missing = missingBeans(hasRenderer, hasValidator, hasSource);
     if (intakeIsConfigured()) {
       throw new EInvoiceException(
           ErrorCodes.CONFIG,
           "einvoice.stripe.webhook-secrets is configured, or einvoice.issuance.enabled is"
               + " explicitly true, so this application is set up to receive Stripe events - but no "
               + missing
-              + " bean is in the context. The starter builds both from einvoice.seller.* and"
-              + " einvoice.documents.*, so the usual cause is that einvoice.seller.name is not"
-              + " set. Allocating a legal number with no way to produce a"
+              + " bean is in the context. The starter builds a DocumentRenderer and a"
+              + " DocumentValidator from einvoice.seller.* and einvoice.documents.*, so the usual"
+              + " cause there is that einvoice.seller.name is not set; it builds a"
+              + " StripeInvoiceSource when com.stripe:stripe-java is on the classpath (it is an"
+              + " optional dependency of this starter, so the application declares it) AND"
+              + " einvoice.stripe.api-key is set. Allocating a legal number with no way to produce a"
               + " validated document would consume the series and archive nothing, so the issuance"
               + " pipeline refuses to start rather than start silently with no endpoint, no sweeper"
               + " and no signal. Supply the missing bean(s), or set"
               + " einvoice.issuance.enabled=false to run the numbering API only.");
+    }
+    if (environment.containsProperty("einvoice.issuance.enabled")
+        && !properties.getIssuance().isEnabled()) {
+      // The operator already said it: einvoice.issuance.enabled=false. Telling them to do what
+      // they have done is how a startup log becomes noise nobody reads.
+      log.info(
+          "einvoice: numbering API only, as configured (einvoice.issuance.enabled=false). No Stripe"
+              + " intake, sweeper or archive is wired ({} absent).",
+          missing);
+      return;
     }
     log.warn(
         "einvoice: the issuance path is not wired ({} missing), and intake is not configured - no"
@@ -102,7 +123,7 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
         missing);
   }
 
-  private static String missingBeans(boolean hasRenderer, boolean hasValidator) {
+  private static String missingBeans(boolean hasRenderer, boolean hasValidator, boolean hasSource) {
     StringBuilder missing = new StringBuilder();
     if (!hasRenderer) {
       missing.append("DocumentRenderer");
@@ -112,6 +133,12 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
         missing.append(" and ");
       }
       missing.append("DocumentValidator");
+    }
+    if (!hasSource) {
+      if (!missing.isEmpty()) {
+        missing.append(" and ");
+      }
+      missing.append("StripeInvoiceSource");
     }
     return missing.toString();
   }

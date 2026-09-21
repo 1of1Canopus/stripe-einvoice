@@ -51,9 +51,9 @@ einvoice:
     # BT-10. Mandatory for XRechnung (BR-DE-15); for a German public-sector buyer it is the
     # Leitweg-ID the authority issued. It never comes from Stripe metadata or a buyer field.
     buyer-reference: BON-DE-COMMANDE-9912
-    # The EN 16931 schematron is XSLT 2.0 and the JDK ships XSLT 1.0 only. Add an XSLT 2.0
-    # processor to this application; without one nothing is issued, because an unevaluated rule
-    # is not a passed rule. See README, "the XSLT processor".
+    # The EN 16931 schematron is XSLT 2.0 and the JDK ships XSLT 1.0 only. The processor ships with
+    # the module (a runtime dependency of the core), and this property is how another one is
+    # substituted. Without any, nothing is issued: an unevaluated rule is not a passed rule.
     xslt-processor: net.sf.saxon.TransformerFactoryImpl
   numbering:
     series: DEFAULT
@@ -68,8 +68,10 @@ einvoice:
     # Stripe, the other proves our own record was not rewritten afterwards.
     webhook-secrets:
       primary: ${EINVOICE_WEBHOOK_SECRET}
-    # A restricted, read-scoped key. This module never writes to Stripe. Leave it unset and the
-    # sample runs without an authoritative source, which means it issues nothing.
+    # A restricted, read-scoped key. This module never writes to Stripe. It is required whenever a
+    # webhook secret is set: an application configured to receive events with no way to read the
+    # invoice back records events it can never turn into documents, so the starter refuses to start
+    # and names this property. Run the numbering API only with einvoice.issuance.enabled=false.
     api-key: ${EINVOICE_STRIPE_KEY:}
   archive:
     # The legal originals. A directory here, an S3-compatible bucket in production.

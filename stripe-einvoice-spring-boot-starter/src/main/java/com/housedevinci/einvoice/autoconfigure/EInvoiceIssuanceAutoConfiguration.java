@@ -24,6 +24,7 @@ import java.time.ZoneId;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -32,6 +33,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.core.env.Environment;
 
 /**
@@ -258,14 +260,24 @@ public class EInvoiceIssuanceAutoConfiguration {
         clock);
   }
 
-  /** The operational health contributor, in its own group and outside readiness and liveness. */
+  /**
+   * The operational health contributor, in its own group and outside readiness and liveness.
+   *
+   * <p>Deliberately NOT conditional on the sweeper. The starter contributes a health group naming
+   * this contributor, and Boot refuses to start when a group names a contributor that does not
+   * exist - so on a numbering-only host, which has no sweeper, the group made the HOST's
+   * application fail to start over a bean name the host never chose. Found by running the
+   * documented quick start from a clean clone. The contributor reports "not configured" there; an
+   * application that meant to issue never gets that far, because {@link IssuanceIntakeWiringCheck}
+   * refuses at startup.
+   */
   @Bean(name = "einvoiceIssuance")
   @ConditionalOnMissingBean(name = "einvoiceIssuance")
   @ConditionalOnClass(name = "org.springframework.boot.health.contributor.HealthIndicator")
-  @ConditionalOnBean(IssuanceSweeper.class)
   public EInvoiceHealthIndicator einvoiceHealthIndicator(
-      IssuanceSweeper sweeper, EInvoiceProperties properties, Clock clock) {
-    return new EInvoiceHealthIndicator(sweeper, properties, clock);
+      ObjectProvider<IssuanceSweeper> sweeper, EInvoiceProperties properties, Clock clock) {
+    return new EInvoiceHealthIndicator(
+        Optional.ofNullable(sweeper.getIfAvailable()), properties, clock);
   }
 
   @Bean
@@ -277,11 +289,18 @@ public class EInvoiceIssuanceAutoConfiguration {
         findings, properties.getSeller().getId(), Mode.of(properties.getMode()));
   }
 
-  /** The Stripe SDK client, when the SDK is on the classpath and an API key is configured. */
+  /**
+   * The Stripe SDK client, when the SDK is on the classpath and an API key is configured.
+   *
+   * <p>{@link StripeApiKeyCondition} rather than {@code @ConditionalOnProperty}: a YAML file that
+   * offers an environment variable with a fallback ({@code api-key: ${EINVOICE_STRIPE_KEY:}}) makes
+   * the property present and blank, and "present" was enough to run this factory and throw at
+   * startup in a host that only wanted the numbering API.
+   */
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnClass(name = "com.stripe.StripeClient")
-  @ConditionalOnProperty(prefix = "einvoice.stripe", name = "api-key")
+  @Conditional(StripeApiKeyCondition.class)
   public StripeInvoiceSource einvoiceStripeInvoiceSource(EInvoiceProperties properties) {
     return StripeClientFactory.create(properties);
   }

@@ -116,6 +116,22 @@ jobs:
           fi
           echo "preflight: main requires all four checks"
 
+      # The release's own vulnerability gate runs inside the key-holding job, which is too
+      # late to discover that the scanner cannot be fetched or does not run on this runner:
+      # by then the signing key is already in the environment, and the honest outcome of a
+      # scanner that cannot run is "no release", not "release unscanned". Prove both
+      # scanners install, verify against their pinned checksums and execute HERE, in the job
+      # that holds no secret, and prove the severity gate itself is sound while we are at it.
+      - name: Both vulnerability scanners must be runnable, and the severity gate sound
+        run: |
+          set -euo pipefail
+          tools/check-vulnerability-report.py --self-test
+          tools/install-scanner.sh osv-scanner "${RUNNER_TEMP}/preflight-bin"
+          tools/install-scanner.sh grype "${RUNNER_TEMP}/preflight-bin"
+          "${RUNNER_TEMP}/preflight-bin/osv-scanner" --version
+          "${RUNNER_TEMP}/preflight-bin/grype" version
+          echo "preflight: both scanners are present, checksum-verified and runnable"
+
   publish:
     name: Verify, sign, upload to the Central Portal
     runs-on: ubuntu-latest
@@ -414,6 +430,77 @@ jobs:
             fail "a Portal deployment for ${VERSION} already exists in a live state: drop it first, or release a new version"
           fi
           echo "replay check: no live Portal deployment names ${VERSION} across $((page + 1)) page(s)"
+
+      # The release half of the keyless CVE gate. It runs HERE - after the reproducibility
+      # check, which leaves the built jars in each module's target/, and BEFORE the step that
+      # signs and uploads anything. A scan after the signature would be a report about bytes
+      # that are already on their way to the Central Portal.
+      #
+      # What is scanned: the jars this release is about to sign, plus every jar of the
+      # RESOLVED RUNTIME dependency set, which is where a library's vulnerabilities actually
+      # live (these are thin jars, not shaded ones - scanning only our own two would scan
+      # almost nothing). The bundle itself cannot be the input: central-publishing assembles
+      # central-bundle.zip during `deploy`, i.e. after signing, so scanning it would be too
+      # late by construction. Same source tree, same resolved versions, one build earlier.
+      #
+      # Threshold and failure semantics are the pull-request job's, to the letter: the same
+      # tools/check-vulnerability-report.py, --fail-on high, exit 2 on an unreadable report.
+      # MEDIUM and below do not fail the release; they are written to the step output and to
+      # the job summary, and the release notes carry a decision for each (that is the
+      # maintainer's documented duty in the release runbook, not something a script decides).
+      - name: Install the pinned Grype and verify its checksum
+        run: tools/install-scanner.sh grype "${RUNNER_TEMP}/bin"
+
+      - name: Scan the artifacts this release is about to sign
+        id: vulnscan
+        env:
+          MAVEN_OPTS: -Dmaven.repo.local=${{ runner.temp }}/m2repo -Dorg.slf4j.simpleLogger.defaultLogLevel=info
+        run: |
+          set -euo pipefail
+          scan="${RUNNER_TEMP}/release-scan"
+          rm -rf "$scan"; mkdir -p "$scan"
+          # The two published jars, exactly as the reproducibility check just built them.
+          for module in stripe-einvoice-core stripe-einvoice-spring-boot-starter; do
+            for jar in "$module"/target/*.jar; do
+              [ -f "$jar" ] || { echo "::error::no jar in $module/target to scan"; exit 1; }
+              cp "$jar" "$scan/"
+            done
+          done
+          # Every jar a host actually gets at runtime, for the two PUBLISHED modules only. The
+          # sample is never published, and a release held back by an advisory in a dependency of
+          # a reference application nobody deploys is the noise that gets a gate switched off.
+          # The sample is not unscanned: the per-pull-request check covers the whole tree.
+          ./mvnw -B -q dependency:copy-dependencies \
+            -pl stripe-einvoice-core,stripe-einvoice-spring-boot-starter \
+            -Dmaven.repo.local="${{ runner.temp }}/m2repo" \
+            -DincludeScope=runtime -DoutputDirectory="$scan"
+          count="$(find "$scan" -name '*.jar' | wc -l | tr -d ' ')"
+          echo "scanning $count jar(s)"
+          [ "$count" -gt 0 ] || { echo "::error::nothing to scan; refusing to call that clean"; exit 1; }
+          set +e
+          "${RUNNER_TEMP}/bin/grype" "dir:$scan" -o json --file "${RUNNER_TEMP}/grype.json"
+          rc=$?
+          set -e
+          # grype exits 0 when it completed; with no --fail-on it does not use the exit code
+          # to report findings, so anything non-zero here is a scanner failure.
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::grype exited $rc: the scan did not complete, so this release cannot claim its artifacts were scanned"
+            exit 1
+          fi
+          tools/check-vulnerability-report.py \
+            --format grype --report "${RUNNER_TEMP}/grype.json" --fail-on high \
+            --summary-file "${RUNNER_TEMP}/vulnerabilities-below-threshold.txt"
+          {
+            echo "### Vulnerabilities below the release threshold"
+            echo
+            if [ -s "${RUNNER_TEMP}/vulnerabilities-below-threshold.txt" ]; then
+              cat "${RUNNER_TEMP}/vulnerabilities-below-threshold.txt"
+              echo
+              echo "Each line needs a decision in the release notes before Publish is pressed."
+            else
+              echo "None."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # One Maven invocation runs the whole release lifecycle in order:
       #   test -> spotless -> jacoco gate -> licence allowlist + THIRD-PARTY-NOTICES.txt

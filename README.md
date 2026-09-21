@@ -2,10 +2,14 @@
 
 **Legal EN 16931 e-invoices from Stripe Billing, for Spring Boot applications.**
 
-France (small firms issuing from 1 September 2027, reception since 1 September 2026), Germany
-(2027-28) and Belgium (since January 2026) require invoices as structured data. Stripe Invoicing
-does not produce it, and Stripe's own documentation tells you to install a marketplace app or write
-the mapping yourself. Java shops on Stripe have had nothing.
+Germany (issuing from 1 January 2027 above an EUR 800 000 turnover, 2028 below it), Belgium (since
+1 January 2026) and France (timetable in `docs/mandates.md`) require invoices as structured data.
+Stripe Invoicing does not produce it, and Stripe's own documentation tells you to install a
+marketplace app or write the mapping yourself. Java shops on Stripe have had nothing.
+
+Every date in that sentence is sourced and dated in [`docs/mandates.md`](docs/mandates.md); one that
+could not be confirmed against an official source is marked "not confirmed" there rather than
+repeated here.
 
 > **Status: under construction.** This repository is pre-release and nothing is published yet.
 > Three pieces are in place: the legal numbering series, the issuance unit of work that drives one
@@ -45,25 +49,23 @@ What the writer guarantees:
 
 ### The XSLT processor
 
-The EN 16931, XRechnung and Peppol schematron are **XSLT 2.0**, and the JDK ships an XSLT 1.0
-processor only. This module therefore needs one, and asks for it **by class name** rather than
-depending on it: the only practical XSLT 2.0 processor for the JVM is MPL-2.0, and this project's
-licence gate denies MPL for anything it ships.
+The EN 16931, XRechnung and Peppol schematron are **XSLT 2.0** and the JDK ships an XSLT 1.0
+processor only, so this module ships one: `net.sf.saxon:Saxon-HE`, a runtime dependency of the
+core module. **You add nothing; validation works on a default install.**
 
-Add one to your application:
+Saxon-HE is MPL-2.0 - file-level copyleft over Saxon's own files, which are used unmodified and
+are not redistributed here. It is the only dependency of this project under that licence, and the
+licence gate admits it by coordinate, not by licence: a second MPL dependency fails the build.
 
-```xml
-<dependency>
-  <groupId>net.sf.saxon</groupId>
-  <artifactId>Saxon-HE</artifactId>
-  <version>13.0</version>
-</dependency>
-```
+The processor is still reached **by class name** through JAXP (`einvoice.documents.xslt-processor`,
+default `net.sf.saxon.TransformerFactoryImpl`) and no source file imports a Saxon type, so you can
+substitute another XSLT 2.0 processor by setting that property and excluding the dependency.
 
-**Without a processor this module issues nothing.** Every validation reports `NOT_EVALUATED`, which
-the issuance unit of work treats as a refusal, and the starter says so at every startup with a WARN
-naming the class it looked for. An unevaluated rule is not a passed rule, and archiving a document
-no rule ever read would be worse than issuing none.
+If you do exclude it and put nothing in its place, **this module issues nothing**: every validation
+reports `NOT_EVALUATED`, which the issuance unit of work treats as a refusal before a legal number
+is allocated, and an application configured to receive Stripe events refuses to start rather than
+spend a number per invoice on a document nothing will read. An unevaluated rule is not a passed
+rule, and archiving a document no rule ever read would be worse than issuing none.
 
 ## What the numbering series does
 
@@ -234,20 +236,41 @@ authorization.
 | Stripe moved its API version | The refused events are on `einvoice_inbound_event` with their bodies. Update the pin to match, restart, and the sweeper's due query re-picks exactly the rows whose recorded version now equals it, and replays them through the same path |
 | A document failed validation | The number stays allocated with the failing rule id recorded beside the event. An operator voids it through `IssuanceVoidService` with a reason, and the series report explains the hole |
 
-Run the sample:
+### Run the sample
+
+**The whole thing end to end, with no Stripe account and no keys.** A signed test-mode event becomes
+a validator-clean **Peppol BIS Billing 3.0 UBL** invoice in the archive, with a validator-clean
+**XRechnung** rendered for the same invoice beside it. Docker is the only prerequisite
+(Testcontainers starts PostgreSQL):
 
 ```bash
+git clone https://github.com/1of1Canopus/stripe-einvoice && cd stripe-einvoice
+./mvnw -pl stripe-einvoice-sample -am test
+```
+
+Measured from a clean clone with an empty Maven cache on 2026-09-16: about two minutes, including
+the downloads. One profile per application means one legal original per invoice; the XRechnung
+beside it is a call on the renderer, not a second archived document under the same number.
+
+**The application itself**, against your own PostgreSQL:
+
+```bash
+./mvnw -q -DskipTests install          # the sample resolves its siblings from the local repository
 cd stripe-einvoice-sample
 docker compose up -d
 EINVOICE_CHAIN_SECRET=$(head -c 32 /dev/urandom | base64) \
 EINVOICE_WEBHOOK_SECRET=whsec_from_your_stripe_dashboard \
+EINVOICE_STRIPE_KEY=rk_test_your_restricted_read_scoped_key \
 ../mvnw spring-boot:run
 ```
 
-The sample receives a signed Stripe test-mode event and writes a **validator-clean Peppol BIS
-Billing 3.0 UBL invoice** to its archive, then renders and validates an XRechnung for the same
-invoice beside it. One profile per application means one legal original per invoice; the second is
-a call on the renderer, not a second archived document under the same number.
+All three values are required together, and that is the point: an application configured to receive
+Stripe events with no key to read them back would record events it could never turn into documents,
+so it refuses to start and names the missing piece. To run the **numbering API only**, say so:
+
+```bash
+../mvnw spring-boot:run -Dspring-boot.run.arguments=--einvoice.issuance.enabled=false
+```
 
 ## Requirements
 
@@ -263,8 +286,10 @@ a call on the renderer, not a second archived document under the same number.
 
 - `docs/index.md` - how the series works, every property, the series report, and the one thing to
   tell an auditor about a late invoice from a closing year.
-- `docs/documents.md` - the BT-to-Stripe mapping table field by field, the per-country notes with
-  their sources, the validator artefacts and their versions, and what is deliberately refused.
+- `docs/documents.md` - the BT-to-Stripe mapping table field by field, the validator artefacts and
+  their versions, and what is deliberately refused.
+- `docs/mandates.md` - which country requires a structured invoice from when, each date with its
+  source URL and retrieval date, and "not confirmed" where there is none.
 - `SECURITY-NOTES.md` - what is protected, by what, and what is not.
 - `docs/schema-grants.sql` - the database role this module should run as.
 - `CHANGELOG.md`
