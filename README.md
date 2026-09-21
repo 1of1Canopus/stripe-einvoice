@@ -1,9 +1,11 @@
 # stripe-einvoice
 
-**Legal EN 16931 e-invoices from Stripe Billing, for Spring Boot applications.**
+**EN 16931 e-invoices from Stripe Billing, for Spring Boot applications.**
 
 Germany (issuing from 1 January 2027 above an EUR 800 000 turnover, 2028 below it), Belgium (since
-1 January 2026) and France (timetable in `docs/mandates.md`) require invoices as structured data.
+1 January 2026) and France (reception by all businesses and issuing by large firms and ETI since
+1 September 2026, PME and micro-entreprises from 1 September 2027; see `docs/mandates.md`) require
+invoices as structured data.
 Stripe Invoicing does not produce it, and Stripe's own documentation tells you to install a
 marketplace app or write the mapping yourself. Java shops on Stripe have had nothing.
 
@@ -35,7 +37,7 @@ Nothing is downloaded at build time or at run time, every checksum is recomputed
 and the checksum of a stylesheet is recomputed again before it is compiled at run time. A
 stylesheet is executable code, and these are run over documents that go to a tax authority.
 
-What the writer guarantees:
+What the writer holds to:
 
 | Property | How |
 |---|---|
@@ -80,7 +82,7 @@ allocated leaves the number recorded and voided rather than quietly re-used unde
 An unexplained hole and a hole with a chained reason must never look alike to an auditor, and the
 series report is written for that reader.
 
-What it guarantees today:
+What the series holds to today:
 
 | Property | How |
 |---|---|
@@ -232,7 +234,7 @@ authorization.
 | Question | Where the answer is |
 |---|---|
 | Is anything wrong right now? | `GET /actuator/health/einvoice` - operational conditions only: a silent sweeper, a stale reconciliation, a chain that does not verify. It is deliberately outside `readiness` and `liveness`, so a business condition can never take your application out of the load balancer |
-| What needs a human? | `GET /actuator/einvoicefindings` - open compliance findings with their codes and subjects. Acknowledge one through `IssuanceFindingService`, with a reason that is recorded; the finding is never deleted |
+| What needs a human? | `GET /actuator/einvoicefindings` - open issuance findings with their codes and subjects. Acknowledge one through `IssuanceFindingService`, with a reason that is recorded; the finding is never deleted |
 | Stripe moved its API version | The refused events are on `einvoice_inbound_event` with their bodies. Update the pin to match, restart, and the sweeper's due query re-picks exactly the rows whose recorded version now equals it, and replays them through the same path |
 | A document failed validation | The number stays allocated with the failing rule id recorded beside the event. An operator voids it through `IssuanceVoidService` with a reason, and the series report explains the hole |
 
