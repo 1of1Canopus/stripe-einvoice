@@ -1,6 +1,7 @@
 package com.housedevinci.einvoice.adapter.en16931;
 
 import com.housedevinci.einvoice.application.DocumentInput;
+import com.housedevinci.einvoice.application.MappingInput;
 import com.housedevinci.einvoice.application.SourceInvoice;
 import com.housedevinci.einvoice.domain.LegalNumber;
 import com.housedevinci.einvoice.domain.Mode;
@@ -298,10 +299,14 @@ public final class DocumentFixtures {
   }
 
   private static DocumentInput input(SourceInvoice invoice) {
-    return new DocumentInput(
+    return new DocumentInput(mapping(invoice), NUMBER);
+  }
+
+  /** The stage of the input the preflight is handed: everything except the legal number. */
+  public static MappingInput mapping(SourceInvoice invoice) {
+    return new MappingInput(
         invoice,
         SERIES,
-        NUMBER,
         ISSUE_DATE,
         TaxTreatmentRules.PACK_ID + ":" + TaxTreatmentRules.PACK_VERSION);
   }

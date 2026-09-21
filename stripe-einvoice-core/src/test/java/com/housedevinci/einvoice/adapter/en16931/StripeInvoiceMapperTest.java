@@ -27,7 +27,9 @@ import org.junit.jupiter.api.Test;
 class StripeInvoiceMapperTest {
 
   private static EnInvoice map(DocumentInput input, UblProfile profile) {
-    return new StripeInvoiceMapper(DocumentFixtures.germanSeller(), profile, null).map(input);
+    return new StripeInvoiceMapper(DocumentFixtures.germanSeller(), profile, null)
+        .map(input.unnumbered())
+        .numbered(input.legalNumber());
   }
 
   @Test
@@ -348,7 +350,9 @@ class StripeInvoiceMapperTest {
 
   private static DocumentInput reinput(DocumentInput base, SourceInvoice invoice) {
     return new DocumentInput(
-        invoice, base.seriesKey(), base.legalNumber(), base.issueDate(), base.rulePackVersion());
+        new com.housedevinci.einvoice.application.MappingInput(
+            invoice, base.seriesKey(), base.issueDate(), base.rulePackVersion()),
+        base.legalNumber());
   }
 
   /** A percentage is bounded before it multiplies anything (checklist lines 1, 2 and 4). */

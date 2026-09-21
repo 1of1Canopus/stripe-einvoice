@@ -1,7 +1,7 @@
 package com.housedevinci.einvoice.adapter.en16931;
 
 import com.housedevinci.einvoice.adapter.xml.UblProfile;
-import com.housedevinci.einvoice.application.DocumentInput;
+import com.housedevinci.einvoice.application.MappingInput;
 import com.housedevinci.einvoice.application.SourceInvoice;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
@@ -11,7 +11,7 @@ import com.housedevinci.einvoice.domain.en16931.BusinessTerms;
 import com.housedevinci.einvoice.domain.en16931.Contact;
 import com.housedevinci.einvoice.domain.en16931.DocumentLine;
 import com.housedevinci.einvoice.domain.en16931.DocumentTypeCode;
-import com.housedevinci.einvoice.domain.en16931.EnInvoice;
+import com.housedevinci.einvoice.domain.en16931.UnnumberedInvoice;
 import com.housedevinci.einvoice.domain.en16931.Money;
 import com.housedevinci.einvoice.domain.en16931.Party;
 import com.housedevinci.einvoice.domain.en16931.PartyIdentifier;
@@ -67,10 +67,17 @@ public final class StripeInvoiceMapper {
   }
 
   /**
-   * @param input the legal number, the issue date and the authoritative invoice
-   * @return the semantic model, balanced by its own constructor
+   * Every screen, every required field and every balance invariant - and not one thing that needs
+   * the legal number.
+   *
+   * <p>This is the body the preflight runs and the body the render runs. The render calls {@link
+   * UnnumberedInvoice#numbered} on the result; the preflight discards it. "The preflight checks
+   * less than the render does" is therefore not expressible here.
+   *
+   * @param input the issue date, the series and the authoritative invoice
+   * @return the semantic model minus BT-1, balanced by its own constructor
    */
-  public EnInvoice map(DocumentInput input) {
+  public UnnumberedInvoice map(MappingInput input) {
     SourceInvoice source = input.invoice();
     String currency = source.currency();
     Party buyer = buyer(source);
@@ -120,8 +127,7 @@ public final class StripeInvoiceMapper {
     Money taxTotal = Money.ofMinor(source.taxMinor(), currency);
     Money inclusive = Money.ofMinor(source.totalMinor(), currency);
 
-    return new EnInvoice(
-        input.legalNumber().value(),
+    return new UnnumberedInvoice(
         input.issueDate(),
         null,
         DocumentTypeCode.COMMERCIAL_INVOICE,

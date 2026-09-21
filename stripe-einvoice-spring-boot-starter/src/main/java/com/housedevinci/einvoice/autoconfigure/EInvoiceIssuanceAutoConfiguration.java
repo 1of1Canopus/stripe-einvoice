@@ -9,6 +9,7 @@ import com.housedevinci.einvoice.application.ArchiveStore;
 import com.housedevinci.einvoice.application.DocumentRenderer;
 import com.housedevinci.einvoice.application.DocumentValidator;
 import com.housedevinci.einvoice.application.FindingStore;
+import com.housedevinci.einvoice.application.PreflightSupport;
 import com.housedevinci.einvoice.application.InboundEventStore;
 import com.housedevinci.einvoice.application.IssuanceChainVerifier;
 import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
@@ -123,6 +124,25 @@ public class EInvoiceIssuanceAutoConfiguration {
 
   @Bean
   @ConditionalOnMissingBean
+  public PreflightSupport einvoicePreflightSupport(FindingStore findings, Clock clock) {
+    return new PreflightSupport(findings, clock);
+  }
+
+  /**
+   * P-01 and checklist line 65. A renderer that does not override {@code preflight} is a standing
+   * fact about the application, so it is found at startup rather than on the first invoice, and it
+   * is recorded where an operator looks rather than only in a boot log.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  @ConditionalOnBean(DocumentRenderer.class)
+  public PreflightSupportCheck einvoicePreflightSupportCheck(
+      DocumentRenderer renderer, PreflightSupport support, EInvoiceProperties properties) {
+    return new PreflightSupportCheck(renderer, support, properties);
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
   @ConditionalOnBean({DocumentRenderer.class, DocumentValidator.class, StripeInvoiceSource.class})
   public IssuanceUnitOfWork einvoiceIssuanceUnitOfWork(
       InboundEventStore inbound,
@@ -131,6 +151,7 @@ public class EInvoiceIssuanceAutoConfiguration {
       DocumentRenderer renderer,
       DocumentValidator validator,
       ArchiveStore archive,
+      PreflightSupport preflightSupport,
       Clock clock,
       EInvoiceProperties properties) {
     return new IssuanceUnitOfWork(
@@ -142,6 +163,7 @@ public class EInvoiceIssuanceAutoConfiguration {
         renderer,
         validator,
         archive,
+        preflightSupport,
         clock,
         configuration(properties, source));
   }

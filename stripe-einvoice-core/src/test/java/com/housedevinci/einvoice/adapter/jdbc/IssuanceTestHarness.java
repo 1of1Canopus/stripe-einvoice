@@ -103,6 +103,7 @@ public final class IssuanceTestHarness {
         renderer,
         validator,
         archive,
+        preflightSupport,
         clock,
         configurationFor("DEFAULT", apiVersion));
   }
@@ -122,6 +123,7 @@ public final class IssuanceTestHarness {
         renderer,
         validator,
         archive,
+        preflightSupport,
         clock,
         configurationFor("DEFAULT", pinnedApiVersion));
   }
@@ -140,6 +142,7 @@ public final class IssuanceTestHarness {
         renderer,
         validator,
         archive,
+        preflightSupport,
         clock,
         configurationFor(series, pinnedApiVersion));
   }
@@ -159,6 +162,7 @@ public final class IssuanceTestHarness {
         substituteRenderer,
         validator,
         archive,
+        preflightSupport,
         clock,
         configurationFor("DEFAULT", pinnedApiVersion));
   }
@@ -178,6 +182,7 @@ public final class IssuanceTestHarness {
         renderer,
         validator,
         substituteArchive,
+        preflightSupport,
         clock,
         configurationFor("DEFAULT", pinnedApiVersion));
   }
@@ -227,6 +232,14 @@ public final class IssuanceTestHarness {
 
   private final JdbcFindingStore findings =
       new JdbcFindingStore(JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()));
+
+  private final com.housedevinci.einvoice.application.PreflightSupport preflightSupport =
+      new com.housedevinci.einvoice.application.PreflightSupport(findings, clock);
+
+  /** The preflight-support recorder this harness's units of work share. */
+  public com.housedevinci.einvoice.application.PreflightSupport preflightSupport() {
+    return preflightSupport;
+  }
 
   public JdbcFindingStore findings() {
     return findings;
@@ -335,11 +348,12 @@ public final class IssuanceTestHarness {
     return renderer
         .render(
             new DocumentInput(
-                source.fetchInvoice(invoiceId),
-                seriesKey(),
-                legalNumber(number),
-                LocalDate.ofInstant(source.fetchInvoice(invoiceId).finalizedAt(), taxZone),
-                "fr-2026.1"))
+                new com.housedevinci.einvoice.application.MappingInput(
+                    source.fetchInvoice(invoiceId),
+                    seriesKey(),
+                    LocalDate.ofInstant(source.fetchInvoice(invoiceId).finalizedAt(), taxZone),
+                    "fr-2026.1"),
+                legalNumber(number)))
         .bytes();
   }
 
