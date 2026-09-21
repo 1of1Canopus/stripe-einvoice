@@ -50,6 +50,26 @@ public interface InboundEventStore {
   InboundEvent transition(
       String eventId, InboundState next, String code, String ruleId, Instant now, Duration retryIn);
 
+  /**
+   * Re-opens <b>one</b> terminal mapping refusal so the pipeline can run over it again, for the
+   * privileged {@link IssuanceReprocess} and nothing else (QUESTIONS 26, ruling P-03).
+   *
+   * <p>Deliberately not a {@link #transition} call: {@code FAILED_MAPPING} is terminal with an
+   * empty successor set, and it stays that way - widening the enum would re-open the state for the
+   * sweeper and for every other caller, which is the thing the ruling refuses. This is one
+   * conditional statement instead, so the eligibility check and the write cannot come apart: an
+   * implementation must update only a row whose state is still {@code FAILED_MAPPING}, and answer
+   * false when it is not, which is also what makes two simultaneous operator calls produce one
+   * winner.
+   *
+   * <p>The row comes back to {@code RECEIVED} with its attempt count cleared and the supplied code
+   * recorded, so an event that is running again says why it is running again rather than looking
+   * like an ordinary retry.
+   *
+   * @return true when this call is the one that re-opened the row
+   */
+  boolean reopenForReprocess(String eventId, String code, Instant now);
+
   /** The failing validation rule recorded with the last transition, when there was one. */
   Optional<String> lastRuleId(String eventId);
 

@@ -236,6 +236,23 @@ public final class IssuanceTestHarness {
   private final com.housedevinci.einvoice.application.PreflightSupport preflightSupport =
       new com.housedevinci.einvoice.application.PreflightSupport(findings, clock);
 
+  /** The privileged reprocess, over this harness's own stores and the default renderer. */
+  public com.housedevinci.einvoice.application.IssuanceReprocess reprocess() {
+    return reprocessFor(unitOfWork());
+  }
+
+  /** The privileged reprocess over a unit of work whose renderer the test controls. */
+  public com.housedevinci.einvoice.application.IssuanceReprocess reprocessWith(
+      com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
+    return reprocessFor(unitOfWorkWithRenderer(substituteRenderer));
+  }
+
+  private com.housedevinci.einvoice.application.IssuanceReprocess reprocessFor(
+      IssuanceUnitOfWork unitOfWork) {
+    return new com.housedevinci.einvoice.application.IssuanceReprocess(
+        unitOfWork, inbound, store, findings, clock);
+  }
+
   /** The preflight-support recorder this harness's units of work share. */
   public com.housedevinci.einvoice.application.PreflightSupport preflightSupport() {
     return preflightSupport;

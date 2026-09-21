@@ -55,6 +55,19 @@ public final class JdbcInboundEventStore implements InboundEventStore {
           + " attempts = attempts + 1, next_attempt_at = ?, body = CASE WHEN ? THEN body ELSE NULL"
           + " END WHERE event_id = ?";
 
+  /**
+   * The privileged re-open (QUESTIONS 26). Conditional on the state, so the eligibility check and
+   * the write are one statement and two simultaneous operator calls produce exactly one winner.
+   * {@code attempts} is cleared because this is a new decision by a human, not the next attempt of
+   * the old one, and the retry ceiling is measured from arrival either way.
+   */
+  static final String REOPEN_FOR_REPROCESS =
+      "UPDATE einvoice_inbound_event SET state = 'RECEIVED', last_code = ?, updated_at = ?,"
+          + " attempts = 0, next_attempt_at = NULL"
+          + " WHERE event_id = ? AND state = '"
+          + InboundState.FAILED_MAPPING.name()
+          + "'";
+
   static final String BIND_SELLER =
       "UPDATE einvoice_inbound_event SET seller_id = ?, updated_at = ? WHERE event_id = ?";
 
@@ -217,6 +230,19 @@ public final class JdbcInboundEventStore implements InboundEventStore {
                       new EInvoiceException(
                           ErrorCodes.INBOUND_UNREADABLE,
                           "no inbound event is recorded under that id"));
+        });
+  }
+
+  @Override
+  public boolean reopenForReprocess(String eventId, String code, Instant now) {
+    return unitOfWork.inTransaction(
+        unit -> {
+          try (PreparedStatement ps = unit.connection().prepareStatement(REOPEN_FOR_REPROCESS)) {
+            ps.setString(1, code == null ? "" : code);
+            ps.setObject(2, ts(Timestamps.toStorage(now)));
+            ps.setString(3, eventId);
+            return ps.executeUpdate() == 1;
+          }
         });
   }
 

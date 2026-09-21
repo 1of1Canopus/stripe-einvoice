@@ -192,6 +192,21 @@ public final class ErrorCodes {
    */
   public static final String PREFLIGHT_NOT_SUPPORTED = "DEI-263";
 
+  /**
+   * An operator re-opened a terminal mapping refusal so the pipeline could run over it again, after
+   * the configuration that refused it was corrected (QUESTIONS 26). Recorded on the inbound row, so
+   * a row that is running again says why it is running again and never looks like an ordinary
+   * retry.
+   */
+  public static final String REPROCESS_REQUESTED = "DEI-264";
+
+  /**
+   * The finding code for that privileged action: subject is the event id, and the acknowledgement
+   * carries who asked and why. Raised and acknowledged in the same call - it is a record of a
+   * decision, not an open action item.
+   */
+  public static final String REPROCESSED = "DEI-265";
+
   /** A finalised Stripe invoice has no issuance row at all. The finding D-09 exists for. */
   public static final String RECON_MISSING_ISSUANCE = "DEI-270";
 

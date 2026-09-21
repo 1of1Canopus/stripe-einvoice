@@ -11,6 +11,7 @@ import com.housedevinci.einvoice.application.DocumentValidator;
 import com.housedevinci.einvoice.application.FindingStore;
 import com.housedevinci.einvoice.application.InboundEventStore;
 import com.housedevinci.einvoice.application.IssuanceChainVerifier;
+import com.housedevinci.einvoice.application.IssuanceReprocess;
 import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
 import com.housedevinci.einvoice.application.PreflightSupport;
 import com.housedevinci.einvoice.application.ReconciliationSweep;
@@ -183,6 +184,25 @@ public class EInvoiceIssuanceAutoConfiguration {
         properties.getIssuance().getMaxRetryBackoff(),
         Optional.ofNullable(properties.getNumbering().getClosedYearCutoff()),
         properties.getArchive().isAllowNonAtomicStore());
+  }
+
+  /**
+   * The privileged reprocess of one refused event (QUESTIONS 26). A bean the host calls from its
+   * own admin action, behind its own authorization - <b>no HTTP endpoint and no actuator
+   * operation</b>, for the same reason the void has none (N-04): a library cannot authenticate
+   * anyone, and an auto-configured reprocess endpoint would hand an unauthenticated caller the
+   * issuance pipeline. Nothing in this module calls it, and no schedule reaches it.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  @ConditionalOnBean(IssuanceUnitOfWork.class)
+  public IssuanceReprocess einvoiceIssuanceReprocess(
+      IssuanceUnitOfWork unitOfWork,
+      InboundEventStore inbound,
+      JdbcIssuanceStore store,
+      FindingStore findings,
+      Clock clock) {
+    return new IssuanceReprocess(unitOfWork, inbound, store, findings, clock);
   }
 
   @Bean
