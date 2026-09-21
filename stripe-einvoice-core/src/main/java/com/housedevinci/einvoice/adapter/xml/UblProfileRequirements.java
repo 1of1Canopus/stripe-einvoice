@@ -20,19 +20,20 @@ import java.util.Optional;
  * number at the writer. So the body moved here and the mapper runs it before it returns, while the
  * writer keeps calling it too: a host may hold a renderer and call the writer directly, and a rule
  * that is a second line of defence is not a rule that is checked twice by accident.
- *
- * @param profile the target profile, which decides which of these are mandatory
- * @param buyerReference BT-10
- * @param payment BG-16
- * @param seller BG-4
- * @param buyer BG-7
- * @param reverseChargeOrIntraCommunity true when any breakdown group makes the buyer account for
- *     the VAT, which is the case that needs both parties identified
  */
 public final class UblProfileRequirements {
 
   private UblProfileRequirements() {}
 
+  /**
+   * @param profile the target profile, which decides which of these are mandatory
+   * @param buyerReference BT-10
+   * @param payment BG-16
+   * @param seller BG-4
+   * @param buyer BG-7
+   * @param reverseChargeOrIntraCommunity true when any breakdown group makes the buyer account for
+   *     the VAT, which is the case that needs both parties identified
+   */
   public static void require(
       UblProfile profile,
       Optional<String> buyerReference,
