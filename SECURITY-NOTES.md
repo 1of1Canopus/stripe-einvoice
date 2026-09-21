@@ -183,8 +183,13 @@ module is where that is set out.
   (D3-01, D3-05).** Every refusal that depends on the invoice's own data - a buyer-controlled field
   no XML 1.0 parser could read, an unsupported currency, a tax rate no EN 16931 category can be
   established for, a missing required term, an incomplete seller profile, a document that does not
-  balance - is taken **before** the allocator, by running the render path's own mapping with no
-  number in existence. The event ends `FAILED_MAPPING` with the mapper's own code and leaves no
+  balance, and every term the target profile requires beyond EN 16931 itself (BT-49 and BT-34 for
+  Peppol, BR-DE-1, BR-DE-2, BR-DE-8, BR-DE-9, BR-DE-10 and BR-DE-15 for XRechnung, and both
+  parties' VAT identifiers on a reverse-charge supply) - is taken **before** the allocator, by
+  running the render path's own mapping with no number in existence. Those profile rules used to
+  live only in the writer, which the preflight does not run, so a buyer with no VAT identifier
+  passed the preflight and cost a number at the writer; they now run in the mapper, with the
+  writer's copy kept for a host that calls the writer directly. The event ends `FAILED_MAPPING` with the mapper's own code and leaves no
   issuance row, no chain entry, no archived object and no advance of the series counter. That
   refusal is final: a finalised invoice's fields are frozen, so the same run would reach the same
   verdict; the remedy is a corrected upstream invoice, which arrives as a new event. The sweeper
@@ -196,6 +201,14 @@ module is where that is set out.
   exist; and an upstream void after issuance, which is a credit-note case rather than a refusal.
   Each of those needs the number to exist or is an infrastructure fault, and none is buyer-
   controlled input.
+
+  Every one of them puts the number's fate on the row: the issuance row moves out of `NUMBERED` to
+  a failure disposition, and the inbound event row carries the code - and, where there is one, the
+  failing rule id. A renderer or writer fault used to be the exception, leaving the number in
+  `NUMBERED` with nothing recorded until the reconciliation sweep's stuck check reported a count
+  hours later; it now records the same disposition a validation refusal does, with the render code
+  where the rule id goes. No chained event is appended at a failure disposition - the chain carries
+  issuance and void - so the series report and the event row are where a failed number is read.
 
   **A third-party renderer that does not implement the preflight keeps the old cost.** The port's
   default answers `NOT_SUPPORTED` rather than refusing, so an implementation written before the

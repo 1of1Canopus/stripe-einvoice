@@ -115,6 +115,19 @@ public record UnnumberedInvoice(
         payableTotal);
   }
 
+  public java.util.Optional<String> buyerReferenceValue() {
+    return java.util.Optional.ofNullable(buyerReference);
+  }
+
+  public java.util.Optional<PaymentInstruction> paymentValue() {
+    return java.util.Optional.ofNullable(payment);
+  }
+
+  /** True when any breakdown group carries a category whose VAT the buyer accounts for. */
+  public boolean hasReverseChargeOrIntraCommunity() {
+    return taxSubtotals.stream().anyMatch(t -> t.category().requiresBothVatIdentifiers());
+  }
+
   /**
    * The number-dependent tail, and nothing else: BT-1 is screened by {@link EnInvoice}'s own
    * constructor and every other rule has already run here.

@@ -1,8 +1,9 @@
 # Security review - `feat/issuance-preflight`
 
 Adversarial review of the pre-allocation issuance preflight. Roles, not names: "the design review"
-is the review section at the bottom of `docs/plans/preflight-design.md`, "the build" is the work on
-this branch.
+is the review section at the bottom of the module's internal design page, "the build" is the work
+on this branch. (The path this sentence first named is an internal document, which the repository's
+reference guard refuses in public text; only the wording changed.)
 
 ---
 

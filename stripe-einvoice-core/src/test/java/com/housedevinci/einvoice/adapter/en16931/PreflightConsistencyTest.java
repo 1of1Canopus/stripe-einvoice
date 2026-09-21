@@ -7,6 +7,7 @@ import com.housedevinci.einvoice.application.DocumentInput;
 import com.housedevinci.einvoice.application.PreflightReport;
 import com.housedevinci.einvoice.application.SourceInvoice;
 import com.housedevinci.einvoice.domain.EInvoiceException;
+import com.housedevinci.einvoice.domain.en16931.Party;
 import com.housedevinci.einvoice.domain.en16931.SellerProfile;
 import java.util.ArrayList;
 import java.util.List;
@@ -65,7 +66,152 @@ class PreflightConsistencyTest {
             "fr-no-buyer-country",
             withBuyerCountry(DocumentFixtures.frenchStandardRated(), ""),
             DocumentFixtures.frenchSeller(),
-            UblProfile.PEPPOL_BIS_UBL));
+            UblProfile.PEPPOL_BIS_UBL),
+        // D5-01. One profile-mandatory rule per fixture, each varying exactly ONE field: the
+        // earlier `fr-no-buyer-country` cleared the tax id in the same call, so the mapper's
+        // country refusal fired first and hid the fact that BT-49 was refused only by the writer.
+        // A fixture that varies two fields cannot tell you which one the verdict came from.
+        new Fixture(
+            "peppol-buyer-without-a-tax-id (BT-49)",
+            withBuyerTaxId(DocumentFixtures.frenchStandardRated(), null),
+            DocumentFixtures.frenchSeller(),
+            UblProfile.PEPPOL_BIS_UBL),
+        new Fixture(
+            "peppol-seller-without-an-electronic-address (BT-34)",
+            DocumentFixtures.frenchStandardRated(),
+            sellerWithoutElectronicAddress(DocumentFixtures.frenchSeller()),
+            UblProfile.PEPPOL_BIS_UBL),
+        new Fixture(
+            "xrechnung-seller-without-a-buyer-reference (BR-DE-15)",
+            DocumentFixtures.germanStandardRated(),
+            DocumentFixtures.germanSellerWithoutBuyerReference(),
+            UblProfile.XRECHNUNG_UBL),
+        new Fixture(
+            "xrechnung-buyer-without-a-street (BR-DE-8)",
+            withBuyerStreet(DocumentFixtures.germanStandardRated(), null),
+            DocumentFixtures.germanSeller(),
+            UblProfile.XRECHNUNG_UBL),
+        new Fixture(
+            "xrechnung-buyer-without-a-city (BR-DE-9)",
+            withBuyerCity(DocumentFixtures.germanStandardRated(), null),
+            DocumentFixtures.germanSeller(),
+            UblProfile.XRECHNUNG_UBL),
+        new Fixture(
+            "xrechnung-buyer-without-a-post-code (BR-DE-10)",
+            withBuyerPostCode(DocumentFixtures.germanStandardRated(), null),
+            DocumentFixtures.germanSeller(),
+            UblProfile.XRECHNUNG_UBL),
+        new Fixture(
+            "xrechnung-seller-without-payment-instructions (BR-DE-1)",
+            DocumentFixtures.germanStandardRated(),
+            sellerWithoutPayment(DocumentFixtures.germanSeller()),
+            UblProfile.XRECHNUNG_UBL),
+        new Fixture(
+            "xrechnung-seller-without-a-contact (BR-DE-2)",
+            DocumentFixtures.germanStandardRated(),
+            sellerWithoutContact(DocumentFixtures.germanSeller()),
+            UblProfile.XRECHNUNG_UBL),
+        new Fixture(
+            "reverse-charge-buyer-without-a-vat-identifier (BR-AE-*)",
+            withBuyerTaxId(DocumentFixtures.reverseCharge(), null),
+            DocumentFixtures.germanSeller(),
+            UblProfile.XRECHNUNG_UBL));
+  }
+
+  private static SellerProfile sellerWithoutElectronicAddress(SellerProfile seller) {
+    Party p = seller.party();
+    return new SellerProfile(
+        new Party(
+            p.name(),
+            p.tradingName(),
+            p.address(),
+            p.vatIdentifier(),
+            p.taxRegistrationIdentifier(),
+            p.legalIdentifier(),
+            null,
+            p.contact()),
+        seller.payment(),
+        seller.defaultBuyerReference());
+  }
+
+  private static SellerProfile sellerWithoutContact(SellerProfile seller) {
+    Party p = seller.party();
+    return new SellerProfile(
+        new Party(
+            p.name(),
+            p.tradingName(),
+            p.address(),
+            p.vatIdentifier(),
+            p.taxRegistrationIdentifier(),
+            p.legalIdentifier(),
+            p.electronicAddress(),
+            null),
+        seller.payment(),
+        seller.defaultBuyerReference());
+  }
+
+  private static SellerProfile sellerWithoutPayment(SellerProfile seller) {
+    return new SellerProfile(seller.party(), null, seller.defaultBuyerReference());
+  }
+
+  private static DocumentInput withBuyerTaxId(DocumentInput base, String taxId) {
+    SourceInvoice.SourceParty b = base.invoice().buyer();
+    return withBuyer(
+        base,
+        new SourceInvoice.SourceParty(
+            b.name(),
+            b.email(),
+            b.line1(),
+            b.line2(),
+            b.postalCode(),
+            b.city(),
+            b.country(),
+            taxId));
+  }
+
+  private static DocumentInput withBuyerStreet(DocumentInput base, String line1) {
+    SourceInvoice.SourceParty b = base.invoice().buyer();
+    return withBuyer(
+        base,
+        new SourceInvoice.SourceParty(
+            b.name(),
+            b.email(),
+            line1,
+            b.line2(),
+            b.postalCode(),
+            b.city(),
+            b.country(),
+            b.taxId()));
+  }
+
+  private static DocumentInput withBuyerCity(DocumentInput base, String city) {
+    SourceInvoice.SourceParty b = base.invoice().buyer();
+    return withBuyer(
+        base,
+        new SourceInvoice.SourceParty(
+            b.name(),
+            b.email(),
+            b.line1(),
+            b.line2(),
+            b.postalCode(),
+            city,
+            b.country(),
+            b.taxId()));
+  }
+
+  private static DocumentInput withBuyerPostCode(DocumentInput base, String postalCode) {
+    SourceInvoice.SourceParty b = base.invoice().buyer();
+    return withBuyer(
+        base,
+        new SourceInvoice.SourceParty(
+            b.name(),
+            b.email(),
+            b.line1(),
+            b.line2(),
+            postalCode,
+            b.city(),
+            b.country(),
+            b.taxId()));
   }
 
   @Test
@@ -89,6 +235,44 @@ class PreflightConsistencyTest {
         .as("the pass that spends the number and the pass that writes the bytes reach one verdict")
         .isEmpty();
   }
+
+  /**
+   * D5-01, one assertion per profile-mandatory rule per profile: each of these is refused by the
+   * <b>preflight</b>, before an allocator has run, rather than by the writer afterwards. The
+   * agreement test above says the two passes match; this one says what they match on, because two
+   * passes that both said PASSED would satisfy the first and lose a legal number to the second.
+   */
+  @Test
+  void every_profile_mandatory_rule_refuses_before_the_number() {
+    List<String> notRefused = new ArrayList<>();
+    for (Fixture fixture : fixtures()) {
+      if (!PROFILE_RULE_FIXTURES.contains(fixture.name())) {
+        continue;
+      }
+      PreflightReport report =
+          new En16931DocumentRenderer(fixture.seller(), fixture.profile(), null)
+              .preflight(fixture.input().unnumbered());
+      if (report.verdict() != PreflightReport.Verdict.REFUSED || !"DEI-221".equals(report.code())) {
+        notRefused.add(fixture.name() + " -> " + report.verdict() + " " + report.code());
+      }
+    }
+    assertThat(notRefused)
+        .as("every profile-mandatory term is refused by the pass that runs before the allocator")
+        .isEmpty();
+  }
+
+  /** The nine fixtures that exist to exercise one profile-mandatory rule each. */
+  private static final List<String> PROFILE_RULE_FIXTURES =
+      List.of(
+          "peppol-buyer-without-a-tax-id (BT-49)",
+          "peppol-seller-without-an-electronic-address (BT-34)",
+          "xrechnung-seller-without-a-buyer-reference (BR-DE-15)",
+          "xrechnung-buyer-without-a-street (BR-DE-8)",
+          "xrechnung-buyer-without-a-city (BR-DE-9)",
+          "xrechnung-buyer-without-a-post-code (BR-DE-10)",
+          "xrechnung-seller-without-payment-instructions (BR-DE-1)",
+          "xrechnung-seller-without-a-contact (BR-DE-2)",
+          "reverse-charge-buyer-without-a-vat-identifier (BR-AE-*)");
 
   /**
    * Probe 8. The preflight decides the same thing in any zone and any locale, because it reads no
@@ -121,10 +305,14 @@ class PreflightConsistencyTest {
   }
 
   /**
-   * Probe 4. The preflight deliberately does not run the writer, on the grounds that every string
-   * reaching the writer arrived through a screened business term - so a writer refusal implies a
-   * mapper refusal. That is an invariant, and this asserts it rather than restating it: whenever
-   * the mapping accepts a generated string, the writer accepts the document it produced.
+   * Probe 4, widened by D5-01. The preflight does not run the writer, on the invariant that every
+   * string reaching the writer arrived through a screened business term - so whenever the mapping
+   * accepts a generated string, the writer accepts the document it produced.
+   *
+   * <p>It now varies <b>every screened string term</b> the upstream controls and runs under
+   * <b>both</b> profiles, because the first version varied one field on one fixture under one
+   * profile, and the thing it missed - a rule that is fatal under Peppol and harmless under
+   * XRechnung - lives exactly in the gap between those.
    *
    * <p>Seeded and printed, so a failure is reproducible.
    */
@@ -133,24 +321,138 @@ class PreflightConsistencyTest {
     long seed = 20_260_921L;
     System.out.println("probe_a_writer_refusal_implies_a_mapper_refusal seed=" + seed);
     Random random = new Random(seed);
-    En16931DocumentRenderer renderer =
-        new En16931DocumentRenderer(
-            DocumentFixtures.germanSeller(), UblProfile.XRECHNUNG_UBL, null);
     List<String> leaks = new ArrayList<>();
-    for (int i = 0; i < 500; i++) {
+    for (int i = 0; i < 1_000; i++) {
       String generated = generate(random);
-      DocumentInput input = hostileBuyerName(DocumentFixtures.germanStandardRated(), generated);
+      boolean german = random.nextBoolean();
+      DocumentInput base =
+          german ? DocumentFixtures.germanStandardRated() : DocumentFixtures.frenchStandardRated();
+      SellerProfile seller =
+          german ? DocumentFixtures.germanSeller() : DocumentFixtures.frenchSeller();
+      UblProfile profile = german ? UblProfile.XRECHNUNG_UBL : UblProfile.PEPPOL_BIS_UBL;
+      Term term = TERMS.get(random.nextInt(TERMS.size()));
+      DocumentInput input = term.set().apply(base, generated);
+      En16931DocumentRenderer renderer = new En16931DocumentRenderer(seller, profile, null);
       if (renderer.preflight(input.unnumbered()).verdict() != PreflightReport.Verdict.PASSED) {
         continue;
       }
       String code = renderFailureCode(renderer, input);
       if (code != null) {
-        leaks.add("the mapper accepted a value the writer then refused (" + code + ")");
+        leaks.add(
+            profile.name()
+                + " / "
+                + term.name()
+                + ": the mapper accepted a value the writer then refused ("
+                + code
+                + ")");
       }
     }
     assertThat(leaks)
         .as("nothing the writer refuses gets past the mapper, which is why preflight skips it")
         .isEmpty();
+  }
+
+  /** One upstream-controlled string term, and how to put a value in it. */
+  private record Term(
+      String name, java.util.function.BiFunction<DocumentInput, String, DocumentInput> set) {}
+
+  private static final List<Term> TERMS =
+      List.of(
+          new Term("buyer name (BT-44)", PreflightConsistencyTest::hostileBuyerName),
+          new Term("buyer street (BT-50)", PreflightConsistencyTest::withBuyerStreet),
+          new Term("buyer street 2 (BT-51)", PreflightConsistencyTest::withBuyerStreet2),
+          new Term("buyer city (BT-52)", PreflightConsistencyTest::withBuyerCity),
+          new Term("buyer post code (BT-53)", PreflightConsistencyTest::withBuyerPostCode),
+          new Term("line item name (BT-153)", PreflightConsistencyTest::withLineDescription),
+          new Term("line identifier (BT-126)", PreflightConsistencyTest::withLineId),
+          new Term("upstream invoice number", PreflightConsistencyTest::withUpstreamNumber));
+
+  private static DocumentInput withBuyerStreet2(DocumentInput base, String line2) {
+    SourceInvoice.SourceParty b = base.invoice().buyer();
+    return withBuyer(
+        base,
+        new SourceInvoice.SourceParty(
+            b.name(),
+            b.email(),
+            b.line1(),
+            line2,
+            b.postalCode(),
+            b.city(),
+            b.country(),
+            b.taxId()));
+  }
+
+  private static DocumentInput withLineDescription(DocumentInput base, String description) {
+    return withLines(
+        base,
+        line ->
+            new SourceInvoice.SourceLine(
+                line.id(),
+                description,
+                line.taxRateId(),
+                line.quantity(),
+                line.netMinor(),
+                line.grossMinor()));
+  }
+
+  private static DocumentInput withLineId(DocumentInput base, String id) {
+    return withLines(
+        base,
+        line ->
+            new SourceInvoice.SourceLine(
+                id,
+                line.description(),
+                line.taxRateId(),
+                line.quantity(),
+                line.netMinor(),
+                line.grossMinor()));
+  }
+
+  private static DocumentInput withLines(
+      DocumentInput base, java.util.function.UnaryOperator<SourceInvoice.SourceLine> change) {
+    SourceInvoice i = base.invoice();
+    List<SourceInvoice.SourceLine> lines = new ArrayList<>(i.lines());
+    lines.set(0, change.apply(lines.get(0)));
+    return reinput(
+        base,
+        new SourceInvoice(
+            i.id(),
+            i.number(),
+            i.accountId(),
+            i.livemode(),
+            i.currency(),
+            i.status(),
+            i.finalizedAt(),
+            i.buyer(),
+            List.copyOf(lines),
+            i.taxBuckets(),
+            i.taxTreatments(),
+            i.subtotalMinor(),
+            i.taxMinor(),
+            i.totalMinor(),
+            true));
+  }
+
+  private static DocumentInput withUpstreamNumber(DocumentInput base, String number) {
+    SourceInvoice i = base.invoice();
+    return reinput(
+        base,
+        new SourceInvoice(
+            i.id(),
+            number,
+            i.accountId(),
+            i.livemode(),
+            i.currency(),
+            i.status(),
+            i.finalizedAt(),
+            i.buyer(),
+            i.lines(),
+            i.taxBuckets(),
+            i.taxTreatments(),
+            i.subtotalMinor(),
+            i.taxMinor(),
+            i.totalMinor(),
+            true));
   }
 
   /** Characters chosen to sit exactly where an XML writer decides: markup, control, surrogate. */
@@ -222,12 +524,20 @@ class PreflightConsistencyTest {
             b.taxId()));
   }
 
+  /** One field. The tax id stays: clearing it here is what hid D5-01 for a whole review pass. */
   private static DocumentInput withBuyerCountry(DocumentInput base, String country) {
     SourceInvoice.SourceParty b = base.invoice().buyer();
     return withBuyer(
         base,
         new SourceInvoice.SourceParty(
-            b.name(), b.email(), b.line1(), b.line2(), b.postalCode(), b.city(), country, null));
+            b.name(),
+            b.email(),
+            b.line1(),
+            b.line2(),
+            b.postalCode(),
+            b.city(),
+            country,
+            b.taxId()));
   }
 
   private static DocumentInput withBuyer(DocumentInput base, SourceInvoice.SourceParty buyer) {

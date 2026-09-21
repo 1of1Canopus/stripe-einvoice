@@ -358,10 +358,10 @@ public final class IssuanceUnitOfWork {
       document = renderer.render(input);
       bytes = document.bytes();
     } catch (EInvoiceException e) {
-      return fail(event, InboundState.FAILED_ISSUANCE, e.code(), backoffFor(event));
+      return renderRefused(event, invoice, e.code(), backoffFor(event));
     } catch (RuntimeException e) {
       log.error("einvoice: the document renderer threw an unexpected exception", e);
-      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.RENDER_FAILED, null);
+      return renderRefused(event, invoice, ErrorCodes.RENDER_FAILED, null);
     }
     DocumentValidator.Report report;
     try {
@@ -499,6 +499,38 @@ public final class IssuanceUnitOfWork {
           issuance.legalNumber());
     }
     return fail(event, InboundState.COMPLETED, "", null, issuance.legalNumber());
+  }
+
+  /**
+   * A render that refused after the number was allocated (D5-03).
+   *
+   * <p>The number's fate goes on its own row, exactly as a validation refusal's does: without this
+   * the issuance stayed {@code NUMBERED} - a legal number allocated, no document, no reason
+   * recorded and nothing to void against - until the reconciliation sweep's stuck check noticed a
+   * count, hours later, without a cause. The disposition is {@code FAILED_VALIDATION} because that
+   * is what it means to an operator: this number will never carry a document and needs a void. The
+   * render's own code goes where a schematron rule id goes, so the row says which. A distinct
+   * {@code FAILED_RENDER} state would read better and is an enum value, a successor edge, an {@code
+   * open()} case, the trigger guard and a migration - its own change, not a line here.
+   *
+   * <p>One statement, one store call, outside any transaction of ours: the same shape the
+   * validation refusal already uses, so the allocator design's "never two locks in one transaction"
+   * rule is untouched.
+   */
+  private Outcome renderRefused(
+      InboundEvent event, SourceInvoice invoice, String code, Duration retryIn) {
+    writer.markFailed(
+        configuration.sellerId(),
+        configuration.mode(),
+        invoice.id(),
+        IssuanceState.FAILED_VALIDATION,
+        code);
+    // The cause goes where a schematron rule id goes on the same disposition, so an operator
+    // looking at a failed number reads one row and learns which refusal it was.
+    InboundEvent updated =
+        inbound.transition(
+            event.eventId(), InboundState.FAILED_ISSUANCE, code, code, clock.instant(), retryIn);
+    return new Outcome(updated.eventId(), updated.state(), code, null);
   }
 
   /** Empty when the archived bytes still hash to what the row recorded; a code when they do not. */

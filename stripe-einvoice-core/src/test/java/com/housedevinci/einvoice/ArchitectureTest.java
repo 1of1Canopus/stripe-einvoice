@@ -1,11 +1,13 @@
 package com.housedevinci.einvoice;
 
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.lang.ArchRule;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -73,23 +75,7 @@ class ArchitectureTest {
     // 23:30 UTC invoice in the wrong VAT period, and a number formatted in the default locale is a
     // different string on a different machine. Time comes from an injected Clock, the zone from the
     // seller profile, and formatting from Locale.ROOT.
-    ArchRule rule =
-        noClasses()
-            .that()
-            .resideInAPackage("com.housedevinci.einvoice..")
-            .should()
-            .callMethod(java.time.Instant.class, "now")
-            .orShould()
-            .callMethod(java.time.LocalDate.class, "now")
-            .orShould()
-            .callMethod(java.time.LocalDateTime.class, "now")
-            .orShould()
-            .callMethod(java.time.ZoneId.class, "systemDefault")
-            .orShould()
-            .callMethod(java.util.Locale.class, "getDefault")
-            .because(
-                "a legal date and a rendered number must not depend on where the container runs");
-    rule.check(CLASSES);
+    DeterminismRules.moduleWide().check(CLASSES);
   }
 
   @Test
@@ -98,28 +84,29 @@ class ArchitectureTest {
     // on every machine and on every replay. Named explicitly rather than left to the module-wide
     // rule above, because this is the path whose determinism the "costs no number" claim rests
     // on: the issue date arrives already derived, and nothing here may derive a second one.
-    ArchRule rule =
-        noClasses()
-            .that()
-            .resideInAnyPackage(
-                "com.housedevinci.einvoice.adapter.en16931..",
-                "com.housedevinci.einvoice.domain.en16931..")
-            .should()
-            .callMethod(java.time.Instant.class, "now")
-            .orShould()
-            .callMethod(java.time.LocalDate.class, "now")
-            .orShould()
-            .callMethod(java.time.Clock.class, "systemDefaultZone")
-            .orShould()
-            .callMethod(java.time.ZoneId.class, "systemDefault")
-            .orShould()
-            .callMethod(java.util.TimeZone.class, "getDefault")
-            .orShould()
-            .callMethod(java.util.Locale.class, "getDefault")
-            .because(
-                "the preflight and the render must reach the same verdict on any machine, in any"
-                    + " zone and under any locale");
-    rule.check(CLASSES);
+    DeterminismRules.preflightPath().check(CLASSES);
+  }
+
+  /**
+   * D5-04. The rule above is the control the "same input, same verdict" claim rests on, so it is
+   * itself under test: a class in the mapper's own package that reads the environment through the
+   * overloads - {@code LocalDate.now(zone)}, {@code ZonedDateTime.now()}, {@code
+   * OffsetDateTime.now()}, {@code System.currentTimeMillis()}, {@code Locale.getDefault(category)}
+   * - must be refused. The fixture is imported by class and not by package: importing the package
+   * pulls in test classes that legitimately call {@code TimeZone.getDefault()} and the probe goes
+   * green for the wrong reason.
+   */
+  @Test
+  void the_determinism_rules_refuse_a_class_that_reads_the_environment_through_an_overload() {
+    JavaClasses fixture =
+        new ClassFileImporter()
+            .importClasses(
+                com.housedevinci.einvoice.adapter.en16931.CipherNonDeterministicFixture.class);
+    for (ArchRule rule : List.of(DeterminismRules.moduleWide(), DeterminismRules.preflightPath())) {
+      assertThatThrownBy(() -> rule.check(fixture))
+          .as("a rule that names only the no-argument forms is not a determinism rule")
+          .isInstanceOf(AssertionError.class);
+    }
   }
 
   @Test

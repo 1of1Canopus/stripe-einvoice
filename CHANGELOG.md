@@ -16,6 +16,18 @@ All notable changes to this project are documented here. The format follows
   costs a number - a rule only the numbered document can be checked against, a renderer or writer
   fault, an archive failure, an upstream void after issuance - is listed in `SECURITY-NOTES.md`. A
   mapping refusal is final; the remedy is a corrected upstream invoice, which arrives as a new event.
+- **The profile's own mandatory terms are checked before the number too.** XRechnung's and
+  Peppol's presence rules - the buyer's and seller's electronic address, the buyer reference, the
+  payment instruction, the seller contact, the buyer's street, city and post code, and both
+  parties' VAT identifiers on a reverse-charge supply - used to be enforced only in the writer,
+  which runs after the allocator. Two of them are decided by the buyer's own frozen data, so a
+  buyer with no VAT identifier passed the preflight and then cost a legal number. They now run in
+  the mapper, in the same body both passes share; the writer keeps its copy for a host that calls
+  it directly.
+- **A number consumed by a renderer or writer fault says so on its row.** It used to be left in
+  `NUMBERED` with no recorded reason until the reconciliation sweep's stuck check noticed a count;
+  it now records the same disposition a validation refusal does, with the render code where the
+  rule id goes, so an operator can find it and void it.
 - **A renderer without a preflight is announced rather than assumed.** The port's default answers
   `NOT_SUPPORTED` so that a renderer written before the method existed keeps working; that
   application is told at startup, in a compliance finding raised once per start (`DEI-263`), and on

@@ -1,6 +1,7 @@
 package com.housedevinci.einvoice.adapter.en16931;
 
 import com.housedevinci.einvoice.adapter.xml.UblProfile;
+import com.housedevinci.einvoice.adapter.xml.UblProfileRequirements;
 import com.housedevinci.einvoice.application.MappingInput;
 import com.housedevinci.einvoice.application.SourceInvoice;
 import com.housedevinci.einvoice.domain.EInvoiceException;
@@ -127,26 +128,40 @@ public final class StripeInvoiceMapper {
     Money taxTotal = Money.ofMinor(source.taxMinor(), currency);
     Money inclusive = Money.ofMinor(source.totalMinor(), currency);
 
-    return new UnnumberedInvoice(
-        input.issueDate(),
-        null,
-        DocumentTypeCode.COMMERCIAL_INVOICE,
-        currency,
-        buyerReference(),
-        null,
-        null,
-        null,
-        source.number().isBlank() ? null : source.number(),
-        sellerParty,
-        buyer,
-        seller.payment(),
-        lines,
-        subtotals,
-        lineTotal,
-        lineTotal,
-        taxTotal,
-        inclusive,
-        inclusive);
+    UnnumberedInvoice document =
+        new UnnumberedInvoice(
+            input.issueDate(),
+            null,
+            DocumentTypeCode.COMMERCIAL_INVOICE,
+            currency,
+            buyerReference(),
+            null,
+            null,
+            null,
+            source.number().isBlank() ? null : source.number(),
+            sellerParty,
+            buyer,
+            seller.payment(),
+            lines,
+            subtotals,
+            lineTotal,
+            lineTotal,
+            taxTotal,
+            inclusive,
+            inclusive);
+
+    // The profile's presence rules, run here rather than only in the writer (D5-01). BT-49 is
+    // derived from the buyer's own VAT identifier and BR-DE-8 from their frozen address, so a
+    // rule that lives only downstream of the allocator charges the buyer's missing tax id one
+    // legal number. Same body as the writer's, on the document this mapper is about to return.
+    UblProfileRequirements.require(
+        profile,
+        document.buyerReferenceValue(),
+        document.paymentValue(),
+        document.seller(),
+        document.buyer(),
+        document.hasReverseChargeOrIntraCommunity());
+    return document;
   }
 
   /**
