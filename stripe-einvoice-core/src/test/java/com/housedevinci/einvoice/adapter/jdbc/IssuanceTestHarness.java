@@ -316,6 +316,12 @@ public final class IssuanceTestHarness {
         "SELECT count(*) FROM einvoice_issuance WHERE seller_id = '" + sellerId + "'");
   }
 
+  /** The series counter itself: the number the next allocation would take. */
+  public long seriesCounter() {
+    return PostgresSupport.scalar(
+        "SELECT next_number FROM einvoice_series WHERE seller_id = '" + sellerId + "'");
+  }
+
   public long chainedEvents() {
     return PostgresSupport.scalar(
         "SELECT count(*) FROM einvoice_issuance_event WHERE seller_id = '" + sellerId + "'");

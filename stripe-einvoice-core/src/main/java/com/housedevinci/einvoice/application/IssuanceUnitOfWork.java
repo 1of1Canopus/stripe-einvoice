@@ -247,8 +247,6 @@ public final class IssuanceUnitOfWork {
     } catch (EInvoiceException refused) {
       return fail(event, InboundState.FAILED_MAPPING, refused.code(), null);
     }
-    inbound.transition(eventId, InboundState.MAPPED, "", clock.instant(), null);
-
     if (!validator.canValidate()) {
       // D3-02: this is a fact about the application, known before it serves a single request, not
       // a fact about this invoice. Discovering it in P2, after the allocator has already run,
@@ -263,8 +261,7 @@ public final class IssuanceUnitOfWork {
     // costs nothing. One MappingInput, constructed once and handed to both passes, so the two
     // cannot disagree about the invoice, the series or the issue date.
     MappingInput mapping =
-        new MappingInput(
-            invoice, seriesKey(issueDate), issueDate, configuration.rulePackVersion());
+        new MappingInput(invoice, seriesKey(issueDate), issueDate, configuration.rulePackVersion());
     PreflightReport report = preflight(mapping);
     if (report.refused()) {
       // FAILED_MAPPING, with the mapper's own code, and no NUMBERED row, chain entry or archive
@@ -279,6 +276,10 @@ public final class IssuanceUnitOfWork {
       preflightSupport.notSupported(
           configuration.sellerId(), configuration.mode(), renderer.getClass().getName());
     }
+    // MAPPED now means what it says: the mapping ran, over every screen, and produced a document
+    // model. Before the preflight existed this row went MAPPED as soon as the totals agreed, and
+    // the mapping itself was first attempted after a number had been allocated.
+    inbound.transition(eventId, InboundState.MAPPED, "", clock.instant(), null);
     return issue(event, invoice, mapping).withPreflight(report.verdict());
   }
 

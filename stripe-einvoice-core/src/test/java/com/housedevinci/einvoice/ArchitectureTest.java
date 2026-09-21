@@ -93,6 +93,36 @@ class ArchitectureTest {
   }
 
   @Test
+  void the_preflight_path_reads_no_clock_no_zone_and_no_locale() {
+    // The preflight decides whether a legal number is spent, so it has to decide the same thing
+    // on every machine and on every replay. Named explicitly rather than left to the module-wide
+    // rule above, because this is the path whose determinism the "costs no number" claim rests
+    // on: the issue date arrives already derived, and nothing here may derive a second one.
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAnyPackage(
+                "com.housedevinci.einvoice.adapter.en16931..",
+                "com.housedevinci.einvoice.domain.en16931..")
+            .should()
+            .callMethod(java.time.Instant.class, "now")
+            .orShould()
+            .callMethod(java.time.LocalDate.class, "now")
+            .orShould()
+            .callMethod(java.time.Clock.class, "systemDefaultZone")
+            .orShould()
+            .callMethod(java.time.ZoneId.class, "systemDefault")
+            .orShould()
+            .callMethod(java.util.TimeZone.class, "getDefault")
+            .orShould()
+            .callMethod(java.util.Locale.class, "getDefault")
+            .because(
+                "the preflight and the render must reach the same verdict on any machine, in any"
+                    + " zone and under any locale");
+    rule.check(CLASSES);
+  }
+
+  @Test
   void document_generation_never_formats_through_the_default_locale() {
     // Checklist line 17. String.format's one-argument overload takes Locale.getDefault(), so a
     // single one of them in a writer makes the bytes depend on the machine - and the Thai-digit

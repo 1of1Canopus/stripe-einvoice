@@ -45,10 +45,7 @@ public class PreflightSupportCheck implements InitializingBean {
   /** True when this renderer supplies its own preflight rather than inheriting the default. */
   static boolean overridesPreflight(DocumentRenderer renderer) {
     try {
-      return !renderer
-          .getClass()
-          .getMethod("preflight", MappingInput.class)
-          .isDefault();
+      return !renderer.getClass().getMethod("preflight", MappingInput.class).isDefault();
     } catch (NoSuchMethodException e) {
       // A renderer compiled against an older port. It cannot have overridden what it never saw.
       return false;

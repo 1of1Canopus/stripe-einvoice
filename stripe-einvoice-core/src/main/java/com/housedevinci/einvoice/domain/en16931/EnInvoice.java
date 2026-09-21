@@ -169,5 +169,4 @@ public record EnInvoice(
   public boolean hasReverseChargeOrIntraCommunity() {
     return taxSubtotals.stream().anyMatch(t -> t.category().requiresBothVatIdentifiers());
   }
-
 }

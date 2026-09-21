@@ -10,8 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * The durable record that an application is running on a renderer with no pre-allocation
- * preflight.
+ * The durable record that an application is running on a renderer with no pre-allocation preflight.
  *
  * <p>An outcome is a transient object and a failed disposition only exists when something failed.
  * An application that ran for a month on a third-party renderer without a preflight, issuing

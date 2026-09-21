@@ -8,9 +8,9 @@ import com.housedevinci.einvoice.application.MappingInput;
 import com.housedevinci.einvoice.application.PreflightReport;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.en16931.EnInvoice;
-import com.housedevinci.einvoice.domain.en16931.UnnumberedInvoice;
 import com.housedevinci.einvoice.domain.en16931.PartyIdentifier;
 import com.housedevinci.einvoice.domain.en16931.SellerProfile;
+import com.housedevinci.einvoice.domain.en16931.UnnumberedInvoice;
 import java.util.Objects;
 
 /**
@@ -43,8 +43,7 @@ public final class En16931DocumentRenderer implements DocumentRenderer {
 
   @Override
   public RenderedDocument render(DocumentInput input) {
-    return new RenderedDocument(
-        writer.write(model(input)), "xml", profile.renderedProfile());
+    return new RenderedDocument(writer.write(model(input)), "xml", profile.renderedProfile());
   }
 
   /**

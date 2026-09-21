@@ -128,6 +128,7 @@ One Stripe event becomes one archived document, or none, and there is a record e
 | Route | API version against the pin, `livemode` against `einvoice.mode`, `account` against the configured seller | A terminal `REFUSED_*` state, answered 200, replayable |
 | Fetch | `GET /v1/invoices/{id}`, lines paginated to exhaustion, tax rates by id | `FAILED_FETCH`, retried by the sweeper up to the ceiling |
 | Map | Totals recomputed and compared, issue date derived in the seller's tax zone, closed-year cut-off | `FAILED_MAPPING` or `FAILED_TOTALS`, final: they need a human |
+| Preflight | The render path's own mapping, run with no number in existence: every screened field, every required term, every balance rule | `FAILED_MAPPING` with the mapper's code, and no issuance row, chain entry, archived object or advance of the counter. Final: a finalised invoice's fields are frozen, so the remedy is a corrected invoice and therefore a new event |
 | P1 claim | The legal number, in one transaction with the issuance row | Nothing: every data refusal already happened |
 | P2 render | The exact bytes, then validation of those exact bytes | `FAILED_VALIDATION` on the issuance row, with the rule id recorded for the operator's void |
 | P3 write | `ARCHIVING` with the hash and key, then the write-once PUT | `FAILED_ARCHIVE`; an outage is retried, a content conflict is not |

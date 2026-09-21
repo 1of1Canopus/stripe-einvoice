@@ -16,10 +16,10 @@ import java.util.Map;
  *
  * <p><b>This is where every screen and every balance invariant lives.</b> {@link EnInvoice}'s own
  * constructor screens BT-1 and then builds one of these, so "the preflight checks less than the
- * render does" is not something this code can express: there is one body, and both passes run it.
- * A screen added here is added to both; a screen removed here is removed from both, which is why
- * the probe that detects a missing screen walks the upstream payload's own shape rather than
- * comparing the two passes to each other.
+ * render does" is not something this code can express: there is one body, and both passes run it. A
+ * screen added here is added to both; a screen removed here is removed from both, which is why the
+ * probe that detects a missing screen walks the upstream payload's own shape rather than comparing
+ * the two passes to each other.
  *
  * <p>JDK only, like the rest of the model.
  */
