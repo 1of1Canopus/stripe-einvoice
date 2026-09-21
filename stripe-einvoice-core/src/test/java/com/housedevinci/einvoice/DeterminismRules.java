@@ -51,6 +51,8 @@ public final class DeterminismRules {
         .orShould()
         .callMethod(java.time.Clock.class, "systemUTC")
         .orShould()
+        .callMethod(java.time.Clock.class, "systemDefaultZone")
+        .orShould()
         .callMethod(java.lang.System.class, "currentTimeMillis")
         .orShould()
         .callMethod(java.lang.System.class, "nanoTime")
@@ -58,11 +60,22 @@ public final class DeterminismRules {
         .callMethod(java.util.Locale.class, "getDefault", java.util.Locale.Category.class)
         .orShould()
         .callConstructor(java.util.Date.class)
+        .orShould()
+        .callMethod(java.lang.String.class, "format", java.lang.String.class, Object[].class)
+        .orShould()
+        .callMethod(java.lang.String.class, "toUpperCase")
+        .orShould()
+        .callMethod(java.lang.String.class, "toLowerCase")
+        .orShould()
+        .callMethod(java.util.Calendar.class, "getInstance")
         .because(
             "a legal date and a rendered number must not depend on where the container runs."
                 + " The overloads matter as much as the no-argument forms: ArchUnit matches a"
                 + " signature, so LocalDate.now(zone) and Locale.getDefault(category) pass a"
-                + " rule that names only LocalDate.now() and Locale.getDefault()");
+                + " rule that names only LocalDate.now() and Locale.getDefault(). String.format"
+                + " without a Locale, toUpperCase()/toLowerCase() without a Locale and"
+                + " Calendar.getInstance() read the default locale or time zone exactly as"
+                + " LocalDate.now() reads the default zone");
   }
 
   public static ArchRule preflightPath() {

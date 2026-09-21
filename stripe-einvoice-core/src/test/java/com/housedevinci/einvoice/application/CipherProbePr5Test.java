@@ -185,11 +185,14 @@ class CipherProbePr5Test {
   }
 
   // ---------------------------------------------------------------------------------------
-  // D5-03. A number consumed after the preflight passed carries no disposition on its row.
+  // D5-01/D5-03. The buyer-without-tax-id fixture is now refused at the preflight, before a
+  // number is ever allocated - it covers the preflight refusal, not a consumed number's
+  // disposition. See CipherProbePr7bDispositionTest for a preflight that PASSES and a render
+  // that then refuses, which is what D5-03 is actually about (D7-01).
   // ---------------------------------------------------------------------------------------
 
   @Test
-  void probe_a_number_consumed_by_a_render_refusal_carries_a_disposition() {
+  void probe_a_buyer_with_no_tax_id_is_refused_at_the_preflight_with_no_number_allocated() {
     IssuanceTestHarness harness = IssuanceTestHarness.create();
     harness.source().with(buyerWithoutTaxId());
     String eventId = harness.receive("invoice.finalized", "in_fr_standard");
@@ -201,14 +204,14 @@ class CipherProbePr5Test {
 
     var issuance = harness.issuance("in_fr_standard");
     System.out.println(
-        "D5-03: numbered="
+        "D5-01: numbered="
             + harness.numberedRows()
             + " state="
             + issuance.map(i -> i.state().name()).orElse("<none>"));
     assertThat(issuance.map(i -> i.state().name()).orElse("<none>"))
         .as(
-            "a legal number that was consumed and will never carry a document is left in NUMBERED"
-                + " with no recorded disposition; only the six-hour stuck sweep ever notices")
+            "a buyer with no tax id is refused at the preflight, before a number is ever"
+                + " allocated - no row is ever created, so it cannot be left in NUMBERED")
         .isNotEqualTo("NUMBERED");
   }
 
