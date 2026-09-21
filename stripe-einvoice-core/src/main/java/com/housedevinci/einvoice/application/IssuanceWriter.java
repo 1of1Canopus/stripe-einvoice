@@ -27,7 +27,14 @@ public interface IssuanceWriter {
 
   /**
    * A failure state on the issuance row. {@code FAILED_ARCHIVE} is retryable up to the ceiling;
-   * {@code FAILED_VALIDATION} is not, and the failing rule id is recorded with it.
+   * {@code FAILED_VALIDATION} is not.
+   *
+   * <p>{@code FAILED_VALIDATION} appends a chained event carrying {@code ruleId} - the failing
+   * schematron rule, or the render refusal's code - in the same transaction (D7-03). Without it the
+   * gap that a burned number leaves in the issued sequence had no explanation in the tamper-evident
+   * record, only on a row that can legitimately change. {@code FAILED_ARCHIVE} is not chained: it
+   * is retryable rather than a disposition, and its eventual fate - {@code ISSUED} or {@code
+   * VOID_UNUSED} - is chained.
    */
   Issuance markFailed(
       String sellerId, Mode mode, String stripeInvoiceId, IssuanceState state, String ruleId);

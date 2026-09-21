@@ -77,6 +77,39 @@ public record IssuanceEvent(
         hash);
   }
 
+  /**
+   * The disposition event for a number burned by a refusal after it was allocated (D7-03).
+   *
+   * <p>The refusal's own identifier - a schematron rule id, or the render refusal's code - travels
+   * where a void's rule id travels, so the chain itself can tell an auditor why a number is missing
+   * from the issued sequence instead of pointing at a mutable row.
+   */
+  public static IssuanceEvent failed(
+      Issuance issuance, IssuanceState state, String ruleId, Instant when) {
+    IssuanceEvent base = of(issuance, state, when);
+    return new IssuanceEvent(
+        base.sequence(),
+        base.timestamp(),
+        base.seriesKey(),
+        base.stripeInvoiceId(),
+        base.stripeAccountId(),
+        base.stripeNumber(),
+        base.legalNumber(),
+        base.state(),
+        base.issuedAt(),
+        base.documentSha256(),
+        base.archiveKey(),
+        base.rulePackVersion(),
+        base.voidReason(),
+        ruleId == null || ruleId.isBlank()
+            ? base.voidRuleId()
+            : Identifiers.validate("failure rule id", ruleId, 64),
+        base.chainVersion(),
+        base.keyId(),
+        base.prevHash(),
+        base.hash());
+  }
+
   /** The disposition event for a number that will never carry a document. */
   public static IssuanceEvent voided(Issuance issuance, Instant when) {
     return of(issuance, IssuanceState.VOID_UNUSED, when);

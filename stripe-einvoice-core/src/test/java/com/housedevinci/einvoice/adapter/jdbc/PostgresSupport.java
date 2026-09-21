@@ -142,6 +142,17 @@ public final class PostgresSupport {
     }
   }
 
+  /** A scalar query against a database other than the shared one. */
+  public static long scalarOn(DataSource ds, String sql) {
+    try (Connection c = ds.getConnection();
+        Statement st = c.createStatement();
+        var rs = st.executeQuery(sql)) {
+      return rs.next() ? rs.getLong(1) : -1;
+    } catch (SQLException e) {
+      throw new IllegalStateException("test query failed: " + e.getMessage(), e);
+    }
+  }
+
   public static long scalar(String sql) {
     try (Connection c = dataSource().getConnection();
         Statement st = c.createStatement();

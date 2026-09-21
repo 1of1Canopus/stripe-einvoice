@@ -8,7 +8,12 @@ public interface IssuanceEventReader {
 
   List<IssuanceEvent> readAfter(long sequenceExclusive, int limit);
 
-  /** Issuance rows whose disposition is settled, for the verifier's cross-check. */
+  /**
+   * Issuance rows whose disposition is settled, for the verifier's cross-check: issued, voided
+   * unused, and - since D7-03 - burned by a validation or render refusal, each of which appends a
+   * chained event. Not {@code NUMBERED} or {@code ARCHIVING}, which are still open, and not {@code
+   * FAILED_ARCHIVE}, which is retryable.
+   */
   List<DisposedIssuance> disposedIssuances();
 
   /**
