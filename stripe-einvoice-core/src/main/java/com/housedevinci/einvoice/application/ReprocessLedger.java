@@ -45,8 +45,9 @@ public interface ReprocessLedger {
   /**
    * Appends the {@code CONCLUDED} row for one request.
    *
-   * @param state where the pipeline stopped, or empty when it threw
-   * @param code the outcome code, or the error code of the exception that escaped
+   * @param requestSeq the sequence {@link #reopenAndRecord} returned
+   * @param outcome where the pipeline stopped - state empty when it threw - and the code it
+   *     stopped with, which for a throw is the error code that escaped
    */
   void conclude(long requestSeq, ReprocessRecord.Outcome outcome, Instant now);
 
