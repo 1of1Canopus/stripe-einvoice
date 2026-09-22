@@ -201,7 +201,10 @@ public final class IssuanceChainVerifier {
   }
 
   // D1-02: keyed on the row's identity - seller, mode, series, fiscal year, source object id,
-  // legal number and state - not merely on seller|mode|number|state. That narrower key let one
+  // legal number and state - not merely on seller|mode|number|state. RC-02 adds the two void
+  // columns: the justification for a burned number is chained, is what an auditor is shown, and
+  // lives on a row the runtime role may UPDATE, so a rewrite of it must read as BROKEN exactly as
+  // a rewritten identity does. That narrower key let one
   // legitimate chained event vouch for every row that happened to share those four values,
   // including a forged, already-disposed row inserted out of band in a different fiscal year.
   private long countUnchained(Set<String> chained) {
@@ -220,7 +223,11 @@ public final class IssuanceChainVerifier {
                     + "|"
                     + d.legalNumber()
                     + "|"
-                    + d.state())
+                    + d.state()
+                    + "|"
+                    + d.voidReason()
+                    + "|"
+                    + d.voidRuleId())
         .filter(key -> !chained.contains(key))
         .count();
   }
@@ -238,7 +245,11 @@ public final class IssuanceChainVerifier {
         + "|"
         + e.legalNumber().value()
         + "|"
-        + e.state().name();
+        + e.state().name()
+        + "|"
+        + e.voidReason()
+        + "|"
+        + e.voidRuleId();
   }
 
   private IssuanceChain chainForRow(boolean expectKeyed, String rowKeyId) {

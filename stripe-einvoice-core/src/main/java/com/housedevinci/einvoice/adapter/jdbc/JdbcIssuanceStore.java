@@ -118,6 +118,15 @@ public final class JdbcIssuanceStore
       "UPDATE einvoice_issuance SET state = ?"
           + " WHERE seller_id = ? AND mode = ? AND stripe_invoice_id = ?";
 
+  /**
+   * RC-02: a burn records its rule id <b>on the row</b>, in the statement that moves the state, and
+   * not only in the chained event. The auditor-facing series report reads the row, the verifier now
+   * compares the two, and a column the row never carried could not be compared with anything.
+   */
+  static final String BURN_ISSUANCE =
+      "UPDATE einvoice_issuance SET state = ?, void_rule_id = ?"
+          + " WHERE seller_id = ? AND mode = ? AND stripe_invoice_id = ?";
+
   static final String VOID_ISSUANCE =
       "UPDATE einvoice_issuance SET state = ?, void_reason = ?, void_rule_id = ?"
           + " WHERE seller_id = ? AND mode = ? AND stripe_invoice_id = ?";
@@ -678,13 +687,29 @@ public final class JdbcIssuanceStore
             return issuance;
           }
           issuance.state().transitionTo(state);
-          try (PreparedStatement ps = c.prepareStatement(MARK_STATE)) {
-            int i = 1;
-            ps.setString(i++, state.name());
-            ps.setString(i++, sellerId);
-            ps.setString(i++, mode.wire());
-            ps.setString(i, stripeInvoiceId);
-            ps.executeUpdate();
+          String burnRuleId =
+              ruleId == null || ruleId.isBlank()
+                  ? issuance.voidRuleId()
+                  : com.housedevinci.einvoice.domain.RuleIds.normalise(ruleId);
+          if (state == IssuanceState.FAILED_VALIDATION) {
+            try (PreparedStatement ps = c.prepareStatement(BURN_ISSUANCE)) {
+              int i = 1;
+              ps.setString(i++, state.name());
+              ps.setString(i++, burnRuleId);
+              ps.setString(i++, sellerId);
+              ps.setString(i++, mode.wire());
+              ps.setString(i, stripeInvoiceId);
+              ps.executeUpdate();
+            }
+          } else {
+            try (PreparedStatement ps = c.prepareStatement(MARK_STATE)) {
+              int i = 1;
+              ps.setString(i++, state.name());
+              ps.setString(i++, sellerId);
+              ps.setString(i++, mode.wire());
+              ps.setString(i, stripeInvoiceId);
+              ps.executeUpdate();
+            }
           }
           Issuance failed = findBySource(c, sellerId, mode, stripeInvoiceId, false).orElseThrow();
           if (state == IssuanceState.FAILED_VALIDATION) {
@@ -949,7 +974,8 @@ public final class JdbcIssuanceStore
           try (PreparedStatement ps =
                   c.prepareStatement(
                       "SELECT seller_id, mode, series, fiscal_year, stripe_invoice_id,"
-                          + " legal_number, state FROM einvoice_issuance"
+                          + " legal_number, state, void_reason, void_rule_id"
+                          + " FROM einvoice_issuance"
                           + " WHERE state IN ("
                           + disposedStates()
                           + ") ORDER BY id");
@@ -963,7 +989,9 @@ public final class JdbcIssuanceStore
                       rs.getInt(4),
                       rs.getString(5),
                       rs.getString(6),
-                      rs.getString(7)));
+                      rs.getString(7),
+                      rs.getString(8),
+                      rs.getString(9)));
             }
           }
           return disposed;
