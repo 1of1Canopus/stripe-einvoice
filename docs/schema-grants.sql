@@ -15,7 +15,9 @@ GRANT SELECT, INSERT ON einvoice_series, einvoice_issuance,
 
 -- UPDATE is needed on three of the four, and the triggers bound what an UPDATE may change:
 --   einvoice_series           the counter, and only by +1
---   einvoice_issuance         the state, the document hash and key (write-once), the void reason
+--   einvoice_issuance         the state, the document hash and key (write-once), and the void
+--                             reason and rule id - the last two only in the statement that records
+--                             the disposition, never afterwards
 --   einvoice_issuance_anchor  the head, and only forward by one row
 GRANT UPDATE ON einvoice_series, einvoice_issuance, einvoice_issuance_anchor
   TO einvoice_runtime;

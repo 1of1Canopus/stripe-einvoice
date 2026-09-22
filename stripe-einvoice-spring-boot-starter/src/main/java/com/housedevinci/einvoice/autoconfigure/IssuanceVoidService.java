@@ -18,6 +18,15 @@ import org.slf4j.LoggerFactory;
  *
  * <p>What is recorded: the reason, screened and length-bounded, the failing validation rule id when
  * there was one, and a chained event. Nothing is deleted, and the number is never re-allocated.
+ *
+ * <p><b>A void is irreversible, and unrecoverable inside this module.</b> One Stripe invoice maps
+ * to one number for all time, so this ends the module's involvement with that sale: every later
+ * event for the invoice is recorded terminally with {@code DEI-122}, the reconciliation sweep
+ * reports it under {@code DEI-278} instead of re-enqueueing it, and no path allocates a second
+ * number. An operator who voids by mistake cannot undo it here. The remedy is upstream - correct
+ * the data, void the Stripe invoice, raise a new one - and when the sale is already paid that
+ * remedy needs a credit note, which this edition does not produce. Say so in whatever admin action
+ * you wire this to, because the operator reads that and not this file.
  */
 public class IssuanceVoidService {
 

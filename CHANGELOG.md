@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Stripe invoice whose only number was voided is terminal, and nothing loops.** The module's own
+  documented remedy for a burned number is an operator void; until now every later event for that
+  invoice resumed onto the voided row, raised an illegal transition that escaped the unit of work,
+  left the inbound row in a running state with no code, and was re-picked on every sweep - each time
+  paying a Stripe re-fetch and a full render - while the reconciliation sweep re-enqueued it instead
+  of reporting it. A later event is now recorded terminally with the new code `DEI-122`, the
+  reconciliation sweep reports `DEI-278` (voided) or `DEI-279` (burned, awaiting a void) and
+  enqueues neither, and the claim-race loser follows the winner's state rather than concluding on
+  the success terminal. The guard is an exhaustive switch over the issuance states with no
+  `default`, so a new state cannot fall through to the allocator again. **A void remains
+  irreversible and is unrecoverable inside this module**: one Stripe invoice maps to one number for
+  all time, so the remedy for a sale that must still be documented is a new Stripe invoice upstream,
+  and a credit note when it is already paid - which this edition does not produce.
+- **The justification for a burned or voided number can no longer be rewritten unreported.** The
+  failing rule id is now written on the issuance row in the same statement that burns the number;
+  the reason and the rule id change only in the statement that records the disposition, so a bare
+  `UPDATE` by the runtime role is refused by the trigger; and the verifier's cross-check compares
+  both columns against the chained event, so a rewrite by a role that outranks the triggers is
+  reported as `BROKEN` instead of `INTACT`.
+
 ### Added
 
 - **An operator can re-run one refused event after correcting the configuration that refused it.**
@@ -21,7 +43,10 @@ All notable changes to this project are documented here. The format follows
   A `REQUESTED` row with the operator's actor and reason - separate columns, screened, refused
   rather than shortened - written in the same transaction as the re-open, and a `CONCLUDED` row with
   the outcome or the escaping error code. No update path: a later call appends, it never overwrites.
-  A request with no conclusion means a dead process and raises the new finding `DEI-276`. The table
+  A request with no conclusion means a dead process and raises the new finding `DEI-276`. The
+  runtime role's `INSERT` also lets a host application append a forged `CONCLUDED` row and so
+  suppress `DEI-276` for a request that never finished: that is a detection, not a prevention, and
+  it is stated rather than implied. The table
   is append-only against the application role and is **not** hash-chained, which the docs say in
   those words. The earlier plan to record this as an acknowledged compliance finding is dropped with
   it: **`DEI-265` no longer exists**, because an upsert keyed on the subject cannot hold two
