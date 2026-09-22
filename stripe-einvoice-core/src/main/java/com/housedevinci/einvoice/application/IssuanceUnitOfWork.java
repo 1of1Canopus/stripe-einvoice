@@ -218,17 +218,9 @@ public final class IssuanceUnitOfWork {
     }
     Optional<Issuance> existing =
         reader.findBySource(configuration.sellerId(), configuration.mode(), invoice.id());
-    if (existing.isPresent() && existing.get().state() == IssuanceState.ISSUED) {
-      return redelivery(event, existing.get(), invoice);
-    }
-    if (invoice.voided()) {
-      // Voided upstream before we ever issued: nothing is owed and nothing is withdrawn.
-      return fail(event, InboundState.DROPPED, ErrorCodes.UPSTREAM_VOID_NOT_ISSUED, null);
-    }
-    if (existing.isPresent() && existing.get().state() == IssuanceState.FAILED_VALIDATION) {
-      // Final by declaration: retrying a schematron refusal is noise, and the remedy is an
-      // operator voiding the number with the rule id this run recorded.
-      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.VALIDATION_REFUSED, null);
+    Optional<Outcome> decided = existingDisposition(event, existing, invoice);
+    if (decided.isPresent()) {
+      return decided.get();
     }
 
     LocalDate issueDate = issueDate(invoice);
@@ -327,6 +319,13 @@ public final class IssuanceUnitOfWork {
         // that. Re-read the winner's row rather than guess at its number.
         Optional<Issuance> winner =
             reader.findBySource(configuration.sellerId(), configuration.mode(), invoice.id());
+        // V-03: the loser's disposition follows the winner's state through the same classification
+        // the switch uses. COMPLETED is documented as "the issuance reached ISSUED", so a loser
+        // that concluded COMPLETED behind a burned or voided winner recorded a sale with no
+        // document on the success terminal.
+        if (winner.isPresent() && classify(winner.get().state()).disposed()) {
+          return terminalDisposition(event, winner.get());
+        }
         return fail(
             event,
             InboundState.COMPLETED,
@@ -383,13 +382,14 @@ public final class IssuanceUnitOfWork {
               : ErrorCodes.VALIDATION_REFUSED;
       // A refusal leaves no file and no ISSUED row. The number stays allocated with its state
       // recorded, and an operator voids it with this rule id - which is why the rule id is stored
-      // rather than left to be inferred.
-      writer.markFailed(
-          configuration.sellerId(),
-          configuration.mode(),
-          invoice.id(),
-          IssuanceState.FAILED_VALIDATION,
-          ruleId);
+      // rather than left to be inferred. A void that landed while this run was in flight makes the
+      // write illegal, and then the event concludes on that code instead of this one.
+      Optional<String> refused =
+          concludeIssuance(invoice.id(), IssuanceState.FAILED_VALIDATION, ruleId);
+      if (refused.isPresent()) {
+        return fail(
+            event, InboundState.FAILED_ISSUANCE, refused.get(), null, issuance.legalNumber());
+      }
       inbound.transition(
           event.eventId(), InboundState.FAILED_ISSUANCE, code, ruleId, clock.instant(), null);
       return new Outcome(
@@ -410,25 +410,21 @@ public final class IssuanceUnitOfWork {
         readBack(key, bytes);
       }
     } catch (EInvoiceException e) {
-      writer.markFailed(
-          configuration.sellerId(),
-          configuration.mode(),
-          invoice.id(),
-          IssuanceState.FAILED_ARCHIVE,
-          "");
+      // RC-01: this write is inside a catch, so it must never raise a second, different failure in
+      // place of the first - which is what it did when the row had been voided in the meantime.
+      Optional<String> refused = concludeIssuance(invoice.id(), IssuanceState.FAILED_ARCHIVE, "");
+      if (refused.isPresent()) {
+        return fail(event, InboundState.FAILED_ISSUANCE, refused.get(), null);
+      }
       Duration retryIn = ErrorCodes.ARCHIVE_UNAVAILABLE.equals(e.code()) ? backoffFor(event) : null;
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
     } catch (RuntimeException e) {
       // D2-04: a host-supplied ArchiveStore is the same class of risk as the renderer and the
       // validator - always somebody else's code in 0.1.0.
       log.error("einvoice: the archive store threw an unexpected exception", e);
-      writer.markFailed(
-          configuration.sellerId(),
-          configuration.mode(),
-          invoice.id(),
-          IssuanceState.FAILED_ARCHIVE,
-          "");
-      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.ARCHIVE_FAILED, null);
+      Optional<String> refused = concludeIssuance(invoice.id(), IssuanceState.FAILED_ARCHIVE, "");
+      return fail(
+          event, InboundState.FAILED_ISSUANCE, refused.orElse(ErrorCodes.ARCHIVE_FAILED), null);
     }
 
     // P4: the document exists. Wrapped like P3 (D2-01): a crash or a store failure here falls
@@ -438,6 +434,11 @@ public final class IssuanceUnitOfWork {
     try {
       issued = writer.markIssued(configuration.sellerId(), configuration.mode(), invoice.id());
     } catch (EInvoiceException e) {
+      // A void taken while this run was archiving makes ISSUED illegal. That is terminal, not
+      // retryable: there is no state left from which this document can be published.
+      if (voidedSince(invoice.id())) {
+        return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.NUMBER_VOIDED, null);
+      }
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), backoffFor(event));
     }
     inbound.transition(event.eventId(), InboundState.COMPLETED, "", clock.instant(), null);
@@ -518,12 +519,11 @@ public final class IssuanceUnitOfWork {
    */
   private Outcome renderRefused(
       InboundEvent event, SourceInvoice invoice, String code, Duration retryIn) {
-    writer.markFailed(
-        configuration.sellerId(),
-        configuration.mode(),
-        invoice.id(),
-        IssuanceState.FAILED_VALIDATION,
-        code);
+    Optional<String> refused =
+        concludeIssuance(invoice.id(), IssuanceState.FAILED_VALIDATION, code);
+    if (refused.isPresent()) {
+      return fail(event, InboundState.FAILED_ISSUANCE, refused.get(), null);
+    }
     // The cause goes where a schematron rule id goes on the same disposition, so an operator
     // looking at a failed number reads one row and learns which refusal it was.
     InboundEvent updated =
@@ -624,6 +624,129 @@ public final class IssuanceUnitOfWork {
    */
   private static boolean retryableAllocationFailure(String code) {
     return ErrorCodes.STORE_UNAVAILABLE.equals(code) || ErrorCodes.ALLOCATION_TIMEOUT.equals(code);
+  }
+
+  /**
+   * What an issuance row that already exists for this Stripe invoice means for this run.
+   *
+   * <p>RC-01 existed because six issuance states were tested by an {@code if}-chain that named two:
+   * a row in {@code VOID_UNUSED} fell through to the allocator, resumed onto the voided number, and
+   * every state write from there raised an illegal transition that escaped {@code process} and left
+   * the inbound row running for ever. This is a {@code switch} with <b>no {@code default}</b>, so a
+   * seventh state fails to compile rather than falling through to the allocator again.
+   */
+  private enum ExistingIssuance {
+    /** {@code ISSUED}: the document exists; a further event is a redelivery. */
+    REDELIVERY,
+    /** {@code NUMBERED}, {@code ARCHIVING}, {@code FAILED_ARCHIVE}: the run may carry on. */
+    RESUME,
+    /** {@code FAILED_VALIDATION}: the number is burned and awaits an operator void. */
+    BURNED,
+    /** {@code VOID_UNUSED}: the number is disposed; the Stripe invoice is terminal here. */
+    VOIDED;
+
+    /** True when the number will never carry a document, so no path may re-enter the pipeline. */
+    boolean disposed() {
+      return this == BURNED || this == VOIDED;
+    }
+  }
+
+  private static ExistingIssuance classify(IssuanceState state) {
+    return switch (state) {
+      case ISSUED -> ExistingIssuance.REDELIVERY;
+      case NUMBERED, ARCHIVING, FAILED_ARCHIVE -> ExistingIssuance.RESUME;
+      case FAILED_VALIDATION -> ExistingIssuance.BURNED;
+      case VOID_UNUSED -> ExistingIssuance.VOIDED;
+    };
+  }
+
+  /**
+   * The decision the classification produces, or empty when this run carries on to the allocator.
+   *
+   * <p>The upstream-void check keeps the place it had: a Stripe invoice voided before we ever
+   * issued is dropped, whether there is an open row or none. The one order this changes is a
+   * <em>voided</em> number, where the local disposition is the stronger fact - our number is
+   * terminal whatever Stripe later does with the invoice.
+   */
+  private Optional<Outcome> existingDisposition(
+      InboundEvent event, Optional<Issuance> existing, SourceInvoice invoice) {
+    if (existing.isEmpty()) {
+      return invoice.voided()
+          // Voided upstream before we ever issued: nothing is owed and nothing is withdrawn.
+          ? Optional.of(
+              fail(event, InboundState.DROPPED, ErrorCodes.UPSTREAM_VOID_NOT_ISSUED, null))
+          : Optional.empty();
+    }
+    Issuance row = existing.get();
+    return switch (classify(row.state())) {
+      case REDELIVERY -> Optional.of(redelivery(event, row, invoice));
+      case VOIDED -> Optional.of(terminalDisposition(event, row));
+      case BURNED ->
+          Optional.of(
+              invoice.voided()
+                  ? fail(event, InboundState.DROPPED, ErrorCodes.UPSTREAM_VOID_NOT_ISSUED, null)
+                  : terminalDisposition(event, row));
+      case RESUME ->
+          invoice.voided()
+              ? Optional.of(
+                  fail(event, InboundState.DROPPED, ErrorCodes.UPSTREAM_VOID_NOT_ISSUED, null))
+              : Optional.empty();
+    };
+  }
+
+  /**
+   * A number that will never carry a document: the event concludes here, with a stable code, a
+   * recorded state the due query does not re-pick, and no backoff.
+   *
+   * <p>{@code FAILED_VALIDATION} is final by declaration - retrying a schematron refusal is noise,
+   * and the remedy is an operator voiding the number with the rule id the run recorded. {@code
+   * VOID_UNUSED} is final for the Stripe invoice itself: one invoice maps to one number for all
+   * time, so there is no second number to allocate and nothing a later run could do.
+   */
+  private Outcome terminalDisposition(InboundEvent event, Issuance row) {
+    String code =
+        classify(row.state()) == ExistingIssuance.VOIDED
+            ? ErrorCodes.NUMBER_VOIDED
+            : ErrorCodes.VALIDATION_REFUSED;
+    return fail(event, InboundState.FAILED_ISSUANCE, code, null, row.legalNumber());
+  }
+
+  /**
+   * Writes a terminal issuance state, and never raises a second, different failure in place of the
+   * first (the review's hard constraint on RC-01).
+   *
+   * <p>Every {@code markFailed} in this class runs through here. A void taken concurrently with a
+   * run that is already past the preflight leaves the row in {@code VOID_UNUSED}, out of which no
+   * transition is legal; before this, the {@code markFailed} inside the archive {@code catch} threw
+   * from within the catch and replaced the original failure with {@code DEI-113}.
+   *
+   * @return empty when the state was written, or the stable code the caller must conclude the
+   *     inbound row with instead of its own
+   */
+  /**
+   * True when the row for that Stripe invoice is now {@code VOID_UNUSED} - a void landed mid-run.
+   */
+  private boolean voidedSince(String stripeInvoiceId) {
+    return reader
+        .findBySource(configuration.sellerId(), configuration.mode(), stripeInvoiceId)
+        .map(row -> classify(row.state()) == ExistingIssuance.VOIDED)
+        .orElse(false);
+  }
+
+  private Optional<String> concludeIssuance(
+      String stripeInvoiceId, IssuanceState target, String detail) {
+    try {
+      writer.markFailed(
+          configuration.sellerId(), configuration.mode(), stripeInvoiceId, target, detail);
+      return Optional.empty();
+    } catch (EInvoiceException e) {
+      log.warn(
+          "einvoice: an issuance could not be recorded as {} ({}); it was disposed while the run"
+              + " was in flight",
+          target,
+          e.code());
+      return Optional.of(voidedSince(stripeInvoiceId) ? ErrorCodes.NUMBER_VOIDED : e.code());
+    }
   }
 
   private Outcome park(InboundEvent event) {

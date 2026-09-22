@@ -93,7 +93,9 @@ public final class ReconciliationSweep {
       int archiveDrift,
       int orphanObjects,
       int stuckIssuances,
-      int unfinishedReprocesses) {
+      int unfinishedReprocesses,
+      int voidedNoDocument,
+      int burnedNoDocument) {
 
     public int total() {
       return missingIssuance
@@ -101,7 +103,9 @@ public final class ReconciliationSweep {
           + archiveDrift
           + orphanObjects
           + stuckIssuances
-          + unfinishedReprocesses;
+          + unfinishedReprocesses
+          + voidedNoDocument
+          + burnedNoDocument;
     }
   }
 
@@ -132,14 +136,33 @@ public final class ReconciliationSweep {
     Instant from = to.minus(settings.window());
     int checked = 0;
     int missing = 0;
+    int voided = 0;
+    int burned = 0;
     for (String invoiceId : source.finalisedInvoiceIds(from, to)) {
       checked++;
       Optional<Issuance> issuance =
           reader.findBySource(configuration.sellerId(), configuration.mode(), invoiceId);
       if (issuance.isEmpty() || issuance.get().state() != IssuanceState.ISSUED) {
-        missing++;
-        record(ErrorCodes.RECON_MISSING_ISSUANCE, invoiceId, now);
-        enqueue(invoiceId, now);
+        // RC-01: "no ISSUED row" is three conditions, not one. A number that was voided, or burned
+        // by a validation refusal, already has its reason recorded and chained; re-enqueueing it
+        // hands the pipeline an event it can only refuse again, every sweep, for ever. Those are
+        // reported under their own code and never enqueued. Only a sale with no recorded reason is
+        // re-enqueued, through the same idempotent path as before.
+        switch (issuance.map(i -> i.state()).orElse(null)) {
+          case IssuanceState.VOID_UNUSED -> {
+            voided++;
+            record(ErrorCodes.RECON_VOIDED_NO_DOCUMENT, invoiceId, now);
+          }
+          case IssuanceState.FAILED_VALIDATION -> {
+            burned++;
+            record(ErrorCodes.RECON_BURNED_NO_DOCUMENT, invoiceId, now);
+          }
+          case null, default -> {
+            missing++;
+            record(ErrorCodes.RECON_MISSING_ISSUANCE, invoiceId, now);
+            enqueue(invoiceId, now);
+          }
+        }
       }
     }
 
@@ -198,11 +221,21 @@ public final class ReconciliationSweep {
     }
 
     Result result =
-        new Result(now, checked, missing, archiveMissing, drift, orphans, stuck, unfinished);
+        new Result(
+            now,
+            checked,
+            missing,
+            archiveMissing,
+            drift,
+            orphans,
+            stuck,
+            unfinished,
+            voided,
+            burned);
     log.info(
         "einvoice: reconciliation checked {} finalised invoices and raised {} findings"
             + " (missing {}, archive missing {}, drift {}, orphan {}, stuck {},"
-            + " unfinished reprocess {})",
+            + " unfinished reprocess {}, voided {}, burned {})",
         checked,
         result.total(),
         missing,
@@ -210,7 +243,9 @@ public final class ReconciliationSweep {
         drift,
         orphans,
         stuck,
-        unfinished);
+        unfinished,
+        voided,
+        burned);
     return result;
   }
 

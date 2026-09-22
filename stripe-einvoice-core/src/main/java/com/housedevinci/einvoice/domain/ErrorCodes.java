@@ -76,6 +76,18 @@ public final class ErrorCodes {
    */
   public static final String UNIT_OF_WORK_POISONED = "DEI-121";
 
+  /**
+   * The only number this module allocated for that Stripe invoice has been voided, so the invoice
+   * is terminal here: no later event allocates a second number and no path re-enters the pipeline
+   * for it (RC-01).
+   *
+   * <p>A void is irreversible and unrecoverable inside this module. The remedy for a sale that must
+   * still be documented is upstream - void the Stripe invoice and raise a new one, which takes a
+   * new number through the ordinary path - and for a sale that is already paid that remedy needs a
+   * credit note, which this edition does not produce.
+   */
+  public static final String NUMBER_VOIDED = "DEI-122";
+
   // -------------------------------------------------------------------------------------------
   // DEI-2xx - the issuance unit of work: intake, routing, fetch, mapping, archive, validation.
   // -------------------------------------------------------------------------------------------
@@ -229,6 +241,19 @@ public final class ErrorCodes {
    * seeing where it stopped.
    */
   public static final String RECON_REPROCESS_UNFINISHED = "DEI-276";
+
+  /**
+   * A finalised Stripe invoice whose only number was voided: there will never be a document for
+   * that sale from this module. Reported rather than re-enqueued, because re-running it can only
+   * refuse again (RC-01).
+   */
+  public static final String RECON_VOIDED_NO_DOCUMENT = "DEI-278";
+
+  /**
+   * A finalised Stripe invoice whose number was burned by a validation refusal and not yet voided.
+   * The operator's next step is the void; re-enqueueing it only repeats the refusal.
+   */
+  public static final String RECON_BURNED_NO_DOCUMENT = "DEI-279";
 
   /** Reconciliation has not completed within two intervals. No result is never "healthy". */
   public static final String RECON_STALE = "DEI-274";
