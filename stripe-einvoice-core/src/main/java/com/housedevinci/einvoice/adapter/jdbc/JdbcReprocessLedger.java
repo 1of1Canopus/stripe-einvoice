@@ -48,7 +48,8 @@ public final class JdbcReprocessLedger implements ReprocessLedger {
   private static final String UNFINISHED =
       "SELECT "
           + COLUMNS
-          + " FROM einvoice_reprocess_request r WHERE r.kind = 'REQUESTED' AND r.at < ?"
+          + " FROM einvoice_reprocess_request r WHERE r.kind = 'REQUESTED' AND r.seller_id = ?"
+          + " AND r.mode = ? AND r.at < ?"
           + " AND NOT EXISTS (SELECT 1 FROM einvoice_reprocess_request c"
           + "   WHERE c.kind = 'CONCLUDED' AND c.request_seq = r.seq)"
           + " ORDER BY r.seq LIMIT ?";
@@ -131,12 +132,16 @@ public final class JdbcReprocessLedger implements ReprocessLedger {
   }
 
   @Override
-  public List<ReprocessRecord> unfinished(Instant olderThan, int limit) {
+  public List<ReprocessRecord> unfinished(
+      String sellerId, Mode mode, Instant olderThan, int limit) {
     return unitOfWork.inReadUnit(
         unit -> {
           try (PreparedStatement ps = unit.connection().prepareStatement(UNFINISHED)) {
-            ps.setObject(1, ts(Timestamps.toStorage(olderThan)));
-            ps.setInt(2, Math.max(1, limit));
+            int i = 1;
+            ps.setString(i++, sellerId);
+            ps.setString(i++, mode.wire());
+            ps.setObject(i++, ts(Timestamps.toStorage(olderThan)));
+            ps.setInt(i, Math.max(1, limit));
             return readAll(ps);
           }
         });

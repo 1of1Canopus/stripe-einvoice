@@ -156,10 +156,12 @@ public final class IssuanceReprocess {
     } catch (EInvoiceException e) {
       // R-04: a run that threw still concludes, with the code that escaped, so an unconcluded
       // request means one thing only - a process that died - which is what makes DEI-276 readable.
-      conclude(seq, event, configuration, Optional.empty(), e.code(), null);
+      concludeQuietly(seq, event, configuration, e.code());
       throw e;
     } catch (RuntimeException e) {
-      conclude(seq, event, configuration, Optional.empty(), ErrorCodes.INBOUND_UNREADABLE, null);
+      // An untyped failure is not the same failure as an unreadable inbound event (P2-02): the
+      // record must not state a cause that did not happen.
+      concludeQuietly(seq, event, configuration, ErrorCodes.REPROCESS_UNCLASSIFIED_FAILURE);
       throw e;
     }
     conclude(
@@ -194,6 +196,27 @@ public final class IssuanceReprocess {
             code,
             legalNumber),
         clock.instant());
+  }
+
+  /**
+   * Concludes an escaped exception's disposition without letting a ledger failure replace it: the
+   * original exception is what the caller must see, and a ledger that throws while recording it is
+   * logged, never propagated in its place.
+   */
+  private void concludeQuietly(
+      long requestSeq,
+      InboundEvent event,
+      IssuanceUnitOfWork.Configuration configuration,
+      String code) {
+    try {
+      conclude(requestSeq, event, configuration, Optional.empty(), code, null);
+    } catch (RuntimeException ledgerFailure) {
+      log.error(
+          "einvoice: failed to record the conclusion of reprocess request {} for event {}",
+          requestSeq,
+          event.eventId(),
+          ledgerFailure);
+    }
   }
 
   private static Result refused(

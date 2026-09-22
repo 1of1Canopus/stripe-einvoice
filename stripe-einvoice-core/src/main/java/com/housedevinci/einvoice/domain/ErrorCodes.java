@@ -200,6 +200,13 @@ public final class ErrorCodes {
    */
   public static final String REPROCESS_REQUESTED = "DEI-264";
 
+  /**
+   * A reprocess run failed with an error this module does not type: not an {@link
+   * EInvoiceException}, so none of the named DEI-2xx codes describes what happened. Concluded with
+   * this rather than with a code whose documented meaning is a different failure.
+   */
+  public static final String REPROCESS_UNCLASSIFIED_FAILURE = "DEI-277";
+
   /** A finalised Stripe invoice has no issuance row at all. The finding D-09 exists for. */
   public static final String RECON_MISSING_ISSUANCE = "DEI-270";
 

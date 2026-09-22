@@ -188,7 +188,11 @@ public final class ReconciliationSweep {
     // nobody watching the outcome, so it is a finding on the event id rather than a log line.
     int unfinished = 0;
     for (ReprocessLedger.ReprocessRecord open :
-        reprocessLedger.unfinished(now.minus(settings.alertAfter()), settings.pageSize())) {
+        reprocessLedger.unfinished(
+            configuration.sellerId(),
+            configuration.mode(),
+            now.minus(settings.alertAfter()),
+            settings.pageSize())) {
       unfinished++;
       record(ErrorCodes.RECON_REPROCESS_UNFINISHED, open.eventId(), now);
     }

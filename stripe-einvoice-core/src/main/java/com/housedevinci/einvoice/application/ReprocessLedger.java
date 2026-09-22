@@ -55,10 +55,11 @@ public interface ReprocessLedger {
   List<ReprocessRecord> forEvent(String eventId);
 
   /**
-   * Requests with no conclusion that are older than {@code olderThan}: a process that died between
-   * the re-open and the end of the run. The reconciliation sweep raises {@code DEI-276} for each.
+   * Requests with no conclusion that are older than {@code olderThan}, scoped to one seller and
+   * mode: a process that died between the re-open and the end of the run. The reconciliation sweep
+   * raises {@code DEI-276} for each.
    */
-  List<ReprocessRecord> unfinished(Instant olderThan, int limit);
+  List<ReprocessRecord> unfinished(String sellerId, Mode mode, Instant olderThan, int limit);
 
   /**
    * One recorded row.

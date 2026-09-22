@@ -117,6 +117,18 @@ All notable changes to this project are documented here. The format follows
   looked at nothing with the same message, on the same reasoning: a scanner exit that means "we
   could not scan" must never be indistinguishable from a clean tree.
 - **The release gate named the wrong scanner when a Grype report listed no artifacts.** The message now states Grype's own causes (jars not staged, wrong input path, empty SBOM) instead of OSV-Scanner's flag. Wording only; the refusal itself is unchanged (second security pass, INFO).
+- **The reconciliation sweep's reprocess check crossed the tenant boundary.**
+  `ReprocessLedger.unfinished` took no seller and no mode, so a sweep could raise `DEI-276` under
+  its own seller for another seller's - or another mode's - orphaned reprocess. It now takes both
+  and is filtered the same way as every other read the sweep makes (second security pass, P2-01).
+- **A reprocess run that failed with an untyped error was concluded as `DEI-200`**, the code for "no
+  inbound event is recorded", which is not what happened - the event was read; the run failed for
+  another reason. Concluded now with the new `DEI-277`, "the reprocess run failed with an error this
+  module does not type". A ledger failure while concluding no longer replaces the original exception
+  on its way to the caller (second security pass, P2-02).
+- **`einvoice_reprocess_request` was missing from `EInvoiceTables.ALL`**, so the persistence-mapping
+  guard, the database-view guard and the schema-owner startup warning all skipped the one table whose
+  only protection is a trigger. It is on the list now (second security pass, P2-03).
 
 ### Changed
 
