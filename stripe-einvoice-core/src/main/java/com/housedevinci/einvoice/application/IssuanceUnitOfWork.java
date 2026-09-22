@@ -384,11 +384,10 @@ public final class IssuanceUnitOfWork {
       // recorded, and an operator voids it with this rule id - which is why the rule id is stored
       // rather than left to be inferred. A void that landed while this run was in flight makes the
       // write illegal, and then the event concludes on that code instead of this one.
-      Optional<String> refused =
+      Optional<WriteRefusal> refused =
           concludeIssuance(invoice.id(), IssuanceState.FAILED_VALIDATION, ruleId);
       if (refused.isPresent()) {
-        return fail(
-            event, InboundState.FAILED_ISSUANCE, refused.get(), null, issuance.legalNumber());
+        return concludeOn(event, refused.get(), issuance.legalNumber());
       }
       inbound.transition(
           event.eventId(), InboundState.FAILED_ISSUANCE, code, ruleId, clock.instant(), null);
@@ -412,9 +411,10 @@ public final class IssuanceUnitOfWork {
     } catch (EInvoiceException e) {
       // RC-01: this write is inside a catch, so it must never raise a second, different failure in
       // place of the first - which is what it did when the row had been voided in the meantime.
-      Optional<String> refused = concludeIssuance(invoice.id(), IssuanceState.FAILED_ARCHIVE, "");
+      Optional<WriteRefusal> refused =
+          concludeIssuance(invoice.id(), IssuanceState.FAILED_ARCHIVE, "");
       if (refused.isPresent()) {
-        return fail(event, InboundState.FAILED_ISSUANCE, refused.get(), null);
+        return concludeOn(event, refused.get(), null);
       }
       Duration retryIn = ErrorCodes.ARCHIVE_UNAVAILABLE.equals(e.code()) ? backoffFor(event) : null;
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
@@ -422,9 +422,12 @@ public final class IssuanceUnitOfWork {
       // D2-04: a host-supplied ArchiveStore is the same class of risk as the renderer and the
       // validator - always somebody else's code in 0.1.0.
       log.error("einvoice: the archive store threw an unexpected exception", e);
-      Optional<String> refused = concludeIssuance(invoice.id(), IssuanceState.FAILED_ARCHIVE, "");
-      return fail(
-          event, InboundState.FAILED_ISSUANCE, refused.orElse(ErrorCodes.ARCHIVE_FAILED), null);
+      Optional<WriteRefusal> refused =
+          concludeIssuance(invoice.id(), IssuanceState.FAILED_ARCHIVE, "");
+      return refused
+          .map(refusal -> concludeOn(event, refusal, null))
+          .orElseGet(
+              () -> fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.ARCHIVE_FAILED, null));
     }
 
     // P4: the document exists. Wrapped like P3 (D2-01): a crash or a store failure here falls
@@ -519,10 +522,10 @@ public final class IssuanceUnitOfWork {
    */
   private Outcome renderRefused(
       InboundEvent event, SourceInvoice invoice, String code, Duration retryIn) {
-    Optional<String> refused =
+    Optional<WriteRefusal> refused =
         concludeIssuance(invoice.id(), IssuanceState.FAILED_VALIDATION, code);
     if (refused.isPresent()) {
-      return fail(event, InboundState.FAILED_ISSUANCE, refused.get(), null);
+      return concludeOn(event, refused.get(), null);
     }
     // The cause goes where a schematron rule id goes on the same disposition, so an operator
     // looking at a failed number reads one row and learns which refusal it was.
@@ -725,28 +728,93 @@ public final class IssuanceUnitOfWork {
    */
   /**
    * True when the row for that Stripe invoice is now {@code VOID_UNUSED} - a void landed mid-run.
+   *
+   * <p><b>Total</b> (D11-01). This is called from inside a failure handler, and the ordinary reason
+   * the state write failed is that the store has gone away - the same store this read goes to. An
+   * unguarded read there replaces the failure the handler already has with a new one and lets it
+   * escape {@code process}, which is the shape the constraint forbids. A handler that cannot read
+   * falls back to what it already knows: not voided, so the failure already in hand stands.
    */
   private boolean voidedSince(String stripeInvoiceId) {
-    return reader
-        .findBySource(configuration.sellerId(), configuration.mode(), stripeInvoiceId)
-        .map(row -> classify(row.state()) == ExistingIssuance.VOIDED)
-        .orElse(false);
+    try {
+      return reader
+          .findBySource(configuration.sellerId(), configuration.mode(), stripeInvoiceId)
+          .map(row -> classify(row.state()) == ExistingIssuance.VOIDED)
+          .orElse(false);
+    } catch (EInvoiceException e) {
+      log.warn(
+          "einvoice: could not re-read an issuance while handling a failure ({}); treating it as"
+              + " not voided and keeping the failure already recorded",
+          e.code());
+      return false;
+    } catch (RuntimeException e) {
+      log.warn("einvoice: an issuance read threw while handling a failure", e);
+      return false;
+    }
   }
 
-  private Optional<String> concludeIssuance(
+  /**
+   * Why a state write was refused, and whether running again can help (D11-02).
+   *
+   * @param code the stable code the caller concludes the inbound row with instead of its own
+   * @param retryable true for a store fault, which is a fact about the infrastructure and not a
+   *     verdict on the sale; false when the row itself moved under the run, which no retry undoes
+   */
+  private record WriteRefusal(String code, boolean retryable) {}
+
+  /**
+   * Writes a terminal issuance state, and never raises a second, different failure in place of the
+   * first (the review's hard constraint on RC-01).
+   *
+   * <p>Two reasons a write fails, and they must not conclude alike (D11-02). The row moved under
+   * the run - a void landed mid-flight - and no retry undoes that, so the event concludes
+   * terminally. Or the store itself failed, which says nothing about the sale: concluding that
+   * permanently would leave the event never due again with the issuance row still open, a silent
+   * terminal reached through a blip, which is the defect class RC-01 belongs to.
+   *
+   * @return empty when the state was written
+   */
+  private Optional<WriteRefusal> concludeIssuance(
       String stripeInvoiceId, IssuanceState target, String detail) {
     try {
       writer.markFailed(
           configuration.sellerId(), configuration.mode(), stripeInvoiceId, target, detail);
       return Optional.empty();
     } catch (EInvoiceException e) {
+      if (voidedSince(stripeInvoiceId)) {
+        log.warn(
+            "einvoice: an issuance could not be recorded as {} ({}); it was voided while the run"
+                + " was in flight",
+            target,
+            e.code());
+        return Optional.of(new WriteRefusal(ErrorCodes.NUMBER_VOIDED, false));
+      }
+      boolean transientFailure = transientStoreFailure(e.code());
       log.warn(
-          "einvoice: an issuance could not be recorded as {} ({}); it was disposed while the run"
-              + " was in flight",
+          "einvoice: an issuance could not be recorded as {} ({}); {}",
           target,
-          e.code());
-      return Optional.of(voidedSince(stripeInvoiceId) ? ErrorCodes.NUMBER_VOIDED : e.code());
+          e.code(),
+          transientFailure ? "another attempt is scheduled" : "the event concludes with that code");
+      return Optional.of(new WriteRefusal(e.code(), transientFailure));
     }
+  }
+
+  /**
+   * A failure of the store rather than a verdict about this sale. The same list the allocator's
+   * refusals use, named once (D11-02): a second list would drift from it.
+   */
+  private static boolean transientStoreFailure(String code) {
+    return retryableAllocationFailure(code);
+  }
+
+  /** Concludes the inbound row on a refused state write, with a next attempt only if one helps. */
+  private Outcome concludeOn(InboundEvent event, WriteRefusal refusal, LegalNumber number) {
+    return fail(
+        event,
+        InboundState.FAILED_ISSUANCE,
+        refusal.code(),
+        refusal.retryable() ? backoffFor(event) : null,
+        number);
   }
 
   private Outcome park(InboundEvent event) {

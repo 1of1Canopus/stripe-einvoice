@@ -19,8 +19,6 @@ import com.housedevinci.einvoice.domain.Issuance;
  *       forever, with its reason, chained.
  * </ul>
  *
- * *
- *
  * <p><b>A void is irreversible, and unrecoverable inside this module.</b> One Stripe invoice maps
  * to one number for all time, so this ends the module's involvement with that sale: every later
  * event for the invoice is recorded terminally with {@code DEI-122}, the reconciliation sweep
