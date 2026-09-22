@@ -8,6 +8,32 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **An operator can re-run one refused event after correcting the configuration that refused it.**
+  A mapping refusal stays final for the pipeline and for the sweeper; what is new is an explicit,
+  privileged `IssuanceReprocess` bean the host calls from its own admin action, for one event at a
+  time, only from `FAILED_MAPPING`, and never for an invoice that already carries a number. It
+  re-opens the row and then runs the ordinary pipeline - intake, routing, the authoritative
+  re-fetch, the preflight, the allocator - so it cannot skip a screen. An incomplete seller profile
+  is a defect of the application, not of the invoice, and every invoice refused while it was wrong
+  would otherwise have needed a new upstream event the seller cannot cause. There is **no HTTP
+  endpoint and no actuator operation** for it, by the same reasoning as the void.
+- **Every privileged re-open is recorded in a new append-only table, `einvoice_reprocess_request`.**
+  A `REQUESTED` row with the operator's actor and reason - separate columns, screened, refused
+  rather than shortened - written in the same transaction as the re-open, and a `CONCLUDED` row with
+  the outcome or the escaping error code. No update path: a later call appends, it never overwrites.
+  A request with no conclusion means a dead process and raises the new finding `DEI-276`. The table
+  is append-only against the application role and is **not** hash-chained, which the docs say in
+  those words. The earlier plan to record this as an acknowledged compliance finding is dropped with
+  it: **`DEI-265` no longer exists**, because an upsert keyed on the subject cannot hold two
+  operators' decisions.
+- **A legal number burned by a validation or render refusal is now explained inside the hash
+  chain.** `FAILED_VALIDATION` appends a chained event carrying the failing rule id or the refusal
+  code, in the same transaction as the state change, so the justification for a gap in the issued
+  sequence no longer lives only on a mutable row. The chain verifier's cross-check covers those
+  rows too, so a burned number invented out of band is reported `BROKEN`. `FAILED_ARCHIVE` is
+  deliberately not chained: it is retryable rather than a disposition, and its eventual fate -
+  issued or voided - is chained.
+
 - **An invoice this module cannot document is refused before it consumes a legal number.** The
   mapping that screens every buyer-controlled field now runs as a pre-allocation preflight on the
   renderer port (`DocumentRenderer.preflight`), over the render path's own body rather than a second
@@ -91,6 +117,18 @@ All notable changes to this project are documented here. The format follows
   looked at nothing with the same message, on the same reasoning: a scanner exit that means "we
   could not scan" must never be indistinguishable from a clean tree.
 - **The release gate named the wrong scanner when a Grype report listed no artifacts.** The message now states Grype's own causes (jars not staged, wrong input path, empty SBOM) instead of OSV-Scanner's flag. Wording only; the refusal itself is unchanged (second security pass, INFO).
+- **The reconciliation sweep's reprocess check crossed the tenant boundary.**
+  `ReprocessLedger.unfinished` took no seller and no mode, so a sweep could raise `DEI-276` under
+  its own seller for another seller's - or another mode's - orphaned reprocess. It now takes both
+  and is filtered the same way as every other read the sweep makes (second security pass, P2-01).
+- **A reprocess run that failed with an untyped error was concluded as `DEI-200`**, the code for "no
+  inbound event is recorded", which is not what happened - the event was read; the run failed for
+  another reason. Concluded now with the new `DEI-277`, "the reprocess run failed with an error this
+  module does not type". A ledger failure while concluding no longer replaces the original exception
+  on its way to the caller (second security pass, P2-02).
+- **`einvoice_reprocess_request` was missing from `EInvoiceTables.ALL`**, so the persistence-mapping
+  guard, the database-view guard and the schema-owner startup warning all skipped the one table whose
+  only protection is a trigger. It is on the list now (second security pass, P2-03).
 
 ### Changed
 

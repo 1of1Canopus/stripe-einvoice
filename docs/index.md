@@ -77,6 +77,47 @@ document, and both belong on the page.
 - The reason is mandatory, screened (NFC, no control characters beyond tab/newline/carriage return,
   no unpaired surrogates, not blank after collapsing, bounded at 500 characters) and length-bounded.
 - Nothing is deleted and the number is never re-allocated.
+- The void is chained. So is a number burned by a validation or render refusal
+  (`FAILED_VALIDATION`), which appends a chained event carrying the failing rule id or the refusal
+  code: the gap it leaves in the issued sequence is explained inside the tamper-evident record and
+  not only on the issuance row. `FAILED_ARCHIVE` is not chained - it is retryable, and its eventual
+  disposition is.
+
+## Reprocessing a refused event
+
+`IssuanceReprocess.reprocess(new ReprocessRequest(eventId, actor, reason))`.
+
+A mapping refusal is final for the pipeline: a finalised invoice's fields are frozen, so re-running
+cannot change the verdict, and the sweeper never re-picks one. An *incomplete seller profile* or a
+wrong rule pack is a different thing - a defect of your application, not of the invoice - and the
+invoices refused while it was wrong would otherwise need new upstream events your seller cannot
+cause. So the remedy is this explicit, privileged call, for one event at a time.
+
+- **Privileged, and with no HTTP endpoint and no actuator operation anywhere in this module**, for
+  the same reason the void has none. Call it from your own admin action, behind your own
+  authorization.
+- Eligible only from `FAILED_MAPPING`. Every other state, including a passed event and a second
+  call after a successful reprocess, is answered `REFUSED_NOT_ELIGIBLE` with the recorded state and
+  number, and nothing runs.
+- Refused outright if a legal number already exists for that invoice: this path never touches a
+  numbered invoice.
+- It re-opens the row and then runs the ordinary pipeline. It cannot skip the preflight, and a
+  re-run that refuses again costs nothing, exactly as the first run did.
+- Two simultaneous calls on one event produce one run and one number.
+- `actor` and `reason` are mandatory, screened and **refused rather than shortened** if they are
+  over their bound (64 and 500 characters). They are never concatenated: the record holds them as
+  two columns.
+- Every call writes to `einvoice_reprocess_request`: a `REQUESTED` row **in the same transaction as
+  the re-open itself**, so an event running again is always attributed, and a `CONCLUDED` row when
+  the run ends - with the outcome, or with the code of an exception that escaped. A `REQUESTED`
+  with no `CONCLUDED` therefore means one thing: the process died mid-run, and the reconciliation
+  sweep raises `DEI-276` for it.
+- **What that table is, exactly.** It is append-only against the application role: `SELECT` and
+  `INSERT` only, with triggers refusing `UPDATE`, `DELETE` and `TRUNCATE`, one conclusion per
+  request enforced by a partial unique index, and the two length bounds enforced by `CHECK`
+  constraints beside the in-code screen. It is **not hash-chained**: a role that owns the schema can
+  disable the trigger and alter a row, and no verifier in this module will report that. The
+  issuance chain is the tamper-evident record; this table is not.
 
 ## Properties
 
@@ -128,9 +169,9 @@ One Stripe event becomes one archived document, or none, and there is a record e
 | Route | API version against the pin, `livemode` against `einvoice.mode`, `account` against the configured seller | A terminal `REFUSED_*` state, answered 200, replayable |
 | Fetch | `GET /v1/invoices/{id}`, lines paginated to exhaustion, tax rates by id | `FAILED_FETCH`, retried by the sweeper up to the ceiling |
 | Map | Totals recomputed and compared, issue date derived in the seller's tax zone, closed-year cut-off | `FAILED_MAPPING` or `FAILED_TOTALS`, final: they need a human |
-| Preflight | The render path's own mapping, run with no number in existence: every screened field, every required term, every balance rule | `FAILED_MAPPING` with the mapper's code, and no issuance row, chain entry, archived object or advance of the counter. Final: a finalised invoice's fields are frozen, so the remedy is a corrected invoice and therefore a new event |
+| Preflight | The render path's own mapping, run with no number in existence: every screened field, every required term, every balance rule | `FAILED_MAPPING` with the mapper's code, and no issuance row, chain entry, archived object or advance of the counter. Final for the pipeline and the sweeper: a finalised invoice's fields are frozen, so the remedy is a corrected invoice and therefore a new event - or, when the defect was your configuration, the privileged `IssuanceReprocess` |
 | P1 claim | The legal number, in one transaction with the issuance row | Nothing: every data refusal already happened |
-| P2 render | The exact bytes, then validation of those exact bytes | `FAILED_VALIDATION` on the issuance row, with the rule id recorded for the operator's void |
+| P2 render | The exact bytes, then validation of those exact bytes | `FAILED_VALIDATION` on the issuance row and a chained event carrying the rule id, for the operator's void |
 | P3 write | `ARCHIVING` with the hash and key, then the write-once PUT | `FAILED_ARCHIVE`; an outage is retried, a content conflict is not |
 | P4 issue | `ISSUED` and the chained disposition, one transaction | Back to P3 on the retry, byte-identical, no second number |
 

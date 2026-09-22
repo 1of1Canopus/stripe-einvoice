@@ -69,9 +69,18 @@ public enum IssuanceState {
     return this == NUMBERED || this == ARCHIVING || this == FAILED_ARCHIVE;
   }
 
-  /** True when the number's disposition is settled and recorded in the chain. */
+  /**
+   * True when the number's disposition is settled and a chained event records it.
+   *
+   * <p>The three states that append to the chain: {@code ISSUED}, {@code VOID_UNUSED} and - since
+   * D7-03 - {@code FAILED_VALIDATION}, the state a number burned by a validation or render refusal
+   * lands on. {@code FAILED_ARCHIVE} is not one of them: it is retryable rather than settled, and
+   * its eventual fate is one of the three. The verifier's cross-check builds its own query from
+   * this predicate, so the domain and the verifier cannot drift apart about what "settled" means
+   * (D9-04).
+   */
   public boolean disposed() {
-    return this == ISSUED || this == VOID_UNUSED;
+    return this == ISSUED || this == VOID_UNUSED || this == FAILED_VALIDATION;
   }
 
   public IssuanceState transitionTo(IssuanceState next) {

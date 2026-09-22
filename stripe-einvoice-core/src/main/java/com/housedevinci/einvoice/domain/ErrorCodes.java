@@ -192,6 +192,21 @@ public final class ErrorCodes {
    */
   public static final String PREFLIGHT_NOT_SUPPORTED = "DEI-263";
 
+  /**
+   * An operator re-opened a terminal mapping refusal so the pipeline could run over it again, after
+   * the configuration that refused it was corrected (QUESTIONS 26). Recorded on the inbound row, so
+   * a row that is running again says why it is running again and never looks like an ordinary
+   * retry.
+   */
+  public static final String REPROCESS_REQUESTED = "DEI-264";
+
+  /**
+   * A reprocess run failed with an error this module does not type: not an {@link
+   * EInvoiceException}, so none of the named DEI-2xx codes describes what happened. Concluded with
+   * this rather than with a code whose documented meaning is a different failure.
+   */
+  public static final String REPROCESS_UNCLASSIFIED_FAILURE = "DEI-277";
+
   /** A finalised Stripe invoice has no issuance row at all. The finding D-09 exists for. */
   public static final String RECON_MISSING_ISSUANCE = "DEI-270";
 
@@ -206,6 +221,14 @@ public final class ErrorCodes {
 
   /** A number allocated and open past {@code einvoice.issuance.alert-after}. */
   public static final String RECON_STUCK_ISSUANCE = "DEI-273";
+
+  /**
+   * A privileged reprocess was recorded as requested and never concluded: the process died between
+   * the re-open and the end of the run (R-03). Every run that throws still writes its conclusion,
+   * so this means a dead process and nothing else - the event may have gone on without anybody
+   * seeing where it stopped.
+   */
+  public static final String RECON_REPROCESS_UNFINISHED = "DEI-276";
 
   /** Reconciliation has not completed within two intervals. No result is never "healthy". */
   public static final String RECON_STALE = "DEI-274";

@@ -61,7 +61,62 @@ class IssuanceWiringTest {
                     .hasSingleBean(IssuanceWorker.class)
                     .hasSingleBean(IssuanceSweeper.class)
                     .hasSingleBean(InboundEventStore.class)
-                    .hasSingleBean(IssuanceFindingService.class));
+                    .hasSingleBean(IssuanceFindingService.class)
+                    .hasSingleBean(com.housedevinci.einvoice.application.IssuanceReprocess.class));
+  }
+
+  /**
+   * The privileged reprocess is a bean the host calls, never a route this module opens (QUESTIONS
+   * 26, and the same posture as the void, N-04). A library cannot authenticate anyone, so an
+   * auto-configured reprocess endpoint would hand an unauthenticated caller the issuance pipeline.
+   */
+  @Test
+  void probe_the_reprocess_is_a_bean_and_never_an_endpoint_or_a_scheduled_job() {
+    runner()
+        .withPropertyValues("management.endpoints.web.exposure.include=*")
+        .run(
+            context -> {
+              assertThat(context)
+                  .hasSingleBean(com.housedevinci.einvoice.application.IssuanceReprocess.class);
+              assertThat(context.getBeanNamesForType(Object.class))
+                  .filteredOn(name -> name.toLowerCase(java.util.Locale.ROOT).contains("reprocess"))
+                  .containsExactlyInAnyOrder(
+                      "einvoiceIssuanceReprocess", "einvoiceReprocessLedger");
+              // No controller, no actuator operation and no scheduled method reaches it: the
+              // findings endpoint and the webhook controller are the module's only annotated
+              // operations, and neither mentions the reprocess in its name or its signature.
+              for (String name : context.getBeanDefinitionNames()) {
+                Class<?> type = context.getBean(name).getClass();
+                if (!type.getName().startsWith("com.housedevinci.einvoice")) {
+                  continue;
+                }
+                for (java.lang.reflect.Method method : type.getMethods()) {
+                  boolean exposed =
+                      java.util.Arrays.stream(method.getAnnotations())
+                          .map(a -> a.annotationType().getSimpleName())
+                          .anyMatch(
+                              simple ->
+                                  simple.endsWith("Mapping")
+                                      || simple.endsWith("Operation")
+                                      || simple.equals("Scheduled"));
+                  if (!exposed) {
+                    continue;
+                  }
+                  assertThat(method.getName().toLowerCase(java.util.Locale.ROOT))
+                      .as("an exposed operation named after the reprocess on " + name)
+                      .doesNotContain("reprocess");
+                  java.util.List<Class<?>> signature =
+                      new java.util.ArrayList<>(java.util.List.of(method.getParameterTypes()));
+                  signature.add(method.getReturnType());
+                  assertThat(signature)
+                      .as("an exposed operation that takes or returns the reprocess on " + name)
+                      .doesNotContain(
+                          com.housedevinci.einvoice.application.IssuanceReprocess.class,
+                          com.housedevinci.einvoice.application.ReprocessRequest.class,
+                          com.housedevinci.einvoice.application.IssuanceReprocess.Result.class);
+                }
+              }
+            });
   }
 
   @Test

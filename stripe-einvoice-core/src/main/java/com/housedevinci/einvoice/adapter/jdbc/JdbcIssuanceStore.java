@@ -686,7 +686,17 @@ public final class JdbcIssuanceStore
             ps.setString(i, stripeInvoiceId);
             ps.executeUpdate();
           }
-          return findBySource(c, sellerId, mode, stripeInvoiceId, false).orElseThrow();
+          Issuance failed = findBySource(c, sellerId, mode, stripeInvoiceId, false).orElseThrow();
+          if (state == IssuanceState.FAILED_VALIDATION) {
+            // D7-03: a number burned by a validation or a render refusal leaves a gap in the
+            // issued sequence, and the numbering rules require a gap to be explainable. Without
+            // this the only explanation lived on a row that can legitimately change; now it is in
+            // the chain, with the failing rule id or the refusal code on it. FAILED_ARCHIVE is
+            // deliberately not chained: it is retryable, not a disposition, and its eventual fate
+            // is ISSUED or VOID_UNUSED, both of which are.
+            appendEvent(unit, IssuanceEvent.failed(failed, state, ruleId, clock.instant()));
+          }
+          return failed;
         });
   }
 
@@ -940,7 +950,9 @@ public final class JdbcIssuanceStore
                   c.prepareStatement(
                       "SELECT seller_id, mode, series, fiscal_year, stripe_invoice_id,"
                           + " legal_number, state FROM einvoice_issuance"
-                          + " WHERE state IN ('ISSUED', 'VOID_UNUSED') ORDER BY id");
+                          + " WHERE state IN ("
+                          + disposedStates()
+                          + ") ORDER BY id");
               ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
               disposed.add(
@@ -973,6 +985,18 @@ public final class JdbcIssuanceStore
                 : Optional.<Anchor>empty();
           }
         });
+  }
+
+  /**
+   * The settled states, from the enum itself (D9-04). A literal list here and a predicate in the
+   * domain were two definitions of one thing, and the one with the SQL in it is the one that goes
+   * stale. Built from {@code IssuanceState.values()}, so the next chained state is added once.
+   */
+  private static String disposedStates() {
+    return java.util.Arrays.stream(IssuanceState.values())
+        .filter(IssuanceState::disposed)
+        .map(state -> "'" + state.name() + "'")
+        .collect(java.util.stream.Collectors.joining(", "));
   }
 
   private static Issuance readIssuance(ResultSet rs) throws SQLException {

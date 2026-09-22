@@ -373,6 +373,10 @@ public final class IssuanceUnitOfWork {
       return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.VALIDATOR_FAILED, null);
     }
     if (!report.archivable()) {
+      // D9-02: the rule id is a host port's own string. It is normalised once, here at the
+      // boundary, and the normalised value is what the issuance row, the inbound event and the
+      // chained disposition all carry - so no later statement can refuse it and strand a number.
+      String ruleId = com.housedevinci.einvoice.domain.RuleIds.normalise(report.ruleId());
       String code =
           report.verdict() == DocumentValidator.Verdict.NOT_EVALUATED
               ? ErrorCodes.VALIDATION_NOT_EVALUATED
@@ -385,14 +389,9 @@ public final class IssuanceUnitOfWork {
           configuration.mode(),
           invoice.id(),
           IssuanceState.FAILED_VALIDATION,
-          report.ruleId());
+          ruleId);
       inbound.transition(
-          event.eventId(),
-          InboundState.FAILED_ISSUANCE,
-          code,
-          report.ruleId(),
-          clock.instant(),
-          null);
+          event.eventId(), InboundState.FAILED_ISSUANCE, code, ruleId, clock.instant(), null);
       return new Outcome(
           event.eventId(), InboundState.FAILED_ISSUANCE, code, issuance.legalNumber().value());
     }

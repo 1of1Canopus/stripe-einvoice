@@ -207,11 +207,38 @@ module is where that is set out.
   failing rule id. A renderer or writer fault used to be the exception, leaving the number in
   `NUMBERED` with nothing recorded until the reconciliation sweep's stuck check reported a count
   hours later; it now records the same disposition a validation refusal does, with the render code
-  where the rule id goes. No chained event is appended at a failure disposition - the chain carries
-  issuance and void - so the series report and the event row are where a failed number is read.
-  Whether a `NUMBER_ABANDONED` chain entry is required for the numbering-gap justification is an
-  open question, tracked and dated on the module's internal open-questions log, to be decided
-  before the 0.1.0 tag.
+  where the rule id goes. **A burned number is also chained**: the `FAILED_VALIDATION` disposition
+  appends a chained event, in the same transaction as the state change, carrying the failing
+  validation rule id or the render refusal's code - so the justification for a gap in the issued
+  sequence lives in the tamper-evident record and not only on a row that can legitimately change,
+  and the verifier's cross-check reports a burned row written out of band as `BROKEN`.
+  `FAILED_ARCHIVE` is not chained: it is not a settled disposition, and its eventual fate - issued
+  or voided unused - is. "Retryable" is narrower than it sounds, and the narrow reading is the
+  right one: only an `ARCHIVE_UNAVAILABLE` outage schedules another attempt. A write-once content
+  conflict, a read-back mismatch and a host store's own unexpected exception record the same state
+  with no next attempt, so they wait for an operator exactly as a validation refusal does.
+
+  **A mapping refusal can be re-run only by an explicit, privileged operator call.** The pipeline
+  and the sweeper still treat it as final. The module ships a service the host calls from its own
+  admin action, behind its own authorization - no HTTP endpoint and no actuator operation, for the
+  same reason the void has none - which accepts one event at a time, refuses any state other than a
+  mapping refusal, refuses outright if a legal number already exists for that invoice, re-opens the
+  row and then runs the ordinary pipeline, preflight included. Two simultaneous calls on one event
+  produce one run and one number.
+
+  **Who asked, when and why is recorded in `einvoice_reprocess_request`**: a `REQUESTED` row written
+  in the same transaction as the re-open - so no failure leaves an event running again with nobody
+  recorded as having asked - and a `CONCLUDED` row when the run ends, including when it ended by
+  throwing. The actor and the reason are separate screened columns, refused rather than shortened
+  when they exceed their bounds, and one request can have at most one conclusion. A request with no
+  conclusion means the process died, and the reconciliation sweep raises `DEI-276`.
+
+  **That table is append-only against the application role, and it is not hash-chained.** The
+  runtime role holds `SELECT` and `INSERT`, triggers refuse `UPDATE`, `DELETE` and `TRUNCATE`, and
+  `CHECK` constraints repeat the length bounds. A role that owns the schema can disable those
+  triggers and alter a row, and nothing in this module will report that afterwards. The issuance
+  chain is the tamper-evident record of what was issued; this table is a record of who asked, with
+  the protection stated rather than implied.
 
   **A third-party renderer that does not implement the preflight keeps the old cost.** The port's
   default answers `NOT_SUPPORTED` rather than refusing, so an implementation written before the

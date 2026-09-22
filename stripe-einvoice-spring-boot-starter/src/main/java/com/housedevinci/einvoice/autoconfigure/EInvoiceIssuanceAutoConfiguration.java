@@ -4,6 +4,7 @@ import com.housedevinci.einvoice.adapter.file.FilesystemArchiveStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcFindingStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcInboundEventStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore;
+import com.housedevinci.einvoice.adapter.jdbc.JdbcReprocessLedger;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcUnitOfWork;
 import com.housedevinci.einvoice.application.ArchiveStore;
 import com.housedevinci.einvoice.application.DocumentRenderer;
@@ -11,9 +12,11 @@ import com.housedevinci.einvoice.application.DocumentValidator;
 import com.housedevinci.einvoice.application.FindingStore;
 import com.housedevinci.einvoice.application.InboundEventStore;
 import com.housedevinci.einvoice.application.IssuanceChainVerifier;
+import com.housedevinci.einvoice.application.IssuanceReprocess;
 import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
 import com.housedevinci.einvoice.application.PreflightSupport;
 import com.housedevinci.einvoice.application.ReconciliationSweep;
+import com.housedevinci.einvoice.application.ReprocessLedger;
 import com.housedevinci.einvoice.application.StripeInvoiceSource;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
@@ -185,6 +188,36 @@ public class EInvoiceIssuanceAutoConfiguration {
         properties.getArchive().isAllowNonAtomicStore());
   }
 
+  /**
+   * The privileged reprocess of one refused event (QUESTIONS 26). A bean the host calls from its
+   * own admin action, behind its own authorization - <b>no HTTP endpoint and no actuator
+   * operation</b>, for the same reason the void has none (N-04): a library cannot authenticate
+   * anyone, and an auto-configured reprocess endpoint would hand an unauthenticated caller the
+   * issuance pipeline. Nothing in this module calls it, and no schedule reaches it.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  @ConditionalOnBean(IssuanceUnitOfWork.class)
+  public IssuanceReprocess einvoiceIssuanceReprocess(
+      IssuanceUnitOfWork unitOfWork,
+      InboundEventStore inbound,
+      JdbcIssuanceStore store,
+      ReprocessLedger ledger,
+      Clock clock) {
+    return new IssuanceReprocess(unitOfWork, inbound, store, ledger, clock);
+  }
+
+  /**
+   * The durable record of every privileged re-open (D9-03). Always wired, even where the intake is
+   * not: the table is written only by the reprocess, and a host that has one without the other
+   * would have the action with no record of it.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public ReprocessLedger einvoiceReprocessLedger(JdbcUnitOfWork unitOfWork) {
+    return new JdbcReprocessLedger(unitOfWork);
+  }
+
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnBean(IssuanceUnitOfWork.class)
@@ -205,6 +238,7 @@ public class EInvoiceIssuanceAutoConfiguration {
       InboundEventStore inbound,
       ArchiveStore archive,
       FindingStore findings,
+      ReprocessLedger reprocessLedger,
       Clock clock,
       EInvoiceProperties properties) {
     return new ReconciliationSweep(
@@ -213,6 +247,7 @@ public class EInvoiceIssuanceAutoConfiguration {
         inbound,
         archive,
         findings,
+        reprocessLedger,
         clock,
         new ReconciliationSweep.Settings(
             properties.getReconcile().getWindow(),

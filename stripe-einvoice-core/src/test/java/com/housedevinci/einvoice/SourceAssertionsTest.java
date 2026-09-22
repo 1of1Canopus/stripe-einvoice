@@ -52,9 +52,10 @@ class SourceAssertionsTest {
             .toLowerCase(Locale.ROOT);
     assertThat(ddl).doesNotContain("nextval");
     assertThat(ddl).doesNotContain("create sequence");
-    // bigserial appears on exactly two columns, both surrogate row ids, and the schema says so
-    // where each is used. The pin is what stops a third one appearing on a numbering column.
-    assertThat(ddl.split("bigserial", -1).length - 1).isEqualTo(2);
+    // bigserial appears on exactly three columns - the issuance row id, the chained event's
+    // sequence and the reprocess record's - all surrogate row ids, and the schema says so where
+    // each is used. The pin is what stops a fourth one appearing on a numbering column.
+    assertThat(ddl.split("bigserial", -1).length - 1).isEqualTo(3);
   }
 
   @Test

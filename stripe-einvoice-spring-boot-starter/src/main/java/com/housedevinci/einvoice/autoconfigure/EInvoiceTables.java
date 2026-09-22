@@ -21,8 +21,23 @@ public final class EInvoiceTables {
   /** The compliance findings list. Operator-facing, purgeable, and guarded like the rest. */
   public static final String FINDING = "einvoice_finding";
 
+  /**
+   * The durable record of every privileged reprocess re-open. Its only protection is the schema's
+   * append-only trigger (R-02); the runtime role holds {@code SELECT, INSERT} and nothing else, so
+   * a host entity mapped over it can still append a row - guarded here for the same reason as every
+   * other table on this list.
+   */
+  public static final String REPROCESS_REQUEST = "einvoice_reprocess_request";
+
   public static final List<String> ALL =
-      List.of(SERIES, ISSUANCE, ISSUANCE_EVENT, ISSUANCE_ANCHOR, INBOUND_EVENT, FINDING);
+      List.of(
+          SERIES,
+          ISSUANCE,
+          ISSUANCE_EVENT,
+          ISSUANCE_ANCHOR,
+          INBOUND_EVENT,
+          FINDING,
+          REPROCESS_REQUEST);
 
   private EInvoiceTables() {}
 

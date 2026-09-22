@@ -233,8 +233,39 @@ public final class IssuanceTestHarness {
   private final JdbcFindingStore findings =
       new JdbcFindingStore(JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()));
 
+  private final JdbcReprocessLedger reprocessLedger =
+      new JdbcReprocessLedger(JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()));
+
+  /** The durable record of every privileged re-open, over this harness's own database. */
+  public JdbcReprocessLedger reprocessLedger() {
+    return reprocessLedger;
+  }
+
+  /** Rows in the reprocess record for one event, oldest first. */
+  public java.util.List<com.housedevinci.einvoice.application.ReprocessLedger.ReprocessRecord>
+      reprocessRecords(String eventId) {
+    return reprocessLedger.forEvent(eventId);
+  }
+
   private final com.housedevinci.einvoice.application.PreflightSupport preflightSupport =
       new com.housedevinci.einvoice.application.PreflightSupport(findings, clock);
+
+  /** The privileged reprocess, over this harness's own stores and the default renderer. */
+  public com.housedevinci.einvoice.application.IssuanceReprocess reprocess() {
+    return reprocessFor(unitOfWork());
+  }
+
+  /** The privileged reprocess over a unit of work whose renderer the test controls. */
+  public com.housedevinci.einvoice.application.IssuanceReprocess reprocessWith(
+      com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
+    return reprocessFor(unitOfWorkWithRenderer(substituteRenderer));
+  }
+
+  private com.housedevinci.einvoice.application.IssuanceReprocess reprocessFor(
+      IssuanceUnitOfWork unitOfWork) {
+    return new com.housedevinci.einvoice.application.IssuanceReprocess(
+        unitOfWork, inbound, store, reprocessLedger, clock);
+  }
 
   /** The preflight-support recorder this harness's units of work share. */
   public com.housedevinci.einvoice.application.PreflightSupport preflightSupport() {
@@ -249,7 +280,15 @@ public final class IssuanceTestHarness {
   public com.housedevinci.einvoice.application.ReconciliationSweep sweep(
       com.housedevinci.einvoice.application.ReconciliationSweep.Settings settings) {
     return new com.housedevinci.einvoice.application.ReconciliationSweep(
-        source, store, inbound, archive, findings, clock, settings, unitOfWork().configuration());
+        source,
+        store,
+        inbound,
+        archive,
+        findings,
+        reprocessLedger,
+        clock,
+        settings,
+        unitOfWork().configuration());
   }
 
   /** Rows in the findings table for one subject, acknowledged or not. */
@@ -391,6 +430,11 @@ public final class IssuanceTestHarness {
 
   public long anchorRowCount() {
     return PostgresSupport.scalar("SELECT row_count FROM einvoice_issuance_anchor WHERE id = 1");
+  }
+
+  /** The harness clock's current instant, for a test that writes a record itself. */
+  public Instant now() {
+    return clock.instant();
   }
 
   public void moveClockForward(Duration by) {

@@ -132,6 +132,47 @@ CREATE INDEX IF NOT EXISTS einvoice_finding_open
   ON einvoice_finding (seller_id, mode, acknowledged_at, first_seen);
 
 -- ---------------------------------------------------------------------------
+-- The privileged reprocess record (D9-03).
+--
+-- One action in this module can turn a recorded refusal into a legal document: an operator
+-- re-opening a mapping refusal. Who asked, why and when therefore cannot live in einvoice_finding,
+-- which is upserted on (seller, mode, code, subject) and overwritten by the next call.
+--
+-- Two rows per call and no UPDATE path at all: REQUESTED is written in the same transaction as the
+-- re-open - so a re-opened event is always attributed - and CONCLUDED is appended when the run
+-- ends, with the outcome or the error code. A REQUESTED with no CONCLUDED therefore means one
+-- thing only: the process died mid-run. The reconciliation sweep raises DEI-276 for it.
+--
+-- Append-only against the application role, and that is the exact claim: SELECT and INSERT only,
+-- with triggers refusing UPDATE, DELETE and TRUNCATE. It is NOT hash-chained, so a role that owns
+-- the schema can disable the trigger and rewrite a row and no verifier will report it. The
+-- issuance chain is the tamper-evident record; this table is not.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS einvoice_reprocess_request (
+  seq           bigserial PRIMARY KEY,
+  kind          varchar(16)  NOT NULL CHECK (kind IN ('REQUESTED', 'CONCLUDED')),
+  request_seq   bigint,                            -- CONCLUDED -> its REQUESTED row
+  event_id      varchar(255) NOT NULL,
+  seller_id     varchar(64)  NOT NULL,
+  mode          varchar(4)   NOT NULL,
+  actor         varchar(64)  NOT NULL DEFAULT '',  -- its own column: never concatenated (D9-05)
+  reason        varchar(500) NOT NULL DEFAULT '',  -- screened free text, refused never truncated
+  at            timestamptz  NOT NULL,
+  outcome_state varchar(32)  NOT NULL DEFAULT '',  -- CONCLUDED only
+  outcome_code  varchar(16)  NOT NULL DEFAULT '',  -- CONCLUDED only: the DEI code, never a message
+  legal_number  varchar(64)  NOT NULL DEFAULT '',
+  CONSTRAINT einvoice_reprocess_bounds
+    CHECK (char_length(actor) <= 64 AND char_length(reason) <= 500),
+  CONSTRAINT einvoice_reprocess_kind_shape
+    CHECK ((kind = 'REQUESTED' AND request_seq IS NULL) OR (kind = 'CONCLUDED' AND request_seq IS NOT NULL))
+);
+-- One conclusion per request: a second CONCLUDED for the same call is a rewrite with extra steps.
+CREATE UNIQUE INDEX IF NOT EXISTS einvoice_reprocess_one_conclusion
+  ON einvoice_reprocess_request (request_seq) WHERE kind = 'CONCLUDED';
+CREATE INDEX IF NOT EXISTS einvoice_reprocess_by_event
+  ON einvoice_reprocess_request (event_id, seq);
+
+-- ---------------------------------------------------------------------------
 -- The chained issuance log: one row per disposition, append-only, hash-chained.
 --
 -- Separate from einvoice_issuance on purpose. A chain over a row with a mutable state column
@@ -290,7 +331,9 @@ BEGIN
       ('einvoice_issuance_event_no_truncate',   'einvoice_issuance_event',  'BEFORE TRUNCATE',         'STATEMENT', 'einvoice_append_only'),
       ('einvoice_issuance_anchor_monotonic',    'einvoice_issuance_anchor', 'BEFORE UPDATE',           'ROW',       'einvoice_anchor_monotonic'),
       ('einvoice_issuance_anchor_no_delete',    'einvoice_issuance_anchor', 'BEFORE DELETE',           'ROW',       'einvoice_append_only'),
-      ('einvoice_issuance_anchor_no_truncate',  'einvoice_issuance_anchor', 'BEFORE TRUNCATE',         'STATEMENT', 'einvoice_append_only')
+      ('einvoice_issuance_anchor_no_truncate',  'einvoice_issuance_anchor', 'BEFORE TRUNCATE',         'STATEMENT', 'einvoice_append_only'),
+      ('einvoice_reprocess_append_only',        'einvoice_reprocess_request', 'BEFORE UPDATE OR DELETE', 'ROW',     'einvoice_append_only'),
+      ('einvoice_reprocess_no_truncate',        'einvoice_reprocess_request', 'BEFORE TRUNCATE',       'STATEMENT', 'einvoice_append_only')
     ) AS t(name, tbl, timing, level, fn)
   LOOP
     IF NOT EXISTS (
