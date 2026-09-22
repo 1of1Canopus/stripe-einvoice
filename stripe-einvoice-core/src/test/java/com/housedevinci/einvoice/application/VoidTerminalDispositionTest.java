@@ -57,6 +57,7 @@ class VoidTerminalDispositionTest {
     Burned burned = burnedAndVoided("in_void_later");
     IssuanceTestHarness harness = burned.harness();
     long counterBefore = harness.seriesCounter();
+    int rendersBefore = harness.renderer().renders();
 
     String paid = harness.receive("invoice.paid", "in_void_later");
     IssuanceUnitOfWork.Outcome outcome = harness.unitOfWork().process(paid);
@@ -65,6 +66,11 @@ class VoidTerminalDispositionTest {
     assertThat(outcome.code()).isEqualTo(ErrorCodes.NUMBER_VOIDED);
     assertThat(harness.seriesCounter()).isEqualTo(counterBefore);
     assertThat(harness.numberedRows()).isEqualTo(1);
+    // The loop's cost, not only its outcome: a voided invoice is decided before the allocator, so
+    // nothing is rendered again on every sweep for ever.
+    assertThat(harness.renderer().renders())
+        .as("a voided invoice must not re-enter the render")
+        .isEqualTo(rendersBefore);
     assertThat(harness.issuance("in_void_later").orElseThrow().state())
         .isEqualTo(IssuanceState.VOID_UNUSED);
   }
