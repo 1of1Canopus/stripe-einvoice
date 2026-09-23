@@ -152,3 +152,64 @@ stated in all three. Roles-only: no personal or agent name appears in the change
 
 0.1.0 is tag-able on this axis once D11-01 to D11-04 are applied, subject to the whole-module
 release-candidate pass that was already ruled for before the first tag.
+
+---
+
+## Pass 2 — 2026-09-23 (HEAD `4877ac3`)
+
+**Verdict: MERGE.** All four pass-1 findings are closed, each confirmed by its probe flipping green
+and by a mutation that turns it red again. No new finding. Nothing outstanding at any severity.
+
+| | |
+|---|---|
+| `mvn verify` | exit 0 |
+| Tests | 558 run, 0 failures, 0 errors, 0 skipped |
+| Probe tests in `CipherProbe*` classes | 149, all green |
+| Release-pipeline shell probes | 74 fixed, 0 still weak |
+| Reviewer probes | 6, all green (5 from pass 1 plus one new-surface probe) |
+
+### Closures
+
+| Id | Closed by | Mutation re-run by the reviewer |
+|---|---|---|
+| D11-01 | `voidedSince` wrapped, `EInvoiceException` and `RuntimeException` both caught, WARN, falls back to "not voided"; both call sites go through it | guard removed → `probe_a_failing_read_inside_the_archive_catch_does_not_escape_process` RED (`DEI-102` escapes `process`) |
+| D11-02 | `WriteRefusal(code, retryable)`: a void landing mid-run stays terminal on `NUMBER_VOIDED`, a store fault keeps `backoffFor(event)`; the transient list is `retryableAllocationFailure`, named once | `transientStoreFailure` forced false → `probe_a_transient_store_failure_while_burning_is_not_made_permanent` RED at "must schedule another attempt, not conclude with none" |
+| D11-03 | stray javadoc line removed from `NumberVoider` | n/a |
+| D11-04 | `the_findings_endpoint_exposes_no_write_operation` reflects over the endpoint's declared methods for `@WriteOperation` and `@DeleteOperation` | n/a |
+
+### Ruling on the probe change — due-ness at t0
+
+**Accepted, and the stricter form is the correct one.** My pass-1 probe asserted the event was in
+`due()` immediately. That is not the property; it is an accident of how I wrote the assertion. This
+module schedules every recoverable failure through `backoffFor`, which is exponential with a cap,
+and t0 due-ness could only be obtained by making the backoff zero — which would turn a store outage
+into a hot loop and delete the back-pressure D2-01 exists for. I will not require a backoff-policy
+change to satisfy an assertion.
+
+The replacement asserts the property directly and more tightly: a next attempt must exist at all —
+a null there *is* the silent terminal D11-02 was about — and the row must return to the due set once
+that attempt has come. The mutation confirms it: with the transient classification forced false the
+probe fails on the first of those two assertions, not the second, so the null-next-attempt condition
+is what the probe is actually pinned to.
+
+### The surface the D11-01 fix opens, probed
+
+Making `voidedSince` total means that when the re-read fails it answers "not voided" — so a void
+that really did land mid-run is misclassified as a store fault and scheduled for another attempt.
+That is the safe direction only if the retry converges. It does:
+`probe_a_void_missed_by_a_failed_reread_converges_on_the_void` (new this pass, green) drives a real
+void, blinds the re-read, asserts nothing escapes and a next attempt is scheduled, then runs the
+retry with the store back and asserts the event concludes on `NUMBER_VOIDED`, is never due again,
+and the issuance row is still `VOID_UNUSED`. The fallback loses no void; it costs one retry.
+
+The precedence inside `concludeIssuance` is the right way round: `voidedSince` is consulted before
+the transient classification, so a readable void is terminal immediately and only an unreadable one
+pays the retry.
+
+### Residual, unchanged and still deferred
+
+A store that is down for good now retries the burn path with an exponentially capped backoff and no
+attempt ceiling. That is not a regression — before this pull request the same fault threw out of
+`process` and left the row `MAPPED`, which the due query re-picked just as indefinitely — and it is
+the retry ceiling deferred to its own pull request (QUESTIONS 29). Recorded here so the ceiling's
+design covers this path explicitly.
