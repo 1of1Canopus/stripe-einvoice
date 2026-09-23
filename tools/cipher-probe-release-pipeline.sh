@@ -1024,6 +1024,59 @@ esac'
 }
 
 # ---------------------------------------------------------------------------
+# Release run 35899901341 - the preflight job runs two scripts out of the repository
+# (tools/check-vulnerability-report.py, tools/install-scanner.sh) and has no checkout step,
+# so the runner's working directory is empty and both exit 127. The whole release refused
+# for a reason that had nothing to do with a gate.
+#
+# This probe does not grep for "checkout": it EXECUTES the scanner step's own body twice,
+# once in an empty directory (no checkout) and once in a directory holding a real checkout
+# of tools/ taken from git, and only then asks the workflow whether the job it belongs to
+# gets one. Weak while the job has no checkout, or while the two runs are indistinguishable
+# (a step that passes with no working tree proves nothing about the scanners).
+# ---------------------------------------------------------------------------
+probe_preflight_runs_repository_tools_without_a_checkout() {
+  local body absent present rc_absent rc_present pre
+  body="$(step_body "$WF" 'Both vulnerability scanners must be runnable, and the severity gate sound')"
+  [ -n "$body" ] || return 0                            # step vanished: cannot prove it, weak
+
+  # 1. No checkout: the runner's working directory is empty. This must fail.
+  absent="$(mktemp -d)"
+  mkdir -p "$absent/t"
+  ( cd "$absent" && RUNNER_TEMP="$absent/t" bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1
+  rc_absent=$?
+  rm -rf "$absent"
+  if [ "$rc_absent" -eq 0 ]; then
+    PROBE_SKIP_REASON="the scanner step passed with no working tree at all, so it no longer proves the repository's own scanners run"
+    return 0
+  fi
+
+  # 2. With a checkout of the same commit's tools/, the network-free half of the step body
+  #    must succeed: the severity gate's self-test, and the installer being found and able
+  #    to answer. This is the baseline the missing checkout destroys - executed, not assumed.
+  present="$(mktemp -d)"
+  ( git archive HEAD tools | tar -x -C "$present" \
+      && cd "$present" \
+      && tools/check-vulnerability-report.py --self-test \
+      && tools/install-scanner.sh --print-versions ) >>"$PROBE_CAPTURE" 2>&1
+  rc_present=$?
+  rm -rf "$present"
+  if [ "$rc_present" -ne 0 ]; then
+    PROBE_SKIP_REASON="the same commands failed WITH a checkout too, so the difference this probe measures cannot be established"
+    return 0
+  fi
+
+  # 3. The difference is proved. Does the preflight job actually get that checkout?
+  pre="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  preflight:$/ {f=1} f' "$WF")"
+  [ -n "$pre" ] || return 0                                        # no such job: weak
+  grep -q 'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' <<<"$pre" || return 0
+  grep -q 'persist-credentials: false' <<<"$pre" || return 0       # keeps the token out: else weak
+  grep -q 'environment:' <<<"$pre" && return 0                     # must stay secret-free
+  grep -q 'secrets\.' <<<"$pre" && return 0
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # A re-run of a green run, or a second tag for a version already cut, would sign and upload
 # a second bundle for a version a human has already seen.
 # ---------------------------------------------------------------------------
@@ -1659,6 +1712,7 @@ probe probe_preflight_passes_when_gates_unreadable           "an unreadable gate
 probe probe_preflight_accepts_no_required_reviewer           "an environment with no reviewer passes"             probe_preflight_accepts_an_environment_with_no_reviewer
 probe probe_preflight_accepts_main_without_the_checks        "main without the four checks passes"                probe_preflight_accepts_main_without_the_required_checks
 probe probe_preflight_refuses_when_both_gates_are_real       "preflight refuses even a correctly gated repo"      probe_preflight_refuses_even_when_both_gates_are_real
+probe probe_preflight_has_no_checkout                        "run 35899901341: preflight runs tools it never checked out" probe_preflight_runs_repository_tools_without_a_checkout
 probe probe_release_does_not_refuse_a_replay                 "a re-run can upload a second bundle"                probe_release_does_not_refuse_a_replay
 probe probe_replay_check_runs_after_the_upload               "the replay check lands after the upload"            probe_replay_check_runs_after_the_upload
 probe probe_replay_check_first_page_only                     "RP-4 a clash on page 1 of deployments is missed"    probe_replay_check_reads_only_the_first_page

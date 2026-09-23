@@ -77,6 +77,17 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Release run 35899901341 refused here with exit 127, not because a gate was missing but
+      # because the two scanner scripts below are read out of the repository and this job never
+      # had one: a job without a checkout starts on an empty working directory. The job stays
+      # secret-free - it declares no deployment environment and reads no repository secret, and
+      # the checkout token is not persisted into .git/config (L3), because nothing after this
+      # step talks to git. Two probes assert both halves, and they match on the job's text, so
+      # do not spell either of those YAML keys in a comment here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Require a reviewer-gated `release` environment and a protected main
         env:
           GH_TOKEN: ${{ github.token }}
