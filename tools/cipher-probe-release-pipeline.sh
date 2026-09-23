@@ -1077,6 +1077,47 @@ probe_preflight_runs_repository_tools_without_a_checkout() {
 }
 
 # ---------------------------------------------------------------------------
+# D14-04 (PR 14 security review). The checkout added to `preflight` makes that job execute
+# two scripts out of the tree the tag points at, and nothing in that job has checked yet
+# that the tag is signed by the release key or that its commit is an ancestor of main -
+# those two steps live in `publish`, downstream. So the first repository code the release
+# workflow runs is code from a tree no gate has accepted.
+#
+# Executed, not grepped: the step body is run against a tampered copy of tools/, and the
+# probe asserts the tampering executed. Then it asks whether the preflight job verifies
+# anything before it gets there.
+# ---------------------------------------------------------------------------
+probe_preflight_executes_unverified_repository_code() {
+  local body work marker pre
+  body="$(step_body "$WF" 'Both vulnerability scanners must be runnable, and the severity gate sound')"
+  [ -n "$body" ] || return 0                                   # step vanished: cannot prove it
+
+  work="$(mktemp -d)"
+  marker="$work/executed-attacker-code"
+  git archive HEAD tools | tar -x -C "$work"
+  printf '\n#!/bin/sh\ntouch "%s"\nexit 0\n' "$marker" > "$work/tools/install-scanner.sh"
+  chmod +x "$work/tools/install-scanner.sh"
+  mkdir -p "$work/t"
+  ( cd "$work" && RUNNER_TEMP="$work/t" bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 || true
+  if [ ! -e "$marker" ]; then
+    PROBE_SKIP_REASON="the step body did not execute tools/install-scanner.sh from the working tree, so this probe cannot show code from the checkout running"
+    rm -rf "$work"
+    return 0
+  fi
+  rm -rf "$work"
+
+  # It runs tree code. Does the job establish first that the tree is the reviewed one?
+  pre="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  preflight:$/ {f=1} f' "$WF")"
+  [ -n "$pre" ] || return 0
+  # Weakness present (return 0) when this job accepts the tree without establishing that the
+  # tag is signed by the release key AND its commit is an ancestor of main.
+  if grep -q 'merge-base --is-ancestor' <<<"$pre" && grep -q 'verify-tag' <<<"$pre"; then
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # A re-run of a green run, or a second tag for a version already cut, would sign and upload
 # a second bundle for a version a human has already seen.
 # ---------------------------------------------------------------------------
@@ -1206,6 +1247,24 @@ probe_sample_smoke_runs_on_the_tag_path_only() {
   grep -q 'tools/run-sample-smoke.sh' <<<"$job" || return 0         # a second, drifting copy: weak
   grep -qE '^\s+pull_request:' "$ci" || return 0                    # ci does not run on PRs: weak
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# D14-05 (PR 14 security review). The smoke check now runs on every pull request, but the
+# list of contexts main is required to carry - asserted by the preflight job, and the only
+# machine-readable statement of what must be green before a merge - still names four checks
+# and not this one. A check that can be red on a merged pull request is advice, and the
+# defect this branch exists to fix is precisely a check that nothing had to pass.
+# ---------------------------------------------------------------------------
+probe_sample_smoke_is_not_a_required_check_on_main() {
+  local ci job name
+  ci=.github/workflows/ci.yml
+  grep -q '^  sample-smoke:$' "$ci" || return 0                 # no such job: nothing to require
+  job="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  sample-smoke:$/ {f=1} f' "$ci")"
+  name="$(sed -n 's/^    name: //p' <<<"$job" | head -1)"
+  [ -n "$name" ] || return 0
+  grep -q "\"$name\"" "$WF" && return 1                         # preflight requires it: fixed
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1752,6 +1811,7 @@ probe probe_preflight_accepts_no_required_reviewer           "an environment wit
 probe probe_preflight_accepts_main_without_the_checks        "main without the four checks passes"                probe_preflight_accepts_main_without_the_required_checks
 probe probe_preflight_refuses_when_both_gates_are_real       "preflight refuses even a correctly gated repo"      probe_preflight_refuses_even_when_both_gates_are_real
 probe probe_preflight_has_no_checkout                        "run 35899901341: preflight runs tools it never checked out" probe_preflight_runs_repository_tools_without_a_checkout
+probe probe_preflight_runs_unverified_tree_code              "D14-04 preflight runs tag-tree code before any ancestry check" probe_preflight_executes_unverified_repository_code
 probe probe_release_does_not_refuse_a_replay                 "a re-run can upload a second bundle"                probe_release_does_not_refuse_a_replay
 probe probe_replay_check_runs_after_the_upload               "the replay check lands after the upload"            probe_replay_check_runs_after_the_upload
 probe probe_replay_check_first_page_only                     "RP-4 a clash on page 1 of deployments is missed"    probe_replay_check_reads_only_the_first_page
@@ -1759,6 +1819,7 @@ probe probe_deployment_name_omits_the_released_commit        "two deployments of
 probe probe_replay_check_refuses_on_a_sibling_project     "v0.1.0 run: agent-guard 0.1.0 made the replay check refuse" probe_replay_check_refuses_on_a_sibling_projects_deployment
 probe probe_sample_smoke_rejects_a_404                       "v0.1.0 run: open endpoint answers 404, smoke check waits"  probe_sample_smoke_rejects_a_404_from_the_open_endpoint
 probe probe_sample_smoke_is_tag_only                        "run 35899901341: the shipped sample is only ever started on a tag" probe_sample_smoke_runs_on_the_tag_path_only
+probe probe_sample_smoke_not_required_on_main                "D14-05 the sample smoke check is not a required check"      probe_sample_smoke_is_not_a_required_check_on_main
 probe probe_bundle_comparison_reads_the_build_directory      "the comparison reads target/, not the bundle"       probe_bundle_comparison_reads_the_build_directory_not_the_bundle
 probe probe_bundle_comparison_misses_an_absent_jar           "a jar missing from the bundle is not noticed"       probe_bundle_comparison_misses_a_jar_absent_from_the_bundle
 probe probe_reproducibility_check_never_records_poms         "RP-5 verify-reproducible.sh never collects *.pom"   probe_reproducibility_check_never_records_poms
