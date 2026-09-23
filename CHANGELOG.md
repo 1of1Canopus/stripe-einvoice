@@ -6,8 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
+Nothing yet.
 
+## [0.1.0] - 2026-09-23
+
+### Fixed
 - **The sample application starts from a clean clone again.** Its `application.yml` configured a
   Stripe webhook secret, so the starter's intake wiring check correctly refused a context with no
   `StripeInvoiceSource` in it, and the shipped application could not start without a Stripe account.
@@ -20,16 +23,13 @@ All notable changes to this project are documented here. The format follows
 - **The release preflight job checks the repository out.** It runs two scripts from `tools/` and had
   no checkout step, so both exited 127 and no gate was ever evaluated. The job stays free of
   secrets and of the deployment environment.
-
 ### Changed
-
 - The sample smoke check (start the shipped application from a clean clone, time the first
   response) moved into `tools/run-sample-smoke.sh` and now runs on **every pull request** as well as
   on a tag. It ran on the tag path only, which is why the sample's startup defect survived seven
   green pull requests. It also refuses to measure an application it did not start, and asserts the
   startup line that says the sample has no Stripe intake.
 
-## [0.1.0] - 2026-09-23
 
 ### Fixed
 
