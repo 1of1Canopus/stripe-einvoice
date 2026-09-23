@@ -256,25 +256,40 @@ Measured from a clean clone with an empty Maven cache on 2026-09-16: about two m
 the downloads. One profile per application means one legal original per invoice; the XRechnung
 beside it is a call on the renderer, not a second archived document under the same number.
 
-**The application itself**, against your own PostgreSQL:
+**The application itself**, against your own PostgreSQL. As shipped it is the numbering and
+rendering half: it allocates legal numbers and serves the series report, and it has **no Stripe
+intake** - no webhook secret, no API key, no sweeper - because it has to start from a clean clone
+with no Stripe account. It says so at startup (`numbering API only, as configured`), and
+`einvoice.issuance.enabled: false` in its `application.yml` is where it is said:
 
 ```bash
 ./mvnw -q -DskipTests install          # the sample resolves its siblings from the local repository
 cd stripe-einvoice-sample
 docker compose up -d
+EINVOICE_CHAIN_SECRET=$(head -c 32 /dev/urandom | base64) ../mvnw spring-boot:run
+```
+
+**With Stripe intake**, once you have an account, a webhook endpoint and a restricted key. The
+`intake` profile (`application-intake.yml`) is the other half of the sample: it sets
+`einvoice.issuance.enabled=true`, the webhook-secret keyring and the API key, all three from the
+environment and none of them with a default:
+
+```bash
 EINVOICE_CHAIN_SECRET=$(head -c 32 /dev/urandom | base64) \
 EINVOICE_WEBHOOK_SECRET=whsec_from_your_stripe_dashboard \
 EINVOICE_STRIPE_KEY=rk_test_your_restricted_read_scoped_key \
-../mvnw spring-boot:run
+../mvnw spring-boot:run -Dspring-boot.run.profiles=intake
 ```
+
+The two Stripe values above are **placeholders and are refused as such**: replace them with your
+own before running, or the application stops at startup with "is a placeholder from a sample file".
+A signing secret printed in a public README is a public secret, and the module's job is to keep one
+from ever guarding the unauthenticated webhook endpoint.
 
 All three values are required together, and that is the point: an application configured to receive
 Stripe events with no key to read them back would record events it could never turn into documents,
-so it refuses to start and names the missing piece. To run the **numbering API only**, say so:
-
-```bash
-../mvnw spring-boot:run -Dspring-boot.run.arguments=--einvoice.issuance.enabled=false
-```
+so it refuses to start and names the missing piece. Leaving the profile off is how you get the
+numbering API only - a state the application states rather than falls into.
 
 ## Requirements
 

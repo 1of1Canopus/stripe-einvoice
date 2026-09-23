@@ -991,14 +991,14 @@ probe_preflight_accepts_an_environment_with_no_reviewer() {
   local stub_body
   stub_body='case "$*" in
   *environments/release*) echo "{\"name\":\"release\",\"protection_rules\":[{\"type\":\"wait_timer\",\"wait_timer\":0}]}" ;;
-  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Cipher probes\"},{\"context\":\"Reference guard\"}]}}]" ;;
+  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Cipher probes\"},{\"context\":\"Reference guard\"},{\"context\":\"Sample app from a clean clone\"}]}}]" ;;
   *) exit 1 ;;
 esac'
   [ "$(_preflight_verdict "$stub_body")" -eq 0 ]
 }
 
 # ---------------------------------------------------------------------------
-# A ruleset that does not require the four checks is not a gate either. Same stub, with a
+# A ruleset that does not require every check is not a gate either. Same stub, with a
 # reviewer present and one required check missing.
 # ---------------------------------------------------------------------------
 probe_preflight_accepts_main_without_the_required_checks() {
@@ -1017,10 +1017,144 @@ probe_preflight_refuses_even_when_both_gates_are_real() {
   local stub_body
   stub_body='case "$*" in
   *environments/release*) echo "{\"name\":\"release\",\"protection_rules\":[{\"type\":\"required_reviewers\",\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"login\":\"someone\"}}]}]}" ;;
-  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Cipher probes\"},{\"context\":\"Reference guard\"}]}}]" ;;
+  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Cipher probes\"},{\"context\":\"Reference guard\"},{\"context\":\"Sample app from a clean clone\"}]}}]" ;;
   *) exit 1 ;;
 esac'
   [ "$(_preflight_verdict "$stub_body")" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Release run 35899901341 - the preflight job runs two scripts out of the repository
+# (tools/check-vulnerability-report.py, tools/install-scanner.sh) and has no checkout step,
+# so the runner's working directory is empty and both exit 127. The whole release refused
+# for a reason that had nothing to do with a gate.
+#
+# This probe does not grep for "checkout": it EXECUTES the scanner step's own body twice,
+# once in an empty directory (no checkout) and once in a directory holding a real checkout
+# of tools/ taken from git, and only then asks the workflow whether the job it belongs to
+# gets one. Weak while the job has no checkout, or while the two runs are indistinguishable
+# (a step that passes with no working tree proves nothing about the scanners).
+# ---------------------------------------------------------------------------
+probe_preflight_runs_repository_tools_without_a_checkout() {
+  local body absent present rc_absent rc_present pre
+  body="$(step_body "$WF" 'Both vulnerability scanners must be runnable, and the severity gate sound')"
+  [ -n "$body" ] || return 0                            # step vanished: cannot prove it, weak
+
+  # 1. No checkout: the runner's working directory is empty. This must fail.
+  absent="$(mktemp -d)"
+  mkdir -p "$absent/t"
+  ( cd "$absent" && RUNNER_TEMP="$absent/t" bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1
+  rc_absent=$?
+  rm -rf "$absent"
+  if [ "$rc_absent" -eq 0 ]; then
+    PROBE_SKIP_REASON="the scanner step passed with no working tree at all, so it no longer proves the repository's own scanners run"
+    return 0
+  fi
+
+  # 2. With a checkout of the same commit's tools/, the network-free half of the step body
+  #    must succeed: the severity gate's self-test, and the installer being found and able
+  #    to answer. This is the baseline the missing checkout destroys - executed, not assumed.
+  present="$(mktemp -d)"
+  ( git archive HEAD tools | tar -x -C "$present" \
+      && cd "$present" \
+      && tools/check-vulnerability-report.py --self-test \
+      && tools/install-scanner.sh --print-versions ) >>"$PROBE_CAPTURE" 2>&1
+  rc_present=$?
+  rm -rf "$present"
+  if [ "$rc_present" -ne 0 ]; then
+    PROBE_SKIP_REASON="the same commands failed WITH a checkout too, so the difference this probe measures cannot be established"
+    return 0
+  fi
+
+  # 3. The difference is proved. Does the preflight job actually get that checkout?
+  pre="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  preflight:$/ {f=1} f' "$WF")"
+  [ -n "$pre" ] || return 0                                        # no such job: weak
+  grep -q 'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' <<<"$pre" || return 0
+  grep -q 'persist-credentials: false' <<<"$pre" || return 0       # keeps the token out: else weak
+  grep -q 'environment:' <<<"$pre" && return 0                     # must stay secret-free
+  grep -q 'secrets\.' <<<"$pre" && return 0
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# D14-04 (PR 14 security review). The checkout added to `preflight` makes that job execute
+# two scripts out of the tree the tag points at, and nothing in that job has checked yet
+# that the tag is signed by the release key or that its commit is an ancestor of main -
+# those two steps live in `publish`, downstream. So the first repository code the release
+# workflow runs is code from a tree no gate has accepted.
+#
+# Executed, not grepped: the step body is run against a tampered copy of tools/, and the
+# probe asserts the tampering executed. Then it asks whether the preflight job verifies
+# anything before it gets there.
+# ---------------------------------------------------------------------------
+probe_preflight_executes_unverified_repository_code() {
+  local body work marker pre
+  body="$(step_body "$WF" 'Both vulnerability scanners must be runnable, and the severity gate sound')"
+  [ -n "$body" ] || return 0                                   # step vanished: cannot prove it
+
+  work="$(mktemp -d)"
+  marker="$work/executed-attacker-code"
+  git archive HEAD tools | tar -x -C "$work"
+  printf '\n#!/bin/sh\ntouch "%s"\nexit 0\n' "$marker" > "$work/tools/install-scanner.sh"
+  chmod +x "$work/tools/install-scanner.sh"
+  mkdir -p "$work/t"
+  ( cd "$work" && RUNNER_TEMP="$work/t" bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 || true
+  if [ ! -e "$marker" ]; then
+    PROBE_SKIP_REASON="the step body did not execute tools/install-scanner.sh from the working tree, so this probe cannot show code from the checkout running"
+    rm -rf "$work"
+    return 0
+  fi
+  rm -rf "$work"
+
+  # It runs tree code. Does the job establish first that the tree is the reviewed one?
+  pre="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  preflight:$/ {f=1} f' "$WF")"
+  [ -n "$pre" ] || return 0
+  # Weakness present (return 0) when this job accepts the tree without establishing that the
+  # tag is signed by the release key AND its commit is an ancestor of main.
+  if grep -q 'merge-base --is-ancestor' <<<"$pre" && grep -q 'verify-tag' <<<"$pre"; then
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# D14-08: the ancestry gate moved into `preflight`, and `sample-smoke` was left behind. That
+# job checks out the tag's tree and runs tools/run-sample-smoke.sh from it, in parallel with
+# preflight, so a `v*` tag still gets repository code executed inside the release workflow
+# with nothing established about the tree. Same exposure as D14-04 (no secret, read-only
+# token) and the same checklist line unmet ("ancestry check on every path"). The step body is
+# executed against a tampered script, as D14-04's is; the ordering half is read off the job
+# graph, which is the only place ordering exists.
+# ---------------------------------------------------------------------------
+probe_sample_smoke_runs_unverified_tree_code() {
+  local body work marker job
+  body="$(step_body "$WF" 'Start PostgreSQL, build, run, time to first response')"
+  [ -n "$body" ] || return 0                                   # step vanished: cannot prove it
+
+  work="$(mktemp -d)"
+  marker="$work/executed-attacker-code"
+  git archive HEAD tools | tar -x -C "$work"
+  printf '\n#!/bin/sh\ntouch "%s"\nexit 0\n' "$marker" > "$work/tools/run-sample-smoke.sh"
+  chmod +x "$work/tools/run-sample-smoke.sh"
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 || true
+  if [ ! -e "$marker" ]; then
+    PROBE_SKIP_REASON="the step body did not execute tools/run-sample-smoke.sh from the working tree"
+    rm -rf "$work"
+    return 0
+  fi
+  rm -rf "$work"
+
+  job="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  sample-smoke:$/ {f=1} f' "$WF")"
+  [ -n "$job" ] || return 0
+  # Fixed when the job cannot start before the gates: either it needs the gating job, or it
+  # carries the two checks itself.
+  if grep -qE 'needs:.*preflight' <<<"$job"; then
+    return 1
+  fi
+  if grep -q 'merge-base --is-ancestor' <<<"$job" && grep -q 'verify-tag' <<<"$job"; then
+    return 1
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1107,12 +1241,69 @@ esac'
 }
 
 # The sample smoke check must accept 404 from the open read endpoint, which is what a
-# fresh database answers for the probe customer. Weak if only 200/401 are accepted.
+# fresh database answers for the probe customer. Weak if only 200/401 are accepted. The
+# check's body now lives in tools/run-sample-smoke.sh (one definition for the tag path and
+# the pull-request path), so that is where this reads it from; weak, too, if the release
+# job stopped calling it.
 probe_sample_smoke_rejects_a_404_from_the_open_endpoint() {
   local body
   body="$(step_body "$WF" 'Start PostgreSQL, build, run, time to first response')"
   [ -n "$body" ] || return 0
-  grep -q '"\$code" = "404"' <<<"$body" && return 1
+  grep -q 'tools/run-sample-smoke.sh' <<<"$body" || return 0
+  [ -x tools/run-sample-smoke.sh ] || return 0
+  grep -q '"\$code" = "404"' tools/run-sample-smoke.sh && return 1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Release run 35899901341 - the smoke check was a step body inside release.yml and nowhere
+# else, so the only thing that ever started the shipped sample application ran on a tag.
+# Seven pull requests went green over a sample that could not start at all. The check has
+# to run on every pull request, from the same script the release runs.
+#
+# Executed, not grepped: the probe runs the script with a working directory that has no
+# stripe-einvoice-sample in it, and requires it to fail rather than report a green smoke
+# run - a script that cannot tell "nothing to start" from "started fine" is worth nothing
+# on either path. Then it asks whether ci.yml runs it on pull requests.
+# ---------------------------------------------------------------------------
+probe_sample_smoke_runs_on_the_tag_path_only() {
+  local empty rc ci job
+  [ -x tools/run-sample-smoke.sh ] || return 0                      # no shared script: weak
+
+  empty="$(mktemp -d)"
+  mkdir -p "$empty/tools"
+  cp tools/run-sample-smoke.sh "$empty/tools/"
+  ( cd "$empty" && SMOKE_BUDGET_SECONDS=1 tools/run-sample-smoke.sh ) >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$empty"
+  if [ "$rc" -eq 0 ]; then
+    PROBE_SKIP_REASON="the smoke script reported success from a tree with no sample in it, so a green run of it proves nothing"
+    return 0
+  fi
+
+  ci=.github/workflows/ci.yml
+  grep -q '^  sample-smoke:$' "$ci" || return 0                     # not a job on the PR path: weak
+  job="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  sample-smoke:$/ {f=1} f' "$ci")"
+  grep -q 'tools/run-sample-smoke.sh' <<<"$job" || return 0         # a second, drifting copy: weak
+  grep -qE '^\s+pull_request:' "$ci" || return 0                    # ci does not run on PRs: weak
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# D14-05 (PR 14 security review). The smoke check now runs on every pull request, but the
+# list of contexts main is required to carry - asserted by the preflight job, and the only
+# machine-readable statement of what must be green before a merge - still names four checks
+# and not this one. A check that can be red on a merged pull request is advice, and the
+# defect this branch exists to fix is precisely a check that nothing had to pass.
+# ---------------------------------------------------------------------------
+probe_sample_smoke_is_not_a_required_check_on_main() {
+  local ci job name
+  ci=.github/workflows/ci.yml
+  grep -q '^  sample-smoke:$' "$ci" || return 0                 # no such job: nothing to require
+  job="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  sample-smoke:$/ {f=1} f' "$ci")"
+  name="$(sed -n 's/^    name: //p' <<<"$job" | head -1)"
+  [ -n "$name" ] || return 0
+  grep -q "\"$name\"" "$WF" && return 1                         # preflight requires it: fixed
   return 0
 }
 
@@ -1657,14 +1848,19 @@ echo
 probe probe_preflight_is_not_its_own_job                     "preflight is not a job the key-holder needs"        probe_preflight_is_not_its_own_job
 probe probe_preflight_passes_when_gates_unreadable           "an unreadable gate is treated as a pass"            probe_preflight_passes_when_the_gates_cannot_be_read
 probe probe_preflight_accepts_no_required_reviewer           "an environment with no reviewer passes"             probe_preflight_accepts_an_environment_with_no_reviewer
-probe probe_preflight_accepts_main_without_the_checks        "main without the four checks passes"                probe_preflight_accepts_main_without_the_required_checks
+probe probe_preflight_accepts_main_without_the_checks        "main without the required checks passes"                probe_preflight_accepts_main_without_the_required_checks
 probe probe_preflight_refuses_when_both_gates_are_real       "preflight refuses even a correctly gated repo"      probe_preflight_refuses_even_when_both_gates_are_real
+probe probe_preflight_has_no_checkout                        "run 35899901341: preflight runs tools it never checked out" probe_preflight_runs_repository_tools_without_a_checkout
+probe probe_preflight_runs_unverified_tree_code              "D14-04 preflight runs tag-tree code before any ancestry check" probe_preflight_executes_unverified_repository_code
+probe probe_sample_smoke_runs_unverified_tree_code           "D14-08 sample-smoke runs tag-tree code with no gate"        probe_sample_smoke_runs_unverified_tree_code
 probe probe_release_does_not_refuse_a_replay                 "a re-run can upload a second bundle"                probe_release_does_not_refuse_a_replay
 probe probe_replay_check_runs_after_the_upload               "the replay check lands after the upload"            probe_replay_check_runs_after_the_upload
 probe probe_replay_check_first_page_only                     "RP-4 a clash on page 1 of deployments is missed"    probe_replay_check_reads_only_the_first_page
 probe probe_deployment_name_omits_the_released_commit        "two deployments of a version look identical"        probe_deployment_name_does_not_name_the_released_commit
 probe probe_replay_check_refuses_on_a_sibling_project     "v0.1.0 run: agent-guard 0.1.0 made the replay check refuse" probe_replay_check_refuses_on_a_sibling_projects_deployment
 probe probe_sample_smoke_rejects_a_404                       "v0.1.0 run: open endpoint answers 404, smoke check waits"  probe_sample_smoke_rejects_a_404_from_the_open_endpoint
+probe probe_sample_smoke_is_tag_only                        "run 35899901341: the shipped sample is only ever started on a tag" probe_sample_smoke_runs_on_the_tag_path_only
+probe probe_sample_smoke_not_required_on_main                "D14-05 the sample smoke check is not a required check"      probe_sample_smoke_is_not_a_required_check_on_main
 probe probe_bundle_comparison_reads_the_build_directory      "the comparison reads target/, not the bundle"       probe_bundle_comparison_reads_the_build_directory_not_the_bundle
 probe probe_bundle_comparison_misses_an_absent_jar           "a jar missing from the bundle is not noticed"       probe_bundle_comparison_misses_a_jar_absent_from_the_bundle
 probe probe_reproducibility_check_never_records_poms         "RP-5 verify-reproducible.sh never collects *.pom"   probe_reproducibility_check_never_records_poms

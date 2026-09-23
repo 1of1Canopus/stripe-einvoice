@@ -51,6 +51,12 @@ class SampleEndToEndTest {
 
   @DynamicPropertySource
   static void secrets(DynamicPropertyRegistry registry) {
+    // The sample as shipped has no Stripe intake (application.yml: einvoice.issuance.enabled is
+    // false, no webhook secret, no API key), because a shipped application must start from a
+    // clean clone with no Stripe account. This test is the intake half - the same thing the
+    // `intake` profile turns on for a reader, with a fake Stripe in place of the real one - so it
+    // turns it on here, explicitly, rather than inheriting it from a file a newcomer runs.
+    registry.add("einvoice.issuance.enabled", () -> "true");
     registry.add("einvoice.stripe.webhook-secrets.primary", () -> WEBHOOK_SECRET);
     registry.add(
         "einvoice.archive.root",

@@ -63,16 +63,17 @@ einvoice:
     # Environment only. head -c 32 /dev/urandom | base64
     hmac-secret: ${EINVOICE_CHAIN_SECRET}
     hmac-key-id: k1
-  stripe:
-    # Environment only, and a different secret from the chain's: one proves a request came from
-    # Stripe, the other proves our own record was not rewritten afterwards.
-    webhook-secrets:
-      primary: ${EINVOICE_WEBHOOK_SECRET}
-    # A restricted, read-scoped key. This module never writes to Stripe. It is required whenever a
-    # webhook secret is set: an application configured to receive events with no way to read the
-    # invoice back records events it can never turn into documents, so the starter refuses to start
-    # and names this property. Run the numbering API only with einvoice.issuance.enabled=false.
-    api-key: ${EINVOICE_STRIPE_KEY:}
+  issuance:
+    # The sample as shipped is the numbering and rendering demo: it allocates legal numbers and
+    # serves the series report, and it has NO Stripe intake - no webhook secret, no API key, no
+    # sweeper. Saying so explicitly is what makes it a documented state rather than an accident:
+    # the starter's intake wiring check then logs "numbering API only, as configured" at startup
+    # instead of warning at every boot, and the check stays strict for the state that matters,
+    # which is a host configured to receive events with a piece missing.
+    #
+    # Intake, with a real Stripe account, is one profile away: see application-intake.yml and
+    # "Run the sample" in the README. Nothing here weakens that check - it turns intake OFF.
+    enabled: false
   archive:
     # The legal originals. A directory here, an S3-compatible bucket in production.
     type: filesystem

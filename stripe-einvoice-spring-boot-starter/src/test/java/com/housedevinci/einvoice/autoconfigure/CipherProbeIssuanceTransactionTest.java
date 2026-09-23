@@ -70,7 +70,12 @@ class CipherProbeIssuanceTransactionTest {
                 + System.getProperty("java.io.tmpdir")
                 + "/einvoice-txprobe-test",
             "einvoice.stripe.webhook-secrets.primary=whsec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "einvoice.issuance.enabled=false",
+            // D14-02: einvoice.issuance.enabled=false now takes the whole intake path down with
+            // it, inbound event store included, and this probe is about that store's transaction
+            // participation - so the poller is stopped the other way: an interval no test run
+            // reaches, plus the reconciliation sweep off. Nothing here runs on a schedule, and the
+            // beans under test are the ones a real intake host has.
+            "einvoice.issuance.sweep-interval=24h",
             "einvoice.reconcile.enabled=false");
   }
 

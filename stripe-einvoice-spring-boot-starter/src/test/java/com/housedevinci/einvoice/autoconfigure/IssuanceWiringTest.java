@@ -15,12 +15,16 @@ import java.util.List;
 import java.util.Optional;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /** What the issuance half wires, what it refuses to wire, and what it refuses to start with. */
+@ExtendWith(OutputCaptureExtension.class)
 class IssuanceWiringTest {
 
   private static final String ROOT = System.getProperty("java.io.tmpdir") + "/einvoice-wiring-test";
@@ -279,6 +283,106 @@ class IssuanceWiringTest {
         .withPropertyValues(noIntakeConfigured())
         .withPropertyValues("einvoice.issuance.enabled=true")
         .run(context -> assertThat(context).hasFailed());
+  }
+
+  /**
+   * D14-02, bean by bean: what {@code einvoice.issuance.enabled=false} turns OFF on a host that has
+   * every intake bean and a webhook signing secret. Before the fix it turned off the sweeper alone,
+   * so such a host accepted Stripe events on an unauthenticated endpoint, recorded each one
+   * durably, answered 200 so nothing retried and nothing alerted, and issued nothing.
+   */
+  @Test
+  void an_explicitly_disabled_intake_wires_no_part_of_the_intake_path() {
+    runner()
+        .withPropertyValues("einvoice.issuance.enabled=false")
+        .run(
+            context ->
+                assertThat(context)
+                    .hasNotFailed()
+                    .doesNotHaveBean(com.housedevinci.einvoice.application.IssuanceUnitOfWork.class)
+                    .doesNotHaveBean(IssuanceWorker.class)
+                    .doesNotHaveBean(IssuanceSweeper.class)
+                    .doesNotHaveBean(
+                        com.housedevinci.einvoice.application.ReconciliationSweep.class)
+                    .doesNotHaveBean(com.housedevinci.einvoice.application.IssuanceReprocess.class)
+                    .doesNotHaveBean(InboundEventStore.class));
+  }
+
+  /**
+   * The other half of D14-02, and the reason the property is placed on the unit of work rather than
+   * sprinkled over the class: everything a numbering-only host legitimately keeps must survive it.
+   * One assertion per surviving bean, so a future condition that takes one of them down with the
+   * intake is found here and not by a host whose application stops starting.
+   */
+  @Test
+  void an_explicitly_disabled_intake_keeps_every_bean_a_numbering_only_host_needs() {
+    runner()
+        .withPropertyValues("einvoice.issuance.enabled=false")
+        .run(
+            context ->
+                assertThat(context)
+                    .hasNotFailed()
+                    .hasSingleBean(IssuanceNumberingService.class)
+                    .hasSingleBean(ArchiveStore.class)
+                    .hasSingleBean(ArchiveStoreStartupProbe.class)
+                    .hasSingleBean(com.housedevinci.einvoice.application.FindingStore.class)
+                    .hasSingleBean(IssuanceFindingService.class)
+                    .hasSingleBean(IssuanceFindingsEndpoint.class)
+                    .hasSingleBean(com.housedevinci.einvoice.application.PreflightSupport.class)
+                    .hasSingleBean(PreflightSupportCheck.class)
+                    .hasSingleBean(com.housedevinci.einvoice.application.ReprocessLedger.class)
+                    .hasSingleBean(IssuanceIntakeWiringCheck.class)
+                    .hasSingleBean(StripeInvoiceSource.class));
+  }
+
+  /**
+   * D14-02, second half: the one signal an operator is told to look for. With every bean present
+   * and intake explicitly off, the check used to return at its "all three beans present" branch and
+   * print nothing at all, so "numbering API only" was a claim with no evidence at startup.
+   */
+  @Test
+  void an_explicitly_disabled_intake_says_at_startup_exactly_what_is_off(CapturedOutput output) {
+    runner()
+        .withPropertyValues("einvoice.issuance.enabled=false")
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              assertThat(output.getAll())
+                  .contains("numbering API only, as configured")
+                  .contains("no webhook endpoint")
+                  .contains("no inbound event store")
+                  // base() carries a signing secret that is now ignored: the line has to say so,
+                  // because Stripe will get 404 from an endpoint the dashboard still points at.
+                  .contains("einvoice.stripe.webhook-secrets is set and is ignored");
+            });
+  }
+
+  /**
+   * D14-07: the beans behind the intake are all {@code @ConditionalOnMissingBean} - this module's
+   * documented "bring your own" contract - so a host that supplies its own {@link
+   * com.housedevinci.einvoice.application.IssuanceUnitOfWork} keeps the transitively conditional
+   * worker and webhook controller wired even with the property explicitly false. The property has
+   * to win over a bean supplied for a state it just turned off, so this is refused with the {@link
+   * ErrorCodes#CONFIG} code rather than started with the endpoint silently reopened.
+   */
+  @Test
+  void a_host_supplied_unit_of_work_with_intake_off_is_refused_with_the_config_code() {
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithHostSuppliedUnitOfWork.class)
+        .withPropertyValues(base())
+        .withPropertyValues("einvoice.issuance.enabled=false")
+        .run(
+            context ->
+                assertThat(context)
+                    .hasFailed()
+                    .getFailure()
+                    .rootCause()
+                    .isInstanceOf(EInvoiceException.class)
+                    .extracting("code")
+                    .isEqualTo(ErrorCodes.CONFIG));
   }
 
   // D2-05
@@ -581,6 +685,42 @@ class IssuanceWiringTest {
     @Bean
     DocumentValidator validator() {
       return (bytes, input) -> DocumentValidator.Report.passed();
+    }
+  }
+
+  /** D14-07: a host that brings its own store and unit of work, on top of every ordinary port. */
+  @Configuration
+  static class PortsWithHostSuppliedUnitOfWork extends Ports {
+
+    @Bean
+    InboundEventStore hostInboundStore(
+        com.housedevinci.einvoice.adapter.jdbc.JdbcUnitOfWork unitOfWork) {
+      return new com.housedevinci.einvoice.adapter.jdbc.JdbcInboundEventStore(unitOfWork);
+    }
+
+    @Bean
+    com.housedevinci.einvoice.application.IssuanceUnitOfWork hostUnitOfWork(
+        InboundEventStore inbound,
+        StripeInvoiceSource source,
+        com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore store,
+        DocumentRenderer renderer,
+        DocumentValidator validator,
+        ArchiveStore archive,
+        com.housedevinci.einvoice.application.PreflightSupport preflightSupport,
+        java.time.Clock clock,
+        EInvoiceProperties properties) {
+      return new com.housedevinci.einvoice.application.IssuanceUnitOfWork(
+          inbound,
+          source,
+          store,
+          store,
+          store,
+          renderer,
+          validator,
+          archive,
+          preflightSupport,
+          clock,
+          EInvoiceIssuanceAutoConfiguration.configuration(properties, source));
     }
   }
 

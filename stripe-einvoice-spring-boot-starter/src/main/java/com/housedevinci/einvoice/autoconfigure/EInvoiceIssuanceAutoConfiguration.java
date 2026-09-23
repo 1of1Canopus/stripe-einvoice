@@ -56,8 +56,22 @@ public class EInvoiceIssuanceAutoConfiguration {
   private static final Logger log =
       LoggerFactory.getLogger(EInvoiceIssuanceAutoConfiguration.class);
 
+  /**
+   * The durable record of every accepted Stripe event - and part of the intake path, so it is gated
+   * by the same property (D14-02).
+   *
+   * <p>{@code einvoice.issuance.enabled=false} is documented, in the README and in this module's
+   * own refusal message, as "run the numbering API only". Until D14-02 it turned off the sweeper
+   * alone: a host that had the three intake beans and a webhook signing secret still mapped the
+   * unauthenticated endpoint, still built the worker, and still wrote a row per event it would
+   * never issue - answering Stripe 200, so nothing retried and nothing alerted. The property now
+   * gates the thing it names: this store, and {@link IssuanceUnitOfWork} below, on which the
+   * worker, the reconciliation sweep, the reprocess and the webhook controller are all already
+   * conditional. Nothing else in this module reads an inbound event.
+   */
   @Bean
   @ConditionalOnMissingBean
+  @ConditionalOnProperty(prefix = "einvoice.issuance", name = "enabled", matchIfMissing = true)
   public InboundEventStore einvoiceInboundEventStore(JdbcUnitOfWork unitOfWork) {
     return new JdbcInboundEventStore(unitOfWork);
   }
@@ -144,9 +158,21 @@ public class EInvoiceIssuanceAutoConfiguration {
     return new PreflightSupportCheck(renderer, support, properties);
   }
 
+  /**
+   * The intake pipeline itself, and with D14-02 the single place {@code
+   * einvoice.issuance.enabled=false} takes effect: the worker, the reconciliation sweep, the
+   * sweeper, the privileged reprocess and the webhook controller are each already conditional on
+   * this bean, so turning it off turns off every path by which a Stripe event can reach this
+   * application. What deliberately survives, and is asserted bean by bean in {@code
+   * IssuanceWiringTest}: the numbering service, the archive and its probe, the findings store,
+   * service and endpoint, the preflight support and its check, the reprocess ledger, the health
+   * indicator (which reports "not configured" with no sweeper) and the Stripe reader, which reads
+   * and writes nothing on its own.
+   */
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnBean({DocumentRenderer.class, DocumentValidator.class, StripeInvoiceSource.class})
+  @ConditionalOnProperty(prefix = "einvoice.issuance", name = "enabled", matchIfMissing = true)
   public IssuanceUnitOfWork einvoiceIssuanceUnitOfWork(
       InboundEventStore inbound,
       StripeInvoiceSource source,
