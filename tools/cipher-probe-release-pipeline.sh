@@ -991,14 +991,14 @@ probe_preflight_accepts_an_environment_with_no_reviewer() {
   local stub_body
   stub_body='case "$*" in
   *environments/release*) echo "{\"name\":\"release\",\"protection_rules\":[{\"type\":\"wait_timer\",\"wait_timer\":0}]}" ;;
-  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Cipher probes\"},{\"context\":\"Reference guard\"}]}}]" ;;
+  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Cipher probes\"},{\"context\":\"Reference guard\"},{\"context\":\"Sample app from a clean clone\"}]}}]" ;;
   *) exit 1 ;;
 esac'
   [ "$(_preflight_verdict "$stub_body")" -eq 0 ]
 }
 
 # ---------------------------------------------------------------------------
-# A ruleset that does not require the four checks is not a gate either. Same stub, with a
+# A ruleset that does not require every check is not a gate either. Same stub, with a
 # reviewer present and one required check missing.
 # ---------------------------------------------------------------------------
 probe_preflight_accepts_main_without_the_required_checks() {
@@ -1017,7 +1017,7 @@ probe_preflight_refuses_even_when_both_gates_are_real() {
   local stub_body
   stub_body='case "$*" in
   *environments/release*) echo "{\"name\":\"release\",\"protection_rules\":[{\"type\":\"required_reviewers\",\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"login\":\"someone\"}}]}]}" ;;
-  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Cipher probes\"},{\"context\":\"Reference guard\"}]}}]" ;;
+  *rules/branches/main*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"Build & test\"},{\"context\":\"DCO sign-off\"},{\"context\":\"Cipher probes\"},{\"context\":\"Reference guard\"},{\"context\":\"Sample app from a clean clone\"}]}}]" ;;
   *) exit 1 ;;
 esac'
   [ "$(_preflight_verdict "$stub_body")" -ne 0 ]
@@ -1808,7 +1808,7 @@ echo
 probe probe_preflight_is_not_its_own_job                     "preflight is not a job the key-holder needs"        probe_preflight_is_not_its_own_job
 probe probe_preflight_passes_when_gates_unreadable           "an unreadable gate is treated as a pass"            probe_preflight_passes_when_the_gates_cannot_be_read
 probe probe_preflight_accepts_no_required_reviewer           "an environment with no reviewer passes"             probe_preflight_accepts_an_environment_with_no_reviewer
-probe probe_preflight_accepts_main_without_the_checks        "main without the four checks passes"                probe_preflight_accepts_main_without_the_required_checks
+probe probe_preflight_accepts_main_without_the_checks        "main without the required checks passes"                probe_preflight_accepts_main_without_the_required_checks
 probe probe_preflight_refuses_when_both_gates_are_real       "preflight refuses even a correctly gated repo"      probe_preflight_refuses_even_when_both_gates_are_real
 probe probe_preflight_has_no_checkout                        "run 35899901341: preflight runs tools it never checked out" probe_preflight_runs_repository_tools_without_a_checkout
 probe probe_preflight_runs_unverified_tree_code              "D14-04 preflight runs tag-tree code before any ancestry check" probe_preflight_executes_unverified_repository_code

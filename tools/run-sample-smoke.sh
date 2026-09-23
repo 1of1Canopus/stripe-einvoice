@@ -46,7 +46,24 @@ export EINVOICE_CHAIN_SECRET
     -pl stripe-einvoice-sample -am package
 
 log="$(mktemp)"
-java -jar stripe-einvoice-sample/target/stripe-einvoice-sample-*.jar > "$log" 2>&1 &
+# Exactly one runnable jar, named: the glob used to be stripe-einvoice-sample-*.jar, which also
+# matches the -sources and -javadoc jars a release build leaves in the same directory, and the
+# smoke check then reported "the sample exited before it answered" for a javadoc jar with no main
+# class. A wrong artifact must be a refusal with its own message, not a failed application.
+runnable=""
+count=0
+while IFS= read -r candidate; do
+  runnable="$candidate"
+  count=$((count + 1))
+done < <(
+  find stripe-einvoice-sample/target -maxdepth 1 -name 'stripe-einvoice-sample-*.jar' \
+    ! -name '*-sources.jar' ! -name '*-javadoc.jar' ! -name '*.jar.original' | sort
+)
+if [ "$count" -ne 1 ]; then
+  echo "::error::expected exactly one runnable sample jar in stripe-einvoice-sample/target, found $count"
+  exit 1
+fi
+java -jar "$runnable" > "$log" 2>&1 &
 app=$!
 
 # "Running" = the series-report endpoint answers. 200, 404 (the endpoint is open and the probe

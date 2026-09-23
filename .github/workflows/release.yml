@@ -15,8 +15,8 @@ name: Release
 #
 # THIS REPOSITORY CANNOT CUT A RELEASE WHILE IT IS PRIVATE, AND THAT IS DELIBERATE.
 # The `preflight` job below refuses unless the `release` environment really exists with at
-# least one required reviewer, and unless `main` really carries a ruleset requiring the four
-# checks. Neither is available on a private repository on this plan: GitHub reports zero
+# least one required reviewer, and unless `main` really carries a ruleset requiring every
+# check on the list below. Neither is available on a private repository on this plan: GitHub reports zero
 # environments and the rules endpoint returns nothing. Declaring `environment: release` on a
 # job does NOT fail in that state - GitHub creates the environment implicitly, with no
 # protection rules at all - so a workflow that only declared it would run with no reviewer
@@ -86,7 +86,47 @@ jobs:
       # do not spell either of those YAML keys in a comment here.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # D14-04: full history, because the two checks below need origin/main and the tag
+          # object. This job reads them and runs nothing else from git.
+          fetch-depth: 0
           persist-credentials: false
+
+      # D14-04: the same two gates the publish job applies, applied HERE, before this job runs
+      # a single line of code out of the checked-out tree. Anyone who can push a `v*` tag can
+      # put whatever they like in tools/, and the scanner step below executes two of those
+      # scripts; until these steps moved up, the first repository code a release ran came from
+      # a tree no gate had accepted. The job still holds no secret and no environment, so this
+      # closes a checklist line ("ancestry check on every path") rather than a privilege
+      # escalation - and the publish job keeps its own copies, because a gate that exists only
+      # in an upstream job is a gate that a workflow edit can drop without anything noticing.
+      - name: Verify the released commit is on main
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_SHA is not an ancestor of origin/main"; exit 1; }
+
+      - name: Verify the tag signature
+        if: github.event_name == 'push'
+        env:
+          RELEASE_SIGNING_KEY_ID: ${{ vars.RELEASE_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_SIGNING_KEY_ID:-}" ]; then
+            echo "::error::RELEASE_SIGNING_KEY_ID is not set (Settings -> Secrets and variables -> Actions -> Variables). A release tag must be verifiable against a known key; see the release runbook."
+            exit 1
+          fi
+          if ! [[ "$RELEASE_SIGNING_KEY_ID" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+            echo "::error::RELEASE_SIGNING_KEY_ID must be the full 40-character key fingerprint, not a short key id or email"
+            exit 1
+          fi
+          fingerprint="${RELEASE_SIGNING_KEY_ID^^}"
+          gpg --keyserver keyserver.ubuntu.com --recv-keys "$fingerprint"
+          git verify-tag --raw "$GITHUB_REF_NAME" 2>&1 | tee /tmp/verify-tag.out
+          # Same VALIDSIG match as the publish job: the LAST field of the status line is the
+          # primary key's fingerprint for both key shapes, so this binds to the identity and
+          # survives subkey rotation while refusing a tag signed by any other key.
+          grep -qE "^\[GNUPG:\] VALIDSIG [0-9A-F]{40} .* ${fingerprint}\$" /tmp/verify-tag.out \
+            || { echo "::error::$GITHUB_REF_NAME is not signed by $fingerprint"; exit 1; }
 
       - name: Require a reviewer-gated `release` environment and a protected main
         env:
@@ -110,14 +150,18 @@ jobs:
             || fail "the 'release' environment has no required reviewer: nothing would stop this run from publishing unattended"
           echo "preflight: 'release' environment requires $reviewers reviewer(s)"
 
-          # --- main must require the four checks that make a merge reviewable ---------------
+          # --- main must require every check that makes a merge reviewable ------------------
           rules_json="$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main" 2>/dev/null)" \
             || fail "could not read the branch rules for main"
           contexts="$(printf '%s' "$rules_json" \
             | jq -r '[.[]? | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]' 2>/dev/null)" \
             || fail "could not parse the branch rules for main"
           missing=""
-          for want in "Build & test" "DCO sign-off" "Cipher probes" "Reference guard"; do
+          # D14-05: "Sample app from a clean clone" is on this list because the defect this
+          # release fix exists to close - a shipped sample that could not start - is exactly what
+          # that job catches, and a check nothing has to pass is advice. Expected and intended
+          # consequence: a release refuses until main's ruleset lists it.
+          for want in "Build & test" "DCO sign-off" "Cipher probes" "Reference guard" "Sample app from a clean clone"; do
             printf '%s\n' "$contexts" | grep -qxF "$want" || missing="$missing\n  - $want"
           done
           if [ -n "$missing" ]; then
@@ -125,7 +169,7 @@ jobs:
             printf "::error::main does not require these checks:$missing\n"
             exit 1
           fi
-          echo "preflight: main requires all four checks"
+          echo "preflight: main requires every check on the list"
 
       # The release's own vulnerability gate runs inside the key-holding job, which is too
       # late to discover that the scanner cannot be fetched or does not run on this runner:
