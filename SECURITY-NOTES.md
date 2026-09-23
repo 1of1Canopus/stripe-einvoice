@@ -35,9 +35,9 @@ Do not write "gap-free" in a README, a docs page, a release note or a sales page
 | No duplicate number, including across a fiscal-year boundary | `UNIQUE (seller_id, series, fiscal_year, mode, legal_number)` within one year, **and** a required `{fiscalYear}` placeholder in a resetting series' prefix, resolved once at the row's creation, so two different years' rows never render the same string in the first place |
 | Test events out of the live series | `mode` in the series primary key, resolved from Stripe's own `livemode`, never from metadata |
 | No silent format change | Allocation refuses at the last number the configured width renders |
-| Append-only ledger | Database triggers: no DELETE, no TRUNCATE, no UPDATE of an immutable column, write-once `document_sha256` and `archive_key`, declared state transitions only |
+| Append-only ledger | Database triggers: no DELETE, no TRUNCATE, no UPDATE of an immutable column, write-once `document_sha256` and `archive_key`, a void reason and rule id that change only in the statement recording the disposition, declared state transitions only |
 | Tamper evidence above the triggers | HMAC-SHA-256 chain over the disposition log, length-prefixed canonical form, key id inside the hashed material from row 1, separate anchor row with a monotonic trigger |
-| Out-of-band writes | The verifier cross-checks disposed issuance rows against the chained log and reports `BROKEN` |
+| Out-of-band writes | The verifier cross-checks disposed issuance rows against the chained log - identity, state **and** the void reason and rule id - and reports `BROKEN` |
 | No JPA path to these tables | No entity of ours, and a startup guard that refuses a host entity, secondary/join/collection table, `@Subselect` or database view over them |
 
 ## What it does not protect against, said plainly
@@ -83,6 +83,15 @@ This module auto-configures no HTTP endpoint at all, and a void endpoint least o
 library and cannot authenticate anyone; an endpoint it configured for you would be an unauthenticated
 way to burn a numbering series one number at a time. `IssuanceVoidService` is a service method,
 documented as privileged. The host application exposes it, or does not, behind its own authorization.
+
+**A void is irreversible, and unrecoverable inside this module.** One Stripe invoice maps to one
+number for all time, so voiding that number ends this module's involvement with that sale: every
+later event for the invoice is recorded terminally with `DEI-122`, the reconciliation sweep reports
+it under `DEI-278` instead of re-enqueueing it, and no path allocates a second number. An operator
+who voids by mistake cannot undo it here. The remedy is upstream - correct the data, void the Stripe
+invoice, raise a new one - and when the sale is already paid that remedy needs a **credit note**,
+which this edition does not produce. Treat the void as what it is: a decision about a legal
+numbering series, taken once.
 
 ## Personal data, and the erasure module
 
@@ -195,6 +204,10 @@ module is where that is set out.
   verdict; the remedy is a corrected upstream invoice, which arrives as a new event. The sweeper
   never re-picks the row.
 
+  After that void, the Stripe invoice is terminal here: later events are recorded with `DEI-122`,
+  the sweep reports `DEI-278` rather than re-enqueueing, and nothing allocates a second number. See
+  "Voiding is privileged" above for what an operator has to do upstream instead.
+
   What still costs a number, and needs an operator void: a rule only the complete numbered document
   can be checked against; a renderer or writer fault that is not a mapping decision; archive
   unavailability, a write-once conflict or a read-back mismatch; a store failure after the bytes
@@ -211,7 +224,12 @@ module is where that is set out.
   appends a chained event, in the same transaction as the state change, carrying the failing
   validation rule id or the render refusal's code - so the justification for a gap in the issued
   sequence lives in the tamper-evident record and not only on a row that can legitimately change,
-  and the verifier's cross-check reports a burned row written out of band as `BROKEN`.
+  and the verifier's cross-check reports a burned row written out of band as `BROKEN`. The
+  justification itself is part of that comparison: the rule id is written on the row in the same
+  statement that burns the number, the reason and the rule id change only in the statement that
+  records the disposition - a bare `UPDATE` of either is refused by the trigger - and the verifier
+  compares both against the chained event, so a rewrite by a role that outranks the triggers is
+  reported as `BROKEN` rather than shown to an auditor as the explanation for the hole.
   `FAILED_ARCHIVE` is not chained: it is not a settled disposition, and its eventual fate - issued
   or voided unused - is. "Retryable" is narrower than it sounds, and the narrow reading is the
   right one: only an `ARCHIVE_UNAVAILABLE` outage schedules another attempt. A write-once content
@@ -235,8 +253,11 @@ module is where that is set out.
 
   **That table is append-only against the application role, and it is not hash-chained.** The
   runtime role holds `SELECT` and `INSERT`, triggers refuse `UPDATE`, `DELETE` and `TRUNCATE`, and
-  `CHECK` constraints repeat the length bounds. A role that owns the schema can disable those
-  triggers and alter a row, and nothing in this module will report that afterwards. The issuance
+  `CHECK` constraints repeat the length bounds. Two things those controls do not stop, and nothing
+  in this module reports afterwards: a role that owns the schema can disable the triggers and alter
+  a row; and the runtime role's own `INSERT`, the one grant it needs, is enough to append a forged
+  `CONCLUDED` row for a request that never finished, which silences `DEI-276` for it. The table
+  records who asked; it does not prove the answer was honest. The issuance
   chain is the tamper-evident record of what was issued; this table is a record of who asked, with
   the protection stated rather than implied.
 

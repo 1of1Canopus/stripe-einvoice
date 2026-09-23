@@ -17,6 +17,13 @@ public final class DeterministicRenderer implements DocumentRenderer {
       DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.ROOT);
 
   private Throwable failure;
+  private final java.util.concurrent.atomic.AtomicInteger renders =
+      new java.util.concurrent.atomic.AtomicInteger();
+
+  /** How many documents this renderer has produced - what a re-entered pipeline pays for. */
+  public int renders() {
+    return renders.get();
+  }
 
   /**
    * @param failure a {@code RuntimeException} for a host-port-bug probe (D2-04), or a test's own
@@ -43,6 +50,7 @@ public final class DeterministicRenderer implements DocumentRenderer {
 
   @Override
   public RenderedDocument render(DocumentInput input) {
+    renders.incrementAndGet();
     if (failure instanceof RuntimeException re) {
       throw re;
     }

@@ -53,9 +53,7 @@ class CipherProbeRcScenariosTest {
         org.assertj.core.api.Assertions.catchThrowable(() -> harness.unitOfWork().process(second));
 
     InboundState state = harness.inbound().find(second).orElseThrow().state();
-    boolean due =
-        harness.unitOfWork().due(java.time.Duration.ofDays(3), 50).stream()
-            .anyMatch(e -> e.eventId().equals(second));
+    boolean due = harness.due().stream().anyMatch(e -> e.eventId().equals(second));
     String code = harness.inbound().find(second).orElseThrow().lastCode();
 
     assertThat(escaped)
@@ -87,13 +85,29 @@ class CipherProbeRcScenariosTest {
         .isEqualTo(IssuanceState.FAILED_VALIDATION);
 
     // Exactly the grants docs/schema-grants.sql gives the runtime role: UPDATE on
-    // einvoice_issuance.
-    com.housedevinci.einvoice.adapter.jdbc.PostgresSupport.execute(
+    // einvoice_issuance. Line two of the fix refuses it outright, so this is now an assertion in
+    // its own right rather than the setup it used to be.
+    String rewrite =
         "UPDATE einvoice_issuance SET void_rule_id = 'BR-CL-01',"
             + " void_reason = 'buyer asked us to cancel'"
             + " WHERE stripe_invoice_id = '"
             + invoiceId
-            + "'");
+            + "'";
+    Throwable refused =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () -> com.housedevinci.einvoice.adapter.jdbc.PostgresSupport.execute(rewrite));
+    assertThat(refused)
+        .as("the runtime role must not be able to rewrite a burn justification at all")
+        .isNotNull();
+
+    // Line one, and the half that matters: a role that outranks the triggers - the residual this
+    // module names in SECURITY-NOTES - makes the same rewrite. The chain itself still verifies, so
+    // only the cross-check between the chained event and the row can report this.
+    com.housedevinci.einvoice.adapter.jdbc.PostgresSupport.execute(
+        "ALTER TABLE einvoice_issuance DISABLE TRIGGER USER");
+    com.housedevinci.einvoice.adapter.jdbc.PostgresSupport.execute(rewrite);
+    com.housedevinci.einvoice.adapter.jdbc.PostgresSupport.execute(
+        "ALTER TABLE einvoice_issuance ENABLE TRIGGER USER");
 
     com.housedevinci.einvoice.application.IssuanceChainVerifier.Report report =
         new com.housedevinci.einvoice.application.IssuanceChainVerifier(
@@ -108,5 +122,11 @@ class CipherProbeRcScenariosTest {
     assertThat(report.status())
         .as("a rewritten burn justification must not verify as an intact chain")
         .isEqualTo(com.housedevinci.einvoice.application.IssuanceChainVerifier.Status.BROKEN);
+    assertThat(report.brokenAtSequence())
+        .as("the hashes still recompute: it is the cross-check that must catch this")
+        .isEqualTo(-1);
+    assertThat(report.unchainedDispositions())
+        .as("the rewritten row must be the disposition that agrees with no chained event")
+        .isGreaterThan(0);
   }
 }

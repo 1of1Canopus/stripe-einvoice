@@ -15,6 +15,31 @@ class CipherProbeActuatorTest {
   private final SanitizingFunction function =
       new EInvoiceActuatorAutoConfiguration().einvoiceSanitizingFunction();
 
+  /**
+   * D11-04, reader 8 of the void design: the findings endpoint must expose nothing that restarts
+   * work on a voided invoice. It carries only {@code @ReadOperation} today; an annotation added
+   * later is exactly what a missing assertion fails to catch, so it is asserted rather than read.
+   */
+  @Test
+  void the_findings_endpoint_exposes_no_write_operation() {
+    assertThat(IssuanceFindingsEndpoint.class.getDeclaredMethods())
+        .allSatisfy(
+            method -> {
+              assertThat(
+                      method.isAnnotationPresent(
+                          org.springframework.boot.actuate.endpoint.annotation.WriteOperation
+                              .class))
+                  .as("%s must not be a write operation", method.getName())
+                  .isFalse();
+              assertThat(
+                      method.isAnnotationPresent(
+                          org.springframework.boot.actuate.endpoint.annotation.DeleteOperation
+                              .class))
+                  .as("%s must not be a delete operation", method.getName())
+                  .isFalse();
+            });
+  }
+
   @Test
   void probe_the_chain_secret_is_excluded_by_name() {
     assertThat(sanitize("einvoice.chain.hmac-secret", "AAAA")).isEqualTo("******");

@@ -265,7 +265,7 @@ BEGIN
      OR NEW.legal_number <> OLD.legal_number OR NEW.counter <> OLD.counter
      OR NEW.issued_at <> OLD.issued_at OR NEW.allocated_at <> OLD.allocated_at
      OR NEW.rule_pack_version <> OLD.rule_pack_version THEN
-    RAISE EXCEPTION 'einvoice_issuance: only state, document_sha256, archive_key, void_reason and void_rule_id may change';
+    RAISE EXCEPTION 'einvoice_issuance: only state, document_sha256, archive_key, void_reason and void_rule_id may change, and the last two only while the row is open';
   END IF;
   -- N-06: write-once, not merely updatable. The chain detects a rewrite of either as BROKEN, but
   -- detection is not prevention when prevention costs one clause.
@@ -277,6 +277,18 @@ BEGIN
   END IF;
   IF OLD.void_reason <> '' AND NEW.void_reason <> OLD.void_reason THEN
     RAISE EXCEPTION 'einvoice_issuance.void_reason is write-once';
+  END IF;
+  -- RC-02: void_rule_id was freely rewritable, and void_reason was write-once only once it was
+  -- non-empty - and a FAILED_VALIDATION burn leaves it empty, so a reason that was never chained
+  -- could be planted on a burned row and read back by the series report as the explanation for a
+  -- hole in the issued sequence. Both columns now change only in the statement that records the
+  -- disposition itself: the move to VOID_UNUSED. A bare UPDATE of either is refused, and a planted
+  -- disposition that does move the state writes no chained event, which the verifier's cross-check
+  -- reports as BROKEN. Not "write-once" as the other two columns are: the void legitimately
+  -- replaces the burn's rule id, in that one statement and nowhere else.
+  IF (NEW.void_reason <> OLD.void_reason OR NEW.void_rule_id <> OLD.void_rule_id)
+     AND NOT (NEW.state <> OLD.state AND NEW.state IN ('VOID_UNUSED', 'FAILED_VALIDATION')) THEN
+    RAISE EXCEPTION 'einvoice_issuance: the void justification changes only when the number is voided';
   END IF;
   -- The same transition set the IssuanceState enum declares, re-asserted here so a transition is
   -- refused in two independent places. Voiding an ISSUED number is an attempt to unpublish a legal
