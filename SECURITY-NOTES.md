@@ -253,8 +253,11 @@ module is where that is set out.
 
   **That table is append-only against the application role, and it is not hash-chained.** The
   runtime role holds `SELECT` and `INSERT`, triggers refuse `UPDATE`, `DELETE` and `TRUNCATE`, and
-  `CHECK` constraints repeat the length bounds. A role that owns the schema can disable those
-  triggers and alter a row, and nothing in this module will report that afterwards. The issuance
+  `CHECK` constraints repeat the length bounds. Two things those controls do not stop, and nothing
+  in this module reports afterwards: a role that owns the schema can disable the triggers and alter
+  a row; and the runtime role's own `INSERT`, the one grant it needs, is enough to append a forged
+  `CONCLUDED` row for a request that never finished, which silences `DEI-276` for it. The table
+  records who asked; it does not prove the answer was honest. The issuance
   chain is the tamper-evident record of what was issued; this table is a record of who asked, with
   the protection stated rather than implied.
 
