@@ -281,6 +281,11 @@ EINVOICE_STRIPE_KEY=rk_test_your_restricted_read_scoped_key \
 ../mvnw spring-boot:run -Dspring-boot.run.profiles=intake
 ```
 
+The two Stripe values above are **placeholders and are refused as such**: replace them with your
+own before running, or the application stops at startup with "is a placeholder from a sample file".
+A signing secret printed in a public README is a public secret, and the module's job is to keep one
+from ever guarding the unauthenticated webhook endpoint.
+
 All three values are required together, and that is the point: an application configured to receive
 Stripe events with no key to read them back would record events it could never turn into documents,
 so it refuses to start and names the missing piece. Leaving the profile off is how you get the

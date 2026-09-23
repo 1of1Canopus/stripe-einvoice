@@ -20,6 +20,16 @@ final class StripeSecrets {
   /** The upper bound on the signature tolerance. A wide window plus a ledger gap is a replay. */
   static final Duration MAX_TOLERANCE = Duration.ofMinutes(10);
 
+  /**
+   * Values that are published somewhere public and must therefore never guard the endpoint. The
+   * last two are this repository's own (D14-03): the README and {@code application-intake.yml}
+   * print them as the values to paste, they are well formed by every other check here, and pasting
+   * the documented command verbatim used to start an application in live mode whose unauthenticated
+   * webhook endpoint was authenticated by a string anyone can read on GitHub. A documented
+   * placeholder that this list does not carry is a public secret; {@code
+   * DocumentedPlaceholderSecretsTest} reads them back out of the shipped files and asserts each is
+   * refused, so a future one cannot be added without being refused.
+   */
   private static final Set<String> PLACEHOLDERS =
       Set.of(
           "whsec_test",
@@ -28,7 +38,9 @@ final class StripeSecrets {
           "sk_test_xxx",
           "rk_test_xxx",
           "changeme",
-          "replace-me");
+          "replace-me",
+          "whsec_from_your_stripe_dashboard",
+          "rk_test_your_restricted_read_scoped_key");
 
   private StripeSecrets() {}
 
