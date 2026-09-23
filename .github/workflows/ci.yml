@@ -243,6 +243,37 @@ jobs:
           path: ${{ runner.temp }}/osv.json
           if-no-files-found: warn
 
+  # The shipped sample, started the way the README quick start says to, on every pull request.
+  # This check existed only on the tag path until release run 35899901341, where it was the
+  # first thing ever to run the sample application as shipped - and it could not start: the
+  # sample's own application.yml configured a Stripe webhook secret, so the starter's intake
+  # wiring check refused a context with no StripeInvoiceSource in it. Seven pull requests had
+  # gone green over that sample without one of them starting it. A release-only check is a
+  # check that reports a defect at the worst possible moment, so it runs here too, from the
+  # same script (tools/run-sample-smoke.sh), with nothing for the two to drift apart over.
+  sample-smoke:
+    name: Sample app from a clean clone
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up JDK 21
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Start PostgreSQL, build, run, time to first response
+        run: |
+          tools/run-sample-smoke.sh
+      - name: PostgreSQL down
+        if: always()
+        working-directory: stripe-einvoice-sample
+        run: docker compose down -v
+
   # F3 (fourteenth pass): the release profile (`pom.xml`'s `release` profile) was never exercised
   # by CI - it runs only `clean verify` and `-Psecurity-scan` - so its javadoc break shipped
   # unnoticed for six passes. Runs the documented dry run on every push and pull request.

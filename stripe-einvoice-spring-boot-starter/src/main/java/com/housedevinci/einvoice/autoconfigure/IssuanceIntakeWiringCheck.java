@@ -102,7 +102,10 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
               + " validated document would consume the series and archive nothing, so the issuance"
               + " pipeline refuses to start rather than start silently with no endpoint, no sweeper"
               + " and no signal. Supply the missing bean(s), or set"
-              + " einvoice.issuance.enabled=false to run the numbering API only.");
+              + " einvoice.issuance.enabled=false to run the numbering API only. The sample"
+              + " application in this repository ships in exactly that second state and turns"
+              + " intake on with one profile and two environment variables; \"Run the sample\" in"
+              + " the README is the worked example of both halves.");
     }
     if (environment.containsProperty("einvoice.issuance.enabled")
         && !properties.getIssuance().isEnabled()) {

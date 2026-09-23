@@ -1160,13 +1160,52 @@ esac'
 }
 
 # The sample smoke check must accept 404 from the open read endpoint, which is what a
-# fresh database answers for the probe customer. Weak if only 200/401 are accepted.
+# fresh database answers for the probe customer. Weak if only 200/401 are accepted. The
+# check's body now lives in tools/run-sample-smoke.sh (one definition for the tag path and
+# the pull-request path), so that is where this reads it from; weak, too, if the release
+# job stopped calling it.
 probe_sample_smoke_rejects_a_404_from_the_open_endpoint() {
   local body
   body="$(step_body "$WF" 'Start PostgreSQL, build, run, time to first response')"
   [ -n "$body" ] || return 0
-  grep -q '"\$code" = "404"' <<<"$body" && return 1
+  grep -q 'tools/run-sample-smoke.sh' <<<"$body" || return 0
+  [ -x tools/run-sample-smoke.sh ] || return 0
+  grep -q '"\$code" = "404"' tools/run-sample-smoke.sh && return 1
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# Release run 35899901341 - the smoke check was a step body inside release.yml and nowhere
+# else, so the only thing that ever started the shipped sample application ran on a tag.
+# Seven pull requests went green over a sample that could not start at all. The check has
+# to run on every pull request, from the same script the release runs.
+#
+# Executed, not grepped: the probe runs the script with a working directory that has no
+# stripe-einvoice-sample in it, and requires it to fail rather than report a green smoke
+# run - a script that cannot tell "nothing to start" from "started fine" is worth nothing
+# on either path. Then it asks whether ci.yml runs it on pull requests.
+# ---------------------------------------------------------------------------
+probe_sample_smoke_runs_on_the_tag_path_only() {
+  local empty rc ci job
+  [ -x tools/run-sample-smoke.sh ] || return 0                      # no shared script: weak
+
+  empty="$(mktemp -d)"
+  mkdir -p "$empty/tools"
+  cp tools/run-sample-smoke.sh "$empty/tools/"
+  ( cd "$empty" && SMOKE_BUDGET_SECONDS=1 tools/run-sample-smoke.sh ) >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$empty"
+  if [ "$rc" -eq 0 ]; then
+    PROBE_SKIP_REASON="the smoke script reported success from a tree with no sample in it, so a green run of it proves nothing"
+    return 0
+  fi
+
+  ci=.github/workflows/ci.yml
+  grep -q '^  sample-smoke:$' "$ci" || return 0                     # not a job on the PR path: weak
+  job="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  sample-smoke:$/ {f=1} f' "$ci")"
+  grep -q 'tools/run-sample-smoke.sh' <<<"$job" || return 0         # a second, drifting copy: weak
+  grep -qE '^\s+pull_request:' "$ci" || return 0                    # ci does not run on PRs: weak
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -1719,6 +1758,7 @@ probe probe_replay_check_first_page_only                     "RP-4 a clash on pa
 probe probe_deployment_name_omits_the_released_commit        "two deployments of a version look identical"        probe_deployment_name_does_not_name_the_released_commit
 probe probe_replay_check_refuses_on_a_sibling_project     "v0.1.0 run: agent-guard 0.1.0 made the replay check refuse" probe_replay_check_refuses_on_a_sibling_projects_deployment
 probe probe_sample_smoke_rejects_a_404                       "v0.1.0 run: open endpoint answers 404, smoke check waits"  probe_sample_smoke_rejects_a_404_from_the_open_endpoint
+probe probe_sample_smoke_is_tag_only                        "run 35899901341: the shipped sample is only ever started on a tag" probe_sample_smoke_runs_on_the_tag_path_only
 probe probe_bundle_comparison_reads_the_build_directory      "the comparison reads target/, not the bundle"       probe_bundle_comparison_reads_the_build_directory_not_the_bundle
 probe probe_bundle_comparison_misses_an_absent_jar           "a jar missing from the bundle is not noticed"       probe_bundle_comparison_misses_a_jar_absent_from_the_bundle
 probe probe_reproducibility_check_never_records_poms         "RP-5 verify-reproducible.sh never collects *.pom"   probe_reproducibility_check_never_records_poms

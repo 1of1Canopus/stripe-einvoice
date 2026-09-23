@@ -1,0 +1,24 @@
+# Stripe intake, off in the shipped sample and turned on by this profile:
+#
+#   EINVOICE_CHAIN_SECRET=$(head -c 32 /dev/urandom | base64) \
+#   EINVOICE_WEBHOOK_SECRET=whsec_from_your_stripe_dashboard \
+#   EINVOICE_STRIPE_KEY=rk_test_your_restricted_read_scoped_key \
+#   SPRING_PROFILES_ACTIVE=intake java -jar target/stripe-einvoice-sample-*.jar
+#
+# All three values are required together, and the application refuses to start without any one
+# of them. That refusal is the point: an application set up to receive Stripe events with no key
+# to read the invoices back would record events it could never turn into documents.
+#
+# There is no default and no placeholder default for either Stripe value here. A profile that
+# fell back to an empty string would start an endpoint that verifies nothing.
+einvoice:
+  issuance:
+    enabled: true
+  stripe:
+    # Environment only, and a different secret from the chain's: one proves a request came from
+    # Stripe, the other proves our own record was not rewritten afterwards. A keyring, because
+    # Stripe's own rotation leaves two secrets live.
+    webhook-secrets:
+      primary: ${EINVOICE_WEBHOOK_SECRET}
+    # A restricted, read-scoped key. This module reads invoices and never writes to Stripe.
+    api-key: ${EINVOICE_STRIPE_KEY}

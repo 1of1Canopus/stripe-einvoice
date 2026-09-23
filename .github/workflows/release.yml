@@ -704,58 +704,13 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
 
+      # One definition, called by this job and by the identical `sample-smoke` job in ci.yml.
+      # The body used to live here only, which is why it ran on tags and never on a pull
+      # request: seven green pull requests never started the shipped application, and the first
+      # tag found it could not start at all (release run 35899901341).
       - name: Start PostgreSQL, build, run, time to first response
-        working-directory: stripe-einvoice-sample
         run: |
-          set -euo pipefail
-          start=$(date +%s)
-
-          # The sample refuses to start without the issuance-chain secret, and ships no default
-          # for it. Generated per run, thrown away with the runner: this job proves a newcomer
-          # can get the sample answering, not that any particular key works.
-          EINVOICE_CHAIN_SECRET="$(head -c 32 /dev/urandom | base64)"
-          export EINVOICE_CHAIN_SECRET
-
-          docker compose up -d
-          # Build the sample and the two libraries it needs. Tests already ran in CI;
-          # this job measures how long a newcomer waits, not whether the tests pass.
-          (cd .. && ./mvnw -B -q -DskipTests -Dspotless.check.skip=true -Djacoco.skip=true \
-              -pl stripe-einvoice-sample -am package)
-
-          java -jar target/stripe-einvoice-sample-*.jar > /tmp/sample.log 2>&1 &
-          app=$!
-
-          # "Running" = the series-report endpoint answers. 200, 404 (the endpoint is open and
-          # the probe series does not exist) and 401 (Spring Security refusing an
-          # unauthenticated caller) are all correct answers: each means the application is up
-          # and serving.
-          ready=""
-          for _ in $(seq 1 120); do
-            if ! kill -0 "$app" 2>/dev/null; then
-              echo "::error::the sample exited before it answered"; tail -50 /tmp/sample.log; exit 1
-            fi
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/series/smoke-probe || true)
-            if [ "$code" = "401" ] || [ "$code" = "200" ] || [ "$code" = "404" ]; then ready=1; break; fi
-            sleep 1
-          done
-          end=$(date +%s)
-          elapsed=$(( end - start ))
-
-          if [ -z "$ready" ]; then
-            echo "::error::the sample never answered"; tail -80 /tmp/sample.log; kill "$app" || true; exit 1
-          fi
-
-          echo "sample reached a first response in ${elapsed}s (clone -> running)"
-          echo "### Sample: running in ${elapsed}s" >> "$GITHUB_STEP_SUMMARY"
-
-          kill "$app" || true
-
-          # The target is under two minutes on a developer machine. A GitHub runner is
-          # slower and starts a PostgreSQL container from scratch, so the gate here is three
-          # minutes; the number above is the one that goes in the release notes.
-          if [ "$elapsed" -gt 180 ]; then
-            echo "::error::sample took ${elapsed}s, over the 180s CI budget"; exit 1
-          fi
+          tools/run-sample-smoke.sh
 
       - name: PostgreSQL down
         if: always()
