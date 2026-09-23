@@ -64,6 +64,31 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
     // would ever fetch, number or archive. That is the same defect D2-02 closed for the other two
     // beans, closed here the same way and with the same remedy.
     boolean hasSource = beanFactory.getBeanNamesForType(StripeInvoiceSource.class).length > 0;
+    // D14-02: the explicit "off" is answered FIRST, before the all-three-beans-present early
+    // return below. It used to be answered last, so the one state the README and this class's own
+    // refusal message recommend - einvoice.issuance.enabled=false on a host that has the intake
+    // beans - produced no line at all: the check returned at "all three present" and the operator
+    // was told nothing about an application that had just turned its intake off. The line names
+    // what is off, because "numbering API only" is a claim an operator has to be able to check.
+    if (explicitlyDisabled()) {
+      log.info(
+          "einvoice: numbering API only, as configured (einvoice.issuance.enabled=false). No"
+              + " Stripe intake is wired: no webhook endpoint, no inbound event store, no issuance"
+              + " worker, no reconciliation sweep and no sweeper. The numbering API, the archive,"
+              + " the findings endpoint and the health indicator (which reports \"not"
+              + " configured\") are unaffected.{}{}",
+          hasRenderer && hasValidator && hasSource
+              ? ""
+              : " The issuance beans are also incomplete ("
+                  + missingBeans(hasRenderer, hasValidator, hasSource)
+                  + " absent).",
+          properties.getStripe().getWebhookSecrets().isEmpty()
+              ? ""
+              : " einvoice.stripe.webhook-secrets is set and is ignored in this state: Stripe will"
+                  + " get 404 from this application, so remove the endpoint from the Stripe"
+                  + " dashboard or set einvoice.issuance.enabled=true.");
+      return;
+    }
     if (hasRenderer && hasValidator && hasSource) {
       // D3-02: wired is not the same question as able to validate anything, ever. A validator
       // whose canValidate() says no (an XSLT 2.0 processor missing from the classpath, in this
@@ -107,16 +132,6 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
               + " intake on with one profile and two environment variables; \"Run the sample\" in"
               + " the README is the worked example of both halves.");
     }
-    if (environment.containsProperty("einvoice.issuance.enabled")
-        && !properties.getIssuance().isEnabled()) {
-      // The operator already said it: einvoice.issuance.enabled=false. Telling them to do what
-      // they have done is how a startup log becomes noise nobody reads.
-      log.info(
-          "einvoice: numbering API only, as configured (einvoice.issuance.enabled=false). No Stripe"
-              + " intake, sweeper or archive is wired ({} absent).",
-          missing);
-      return;
-    }
     log.warn(
         "einvoice: the issuance path is not wired ({} missing), and intake is not configured - no"
             + " einvoice.stripe.webhook-secrets, and einvoice.issuance.enabled is not explicitly"
@@ -146,14 +161,19 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
     return missing.toString();
   }
 
+  /** The operator said so, in the environment: present and false. The field default is true. */
+  private boolean explicitlyDisabled() {
+    return environment.containsProperty("einvoice.issuance.enabled")
+        && !properties.getIssuance().isEnabled();
+  }
+
   private boolean intakeIsConfigured() {
     // D2-05: an explicit false wins over everything else, including a webhook secret sitting in
     // a shared configuration server from an earlier rollout. Without this, the secrets arm below
     // returns true first, the pipeline fails to start, and the refusal's own remedy - "set
     // einvoice.issuance.enabled=false to run the numbering API only" - is refused too, because the
     // operator has already done exactly that.
-    if (environment.containsProperty("einvoice.issuance.enabled")
-        && !properties.getIssuance().isEnabled()) {
+    if (explicitlyDisabled()) {
       return false;
     }
     if (!properties.getStripe().getWebhookSecrets().isEmpty()) {
