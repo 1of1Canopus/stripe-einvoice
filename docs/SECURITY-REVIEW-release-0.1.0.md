@@ -25,7 +25,7 @@ Reviewed as a detached worktree of `origin/main` at `253759f`, Docker up, `CIPHE
 
 ### Threat model, line by line
 
-The assets and boundaries are the spec's own (`SPEC.md`, "Cipher spec review (2026-09-15)"). Each
+The assets and boundaries are the spec's own (the specification's security review of 2026-09-15, kept with the internal planning notes). Each
 spec finding is listed with the mechanism that holds it on the merged tree and the test that proves
 it. "verified" means a test was run in this pass or in the full `verify` above; "scope" means the
 line was cut from 0.1.0 by the founder's decision 7 and is out of scope for this tag.
@@ -160,7 +160,7 @@ Thor writes a one-page design, reviewed before any code, establishing:
 
 ### RC-02 · MEDIUM · the burn justification is rewritable by the runtime role and the verifier says INTACT
 
-**What.** QUESTIONS 27 was closed by chaining the `FAILED_VALIDATION` disposition so that "the
+**What.** open question 27 was closed by chaining the `FAILED_VALIDATION` disposition so that "the
 justification for a gap in the issued sequence lives in the tamper-evident record and not only on a
 row that can legitimately change". On the merged tree the justification still lives on the row for
 every reader, and the chain is never compared against it.
@@ -237,13 +237,13 @@ adjust the D7-03 paragraph so it claims the comparison that exists.
 
 ### Rulings asked for
 
-**QUESTIONS 27 — closed correctly, with a caveat.** Chaining the `FAILED_VALIDATION` disposition
+**open question 27 — closed correctly, with a caveat.** Chaining the `FAILED_VALIDATION` disposition
 rather than inventing a `NUMBER_ABANDONED` state was the right call: it is the same evidence
 without an enum value, a successor edge, a trigger clause and a migration. The caveat is RC-02 —
 the chain carries the justification and nothing compares it to what the auditor is shown. The
 question stays closed; the comparison is a finding, not a re-opening.
 
-**QUESTIONS 28 — accepted for 0.1.0, as worded.** The reprocess is recorded append-only against the
+**open question 28 — accepted for 0.1.0, as worded.** The reprocess is recorded append-only against the
 runtime role with the actor and the reason in their own columns, two rows per call, one conclusion
 per request enforced by a partial unique index, and an unconcluded request raised as `DEI-276`. Not
 chaining it is defensible: a reprocess touches no legal number by definition, and a second chain
@@ -363,7 +363,7 @@ Crash and interruption re-run at the new boundaries, all green:
 
 ### RC-05 · LOW · a wording correction this review asked for before the tag has not landed
 
-The first pass's ruling on QUESTIONS 28 required one sentence in `SECURITY-NOTES.md`: that the
+The first pass's ruling on open question 28 required one sentence in `SECURITY-NOTES.md`: that the
 runtime role's own `INSERT` on the reprocess record lets a host append a forged `CONCLUDED` row and
 so suppress `DEI-276` for a request that never finished. The paragraph on this tree says only that
 *a role which owns the schema* can disable the triggers and alter a row — a different and much
@@ -385,7 +385,7 @@ wanted — the table is append-only by design and a host that can insert its own
 inside the trust boundary; what is not acceptable is a residual list that reads as if it were not
 so.
 
-### QUESTIONS 29 and 30 — final wording for 0.1.0
+### open question 29 and 30 — final wording for 0.1.0
 
 **29, the missing retry ceiling.** Correct to ship 0.1.0 with it open. RC-01's source is closed, so
 the void path no longer strands anything; what remains is the general bound, and adding it without
