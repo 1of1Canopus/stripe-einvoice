@@ -42,20 +42,24 @@ class IntakeProfilePlaceholderRefusalTest {
                 new SpringApplicationBuilder(SampleApplication.class)
                     .web(WebApplicationType.SERVLET)
                     .profiles("intake")
-                    .properties(
-                        "server.port=0",
-                        "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
-                        "spring.datasource.username=" + POSTGRES.getUsername(),
-                        "spring.datasource.password=" + POSTGRES.getPassword(),
-                        "EINVOICE_CHAIN_SECRET="
+                    // Command-line arguments, not properties(): SpringApplicationBuilder puts the
+                    // latter in defaultProperties, the lowest precedence there is, so the sample's
+                    // own application.yml kept its localhost datasource and this test passed only
+                    // on a machine that happened to have the compose database up - and failed on
+                    // CI with "Connection refused" before it could reach the refusal under test.
+                    .run(
+                        "--server.port=0",
+                        "--spring.datasource.url=" + POSTGRES.getJdbcUrl(),
+                        "--spring.datasource.username=" + POSTGRES.getUsername(),
+                        "--spring.datasource.password=" + POSTGRES.getPassword(),
+                        "--EINVOICE_CHAIN_SECRET="
                             + Base64.getEncoder()
                                 .encodeToString(
                                     "einvoice-sample-chain-secret-01!"
                                         .getBytes(StandardCharsets.UTF_8)),
-                        "EINVOICE_ARCHIVE_ROOT=target/einvoice-archive-placeholder-refusal",
-                        "EINVOICE_WEBHOOK_SECRET=whsec_from_your_stripe_dashboard",
-                        "EINVOICE_STRIPE_KEY=rk_test_your_restricted_read_scoped_key")
-                    .run()
+                        "--EINVOICE_ARCHIVE_ROOT=target/einvoice-archive-placeholder-refusal",
+                        "--EINVOICE_WEBHOOK_SECRET=whsec_from_your_stripe_dashboard",
+                        "--EINVOICE_STRIPE_KEY=rk_test_your_restricted_read_scoped_key")
                     .close())
         .rootCause()
         .hasMessageContaining("placeholder");
