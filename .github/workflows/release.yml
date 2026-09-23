@@ -733,7 +733,11 @@ jobs:
     # RELEASE-PROCESS.md step 6: the sample app is re-run from a clean clone and timed.
     # This job shares nothing with the publish job: fresh checkout, fresh container,
     # the artifacts it uses are the ones it just built from source.
+    # D14-08: `needs: preflight` so a `v*` tag never runs repository code (tools/run-sample-smoke.sh,
+    # checked out fresh below) before the ancestry and signature gates in `preflight` have passed -
+    # the same defect D14-04 closed one job to the left.
     name: Sample app from a clean clone
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       # L3: this job never talks to git after checkout either.

@@ -382,7 +382,12 @@ Nothing yet.
 - PostgreSQL only, and the refusal probes the server rather than a configured dialect string.
 - There is no `SEQUENCE`, no `nextval` and no `@GeneratedValue` on any numbering column, asserted by
   a test over the sources and the schema.
-- This module auto-configures no HTTP endpoint at all.
+- The only HTTP endpoint this module auto-configures is the Stripe webhook controller
+  (`POST /webhooks/stripe` by default, `einvoice.webhook.path` to change it), mapped only when the
+  intake is wired: a `DocumentRenderer`, a `DocumentValidator` and a `StripeInvoiceSource` are all
+  present and `einvoice.issuance.enabled` is not explicitly `false`. It authenticates the caller by
+  Stripe signature, not by host security configuration. The privileged reprocess and the numbering
+  API open no route of their own; both stay beans the host calls.
 - Transaction participation is explicit: the module exposes a `JdbcUnitOfWork` port with a
   caller-supplied-connection factory and a Spring implementation in the starter. There is no
   ambient "current connection" registry, and no application-wide switch that turns joining off.

@@ -2,6 +2,8 @@ package com.housedevinci.einvoice.autoconfigure;
 
 import com.housedevinci.einvoice.application.DocumentRenderer;
 import com.housedevinci.einvoice.application.DocumentValidator;
+import com.housedevinci.einvoice.application.InboundEventStore;
+import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
 import com.housedevinci.einvoice.application.StripeInvoiceSource;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
@@ -71,6 +73,25 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
     // was told nothing about an application that had just turned its intake off. The line names
     // what is off, because "numbering API only" is a claim an operator has to be able to check.
     if (explicitlyDisabled()) {
+      // D14-07: the unit of work, the inbound store, the worker and the webhook controller are
+      // all @ConditionalOnMissingBean - this module's documented "bring your own" contract. A
+      // host that supplies its own beans for one or more of them gets those wired back even with
+      // the property explicitly false, because a missing-bean condition does not see the
+      // property. The property has to win over a bean supplied for a state it just turned off, so
+      // that contradiction is refused rather than silently honoured - and the numbering-only line
+      // below is never printed over beans it claims are absent.
+      String contradicting = presentIntakeBeans();
+      if (!contradicting.isEmpty()) {
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG,
+            "einvoice.issuance.enabled=false, but the context still holds "
+                + contradicting
+                + ". Those beans are @ConditionalOnMissingBean, so supplying your own keeps them"
+                + " wired even with the property off - which would map the Stripe webhook"
+                + " endpoint this application just said it does not have. Drop the bean(s), or"
+                + " set einvoice.issuance.enabled=true to run the intake this application is"
+                + " actually wired for.");
+      }
       log.info(
           "einvoice: numbering API only, as configured (einvoice.issuance.enabled=false). No"
               + " Stripe intake is wired: no webhook endpoint, no inbound event store, no issuance"
@@ -139,6 +160,35 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
             + " host; set einvoice.issuance.enabled=false to say so explicitly and keep this line"
             + " from repeating at every startup.",
         missing);
+  }
+
+  /**
+   * The beans the intake path is built from, named for the D14-07 refusal message. Checked against
+   * the bean factory rather than assumed, since every one of them is
+   * {@code @ConditionalOnMissingBean} and a host is free to supply its own.
+   */
+  private String presentIntakeBeans() {
+    StringBuilder present = new StringBuilder();
+    if (beanFactory.getBeanNamesForType(IssuanceUnitOfWork.class).length > 0) {
+      present.append("an IssuanceUnitOfWork");
+    }
+    if (beanFactory.getBeanNamesForType(InboundEventStore.class).length > 0) {
+      appendWithSeparator(present, "an InboundEventStore");
+    }
+    if (beanFactory.getBeanNamesForType(IssuanceWorker.class).length > 0) {
+      appendWithSeparator(present, "an IssuanceWorker");
+    }
+    if (beanFactory.getBeanNamesForType(StripeWebhookController.class).length > 0) {
+      appendWithSeparator(present, "a StripeWebhookController");
+    }
+    return present.toString();
+  }
+
+  private static void appendWithSeparator(StringBuilder builder, String term) {
+    if (!builder.isEmpty()) {
+      builder.append(", ");
+    }
+    builder.append(term);
   }
 
   private static String missingBeans(boolean hasRenderer, boolean hasValidator, boolean hasSource) {

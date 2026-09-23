@@ -357,6 +357,34 @@ class IssuanceWiringTest {
             });
   }
 
+  /**
+   * D14-07: the beans behind the intake are all {@code @ConditionalOnMissingBean} - this module's
+   * documented "bring your own" contract - so a host that supplies its own {@link
+   * com.housedevinci.einvoice.application.IssuanceUnitOfWork} keeps the transitively conditional
+   * worker and webhook controller wired even with the property explicitly false. The property has
+   * to win over a bean supplied for a state it just turned off, so this is refused with the {@link
+   * ErrorCodes#CONFIG} code rather than started with the endpoint silently reopened.
+   */
+  @Test
+  void a_host_supplied_unit_of_work_with_intake_off_is_refused_with_the_config_code() {
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithHostSuppliedUnitOfWork.class)
+        .withPropertyValues(base())
+        .withPropertyValues("einvoice.issuance.enabled=false")
+        .run(
+            context ->
+                assertThat(context)
+                    .hasFailed()
+                    .getFailure()
+                    .rootCause()
+                    .isInstanceOf(EInvoiceException.class)
+                    .extracting("code")
+                    .isEqualTo(ErrorCodes.CONFIG));
+  }
+
   // D2-05
   @Test
   void probe_an_explicitly_disabled_intake_starts_even_with_secrets_configured() {
@@ -657,6 +685,42 @@ class IssuanceWiringTest {
     @Bean
     DocumentValidator validator() {
       return (bytes, input) -> DocumentValidator.Report.passed();
+    }
+  }
+
+  /** D14-07: a host that brings its own store and unit of work, on top of every ordinary port. */
+  @Configuration
+  static class PortsWithHostSuppliedUnitOfWork extends Ports {
+
+    @Bean
+    InboundEventStore hostInboundStore(
+        com.housedevinci.einvoice.adapter.jdbc.JdbcUnitOfWork unitOfWork) {
+      return new com.housedevinci.einvoice.adapter.jdbc.JdbcInboundEventStore(unitOfWork);
+    }
+
+    @Bean
+    com.housedevinci.einvoice.application.IssuanceUnitOfWork hostUnitOfWork(
+        InboundEventStore inbound,
+        StripeInvoiceSource source,
+        com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore store,
+        DocumentRenderer renderer,
+        DocumentValidator validator,
+        ArchiveStore archive,
+        com.housedevinci.einvoice.application.PreflightSupport preflightSupport,
+        java.time.Clock clock,
+        EInvoiceProperties properties) {
+      return new com.housedevinci.einvoice.application.IssuanceUnitOfWork(
+          inbound,
+          source,
+          store,
+          store,
+          store,
+          renderer,
+          validator,
+          archive,
+          preflightSupport,
+          clock,
+          EInvoiceIssuanceAutoConfiguration.configuration(properties, source));
     }
   }
 
