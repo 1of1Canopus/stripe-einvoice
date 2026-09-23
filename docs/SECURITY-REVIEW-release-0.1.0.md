@@ -271,3 +271,149 @@ applied and the list is re-read; not before.
    `CipherProbeRcScenariosTest` must flip green with a mutation run each.
 
 Nobody tags 0.1.0 while a HIGH is open.
+
+---
+
+## Second pass — 2026-09-23, on the tree that will be `main` after the void pull request merges
+
+**Verdict: RELEASE WITH FIXES.** One LOW. RC-01, RC-02, RC-03 and RC-04 are all closed and each is
+held by a test on the tree. The one thing outstanding is a ruling from the first pass that was
+asked for "before the tag" and did not land: RC-05 below. It is a paragraph in `SECURITY-NOTES.md`,
+not code. Nothing else blocks the tag.
+
+Reviewed on the head of the void pull request (code at `4877ac3`), which is what `main` becomes on
+merge. Docker up, `CIPHER_PROBE_MAVEN=1`.
+
+### Numbers
+
+| What | Result |
+|---|---|
+| `mvn verify`, full test run | exit 0, 558 tests, 0 failures, 0 errors, 0 skipped |
+| `CipherProbe*` classes | 27 classes, 149 probe tests, all green |
+| `tools/cipher-probe-release-pipeline.sh` | 74 fixed, 0 still weak |
+| `tools/check-private-references.sh` `--self-test` / `--tree` | all cases correct; tree clean |
+| `tools/check-third-party-licences.sh --self-test` | all cases correct, including the coordinate-scoped Saxon deny |
+| Unpinned GitHub Actions across the three workflows | 0 of 22 `uses:` lines |
+| New probes this pass | 2 — one green (the void convergence surface), one RED (RC-05) |
+
+### The threat model, re-run
+
+Every line of the first pass's table still holds, by the same mechanism and the same test; only the
+three "partly" lines and the RC-02 line changed, and all four are now "yes":
+
+| Spec finding | What changed | Proof |
+|---|---|---|
+| D-04 unit of work across two stores | the exhaustive `switch` on the existing issuance state runs before the allocator and before `transition(MAPPED)`; every state write goes through one total failure handler that classifies the refusal instead of throwing | `VoidTerminalDispositionTest` (12 tests), `CipherProbeRcScenariosTest`, `IssuanceCrashTest` |
+| D-08 event ordering | a later event of any type on a disposed invoice concludes on `NUMBER_VOIDED` or `VALIDATION_REFUSED`, keyed on the issuance state and never on the event | `a_later_event_for_a_voided_invoice_concludes_and_allocates_nothing`, `every_issuance_state_reaches_a_declared_outcome_with_nothing_thrown` |
+| D-09 200/500 contract, reconciliation, health | the sweep classifies "no ISSUED row" three ways and enqueues only the one with no recorded reason; a transient store fault keeps its backoff instead of becoming a permanent terminal | `reconciliation_reports_a_voided_invoice_and_never_re_enqueues_it`, `a_sale_with_no_recorded_reason_is_still_re_enqueued`, `probe_a_transient_store_failure_while_burning_is_not_made_permanent` |
+| D-20 the chain, reused verbatim | the cross-check compares the void reason and rule id as well as the identity and state; a burn writes its rule id onto the row so there is something to compare; no canonical-form change and no `chain_version` bump | `VoidJustificationTest` (5 tests), `CipherProbeRcScenariosTest` |
+
+**Threats with no mechanism on this tree: none, and none answered only partly.**
+
+### RC-01 · closed
+
+`probe_an_event_after_a_void_neither_loops_nor_escapes` is green on the tree and runs on every
+build. The design stop was honoured: a one-page design, reviewed (findings V-01 to V-06), then
+code. All eleven readers that can restart work are accounted for — ten asserted by tests, one
+(`IssuanceReprocess`) asserted rather than inherited, the actuator endpoint asserted by reflection
+rather than by reading. The second question the design had to answer explicitly is answered: that
+invoice is never documented again by this module, the sweep reports it under `DEI-278` instead of
+raising a finding the operator cannot clear, and the limitation is stated in the README, in the
+residual list and in the javadoc of both void entry points.
+
+The hard constraint holds in both halves. No state write inside a `catch` can raise a second,
+different exception: `concludeIssuance` classifies instead of throwing, and the re-read it consults
+is itself total, so a store that is down cannot turn a recorded failure into an escape
+(probed, with the guard removed as a mutation to show the probe red).
+
+### RC-02 · closed
+
+`probe_a_rewritten_burn_reason_is_not_reported_by_the_verifier` is green. Both halves exist and
+each was shown red on its own in the builder's mutation run. I ruled on the one deviation — the
+void justification is not strict write-once — in the pull request review and accept it: the trigger
+clause tests the state **edge**, and the transition set makes `VOID_UNUSED` a sink with
+`FAILED_VALIDATION` reachable only from `NUMBERED`, so a row can take a justification-writing edge
+at most twice in its life and both writes are chained. The forged-edge case that the clause does
+permit is detected: `probe_a_forged_disposition_that_plants_a_justification_is_reported_broken`.
+
+### RC-03 and RC-04 · closed
+
+Both README rows now describe what the code does, the voided-invoice outcome is in
+`SECURITY-NOTES.md`'s "what still costs a number" section, and the residual list was re-read after
+the fixes rather than before. The D7-03 paragraph claims only the comparison that now exists; I
+checked the sentence against `IssuanceChainVerifier.dispositionKey` and `countUnchained` rather
+than against the commit message.
+
+### The two fixes interacting with the sweeper and reconciliation
+
+Crash and interruption re-run at the new boundaries, all green:
+
+1. A void taken while a run is archiving: the run concludes terminally, throws nothing, and leaves
+   at most an archive object the sweep names as an orphan.
+2. A `recon-<invoiceId>` row enqueued before the void and still running: caught by the switch when
+   next due, which is the one row the sweep's classification cannot prevent.
+3. A void, a transient store fault on the disposition write, then the retry: the failure handler's
+   re-read is blind, so a real void is misread as a store fault and another attempt is scheduled —
+   and the retry converges on `NUMBER_VOIDED`, is never due again, and leaves the row
+   `VOID_UNUSED`. Probed this pass (`probe_a_void_missed_by_a_failed_reread_converges_on_the_void`,
+   green). The fallback costs one retry and loses no void.
+4. Three consecutive sweeps over one voided sale leave one finding row, not three: the finding
+   store upserts on `(seller, mode, code, subject)` and an acknowledged row is not reopened by the
+   `last_seen` bump.
+
+### RC-05 · LOW · a wording correction this review asked for before the tag has not landed
+
+The first pass's ruling on QUESTIONS 28 required one sentence in `SECURITY-NOTES.md`: that the
+runtime role's own `INSERT` on the reprocess record lets a host append a forged `CONCLUDED` row and
+so suppress `DEI-276` for a request that never finished. The paragraph on this tree says only that
+*a role which owns the schema* can disable the triggers and alter a row — a different and much
+higher privilege — so a reader concludes the finding is safe under the documented deployment. It is
+not.
+
+*Repro.* `probe_a_forged_conclusion_suppresses_the_unfinished_reprocess_finding` (this pass, RED):
+an unconcluded request is raised as `DEI-276` by the sweep; one `INSERT` of a `CONCLUDED` row using
+exactly the grant on line 44 of `docs/schema-grants.sql` — no ownership, no `DISABLE TRIGGER` —
+and the next sweep raises nothing. `JdbcReprocessLedger.UNFINISHED` is a `NOT EXISTS` on a
+`CONCLUDED` row, and the partial unique index permits the one forged row it needs.
+
+*Fix (documentation only).* In `SECURITY-NOTES.md`, in the paragraph beginning "That table is
+append-only against the application role", add that the runtime role's `INSERT` alone suffices to
+append a forged `CONCLUDED` row and suppress `DEI-276`, that this table is not chained so nothing
+reports it afterwards, and that the protection is against rewriting history, not against adding to
+it. Same register as the rest of the list: the consequence, not the mitigation. No code change is
+wanted — the table is append-only by design and a host that can insert its own rows is already
+inside the trust boundary; what is not acceptable is a residual list that reads as if it were not
+so.
+
+### QUESTIONS 29 and 30 — final wording for 0.1.0
+
+**29, the missing retry ceiling.** Correct to ship 0.1.0 with it open. RC-01's source is closed, so
+the void path no longer strands anything; what remains is the general bound, and adding it without
+its own design would create a silent terminal in place of the loop — the same defect one layer
+down. Two things to carry into that pull request's design, recorded here so they are not
+rediscovered: a permanently unavailable store now retries the burn path indefinitely under an
+exponentially capped backoff (no regression — the same fault previously left the row `MAPPED`,
+which the due query re-picked just as indefinitely), and `PARKED` is the legitimately long-lived
+state, so a flat ceiling strands exactly the rows behaving correctly. The wording in QUESTIONS is
+accurate as it stands and needs no change for the tag.
+
+**30, a successor number after a void.** "No" is the right answer for 0.1.0 and the reasoning in
+QUESTIONS is sound. It is no longer only a question: the consequence is stated as a limitation in
+the README row "A number was voided", in the residual list, and in the javadoc of `NumberVoider`
+and `IssuanceVoidService`, including the part that costs the operator most — that the upstream
+remedy needs a credit note this edition does not produce. Releasable as written.
+
+### Residual-risk list
+
+Re-read against the fixed code, not against the plan. It is accurate and unusually complete, with
+one omission, RC-05. The additions this cycle made — the void's irreversibility, the void
+justification's trigger clause, the widened cross-check — each claim only what the code does; I
+checked the three new sentences against the three mechanisms rather than accepting them.
+
+### What to do next
+
+1. Isis: RC-05, one paragraph in `SECURITY-NOTES.md`. No code.
+2. Re-run `probe_a_forged_conclusion_suppresses_the_unfinished_reprocess_finding`? No — it is a
+   documentation finding and the probe asserts the code's behaviour, which is intended. It stays in
+   the internal probe set as the evidence for the sentence, and is not added to the suite.
+3. Then tag. No HIGH, no MEDIUM, and the one LOW is a paragraph.
