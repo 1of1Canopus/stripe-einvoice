@@ -1118,6 +1118,46 @@ probe_preflight_executes_unverified_repository_code() {
 }
 
 # ---------------------------------------------------------------------------
+# D14-08: the ancestry gate moved into `preflight`, and `sample-smoke` was left behind. That
+# job checks out the tag's tree and runs tools/run-sample-smoke.sh from it, in parallel with
+# preflight, so a `v*` tag still gets repository code executed inside the release workflow
+# with nothing established about the tree. Same exposure as D14-04 (no secret, read-only
+# token) and the same checklist line unmet ("ancestry check on every path"). The step body is
+# executed against a tampered script, as D14-04's is; the ordering half is read off the job
+# graph, which is the only place ordering exists.
+# ---------------------------------------------------------------------------
+probe_sample_smoke_runs_unverified_tree_code() {
+  local body work marker job
+  body="$(step_body "$WF" 'Start PostgreSQL, build, run, time to first response')"
+  [ -n "$body" ] || return 0                                   # step vanished: cannot prove it
+
+  work="$(mktemp -d)"
+  marker="$work/executed-attacker-code"
+  git archive HEAD tools | tar -x -C "$work"
+  printf '\n#!/bin/sh\ntouch "%s"\nexit 0\n' "$marker" > "$work/tools/run-sample-smoke.sh"
+  chmod +x "$work/tools/run-sample-smoke.sh"
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 || true
+  if [ ! -e "$marker" ]; then
+    PROBE_SKIP_REASON="the step body did not execute tools/run-sample-smoke.sh from the working tree"
+    rm -rf "$work"
+    return 0
+  fi
+  rm -rf "$work"
+
+  job="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  sample-smoke:$/ {f=1} f' "$WF")"
+  [ -n "$job" ] || return 0
+  # Fixed when the job cannot start before the gates: either it needs the gating job, or it
+  # carries the two checks itself.
+  if grep -qE 'needs:.*preflight' <<<"$job"; then
+    return 1
+  fi
+  if grep -q 'merge-base --is-ancestor' <<<"$job" && grep -q 'verify-tag' <<<"$job"; then
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # A re-run of a green run, or a second tag for a version already cut, would sign and upload
 # a second bundle for a version a human has already seen.
 # ---------------------------------------------------------------------------
@@ -1812,6 +1852,7 @@ probe probe_preflight_accepts_main_without_the_checks        "main without the r
 probe probe_preflight_refuses_when_both_gates_are_real       "preflight refuses even a correctly gated repo"      probe_preflight_refuses_even_when_both_gates_are_real
 probe probe_preflight_has_no_checkout                        "run 35899901341: preflight runs tools it never checked out" probe_preflight_runs_repository_tools_without_a_checkout
 probe probe_preflight_runs_unverified_tree_code              "D14-04 preflight runs tag-tree code before any ancestry check" probe_preflight_executes_unverified_repository_code
+probe probe_sample_smoke_runs_unverified_tree_code           "D14-08 sample-smoke runs tag-tree code with no gate"        probe_sample_smoke_runs_unverified_tree_code
 probe probe_release_does_not_refuse_a_replay                 "a re-run can upload a second bundle"                probe_release_does_not_refuse_a_replay
 probe probe_replay_check_runs_after_the_upload               "the replay check lands after the upload"            probe_replay_check_runs_after_the_upload
 probe probe_replay_check_first_page_only                     "RP-4 a clash on page 1 of deployments is missed"    probe_replay_check_reads_only_the_first_page

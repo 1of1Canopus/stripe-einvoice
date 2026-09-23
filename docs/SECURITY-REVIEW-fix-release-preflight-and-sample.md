@@ -164,3 +164,125 @@ check and its deployment-name prefix untouched.
   `stripe-einvoice-sample/src/test/java/com/housedevinci/einvoice/sample/` before touching any
   production code, and they are public tests from then on.
 - `probe_preflight_runs_unverified_tree_code`, `probe_sample_smoke_is_not_a_required_check_on_main` in `tools/cipher-probe-release-pipeline.sh` (D14-04, D14-05; both WEAK)
+
+## Pass 2 (2026-09-23) - re-verification and new surface (HEAD 3978889)
+
+Second and last pass on this branch. Worktree from `origin/fix/release-preflight-and-sample`,
+Docker up, `./mvnw -B clean verify`: **BUILD SUCCESS, 569 tests** (core 435, starter 126, sample 8),
+0 failures, 0 skipped. Probe suite with `CIPHER_PROBE_MAVEN=1` re-run unchanged before any edit of
+mine: **78 fixed, 0 weak**.
+
+**Verdict: MERGE WITH FIXES** - three LOW, no MEDIUM, no HIGH. The fixes are one line of YAML, one
+sentence of changelog, and one refusal branch in a class that already holds the bean factory; none
+of them is a mechanism, so they go to a correction pass and **no third review pass is required**.
+
+### Closures verified, by probe
+
+| Finding | Claim | Evidence |
+| --- | --- | --- |
+| D14-01 | intake profile probe adopted | `CipherProbePr14IntakeProfileTest` green in the sample module (1 test) |
+| D14-02 | the property gates the intake | `CipherProbePr14Test` and `DisabledIntakeEndpointTest` green: signed event -> 404, 0 inbound rows |
+| D14-03 | documented placeholders refused | `CipherProbePr14Test`, `DocumentedPlaceholderSecretsTest`, `IntakeProfilePlaceholderRefusalTest` green |
+| D14-04 | gates before tree code in preflight | `probe_preflight_runs_unverified_tree_code` FIXED; step order in the job is checkout, ancestry, verify-tag, API gates, scanner |
+| D14-05 | smoke is on the required list | `probe_sample_smoke_not_required_on_main` FIXED |
+| D14-06 | one `Fixed`, one `Changed` | 0.1.0 now carries `Fixed`, `Changed`, `Added`, `Notes` |
+
+Mutations re-run by me, not taken on report:
+
+- D14-02: both `@ConditionalOnProperty` annotations removed from `einvoiceInboundEventStore` and
+  `einvoiceIssuanceUnitOfWork` -> 3 failures (`DisabledIntakeEndpointTest`, `CipherProbePr14Test`,
+  `IssuanceWiringTest`). Restored, green again.
+- D14-03: the two documented literals removed from `StripeSecrets.PLACEHOLDERS` -> 2 failures
+  (`DocumentedPlaceholderSecretsTest`, `CipherProbePr14Test`). Restored, green again. The sample's
+  `IntakeProfilePlaceholderRefusalTest` was run against an already-installed starter, so it is not
+  independent mutation evidence; the starter tests are.
+
+### Attacked, and not a finding
+
+- **A wrong secret format with intake on.** `StripeSecrets.requireWebhookSecrets` names the exact
+  property (`einvoice.stripe.webhook-secrets.<id>`), states the shape, and says "The value is not
+  printed here on purpose"; the placeholder branch says "is a placeholder from a sample file". No
+  secret, no substring of one, and no stack of the configuration source reaches the message.
+- **Where preflight's public key comes from, now that the job holds no secret.**
+  `vars.RELEASE_SIGNING_KEY_ID` - a repository variable, not a file in the tree - is checked for a
+  full 40-character fingerprint before use, the key is fetched from a keyserver, and the match is on
+  `VALIDSIG ... <fingerprint>`, so a substituted key fails. A pull request cannot change a
+  repository variable. A tag pusher does control `release.yml` itself and could delete these steps,
+  which is why the control that matters is unchanged and downstream: `publish` keeps its own copies
+  of both gates, `needs: preflight`, and runs in the reviewer-gated `release` environment. Refused
+  by design, not by this branch.
+- **A host that sets `einvoice.issuance.enabled=false` and declares its own `StripeInvoiceSource`.**
+  The unit of work carries the property itself, so the source alone wires nothing. Covered by
+  `IssuanceWiringTest`.
+
+### D14-07 (LOW) - a host-supplied bean defeats the new gate, and the startup line says otherwise
+
+The D14-02 gate sits on two beans that are both `@ConditionalOnMissingBean`, which is this module's
+documented "bring your own" contract. A host that supplies its own `InboundEventStore` and its own
+`IssuanceUnitOfWork` - both public types with public constructors - and also sets
+`einvoice.issuance.enabled=false` gets `einvoiceWebhookController` mapped again, with the worker
+behind it. Worse than the wiring, the new numbering-only line answers that context with "No Stripe
+intake is wired: no webhook endpoint, no inbound event store, no issuance worker", which the check
+never asked the bean factory about. The line is the only evidence an operator is given for
+"numbering API only", and here it is false.
+
+Repro: `CipherProbePr14bTest.probe_a_host_supplied_unit_of_work_reopens_the_webhook_endpoint_with_intake_off`
+and `probe_the_numbering_only_line_claims_absences_it_never_checked` (internal probes folder, both
+RED on this HEAD: `["einvoiceWebhookController"]` present with the property false).
+
+Rated LOW because the host wrote those beans on purpose and the endpoint still verifies signatures;
+it is the property not being authoritative, and a startup claim that is not checked.
+
+Fix (correction pass): in `IssuanceIntakeWiringCheck.afterPropertiesSet`, inside the
+`explicitlyDisabled()` branch, ask `beanFactory` for `IssuanceUnitOfWork`, `InboundEventStore`,
+`IssuanceWorker` and `StripeWebhookController`; if any is present, throw
+`EInvoiceException(ErrorCodes.CONFIG, ...)` naming the bean names found and the two ways out (drop
+the bean, or set `einvoice.issuance.enabled=true`). The property wins: a contradiction is refused,
+never logged over. Only when none is present may the existing line be printed. Tests: adopt both
+probes into
+`stripe-einvoice-spring-boot-starter/src/test/java/com/housedevinci/einvoice/autoconfigure/`, and
+extend `IssuanceWiringTest` with a host-supplied-unit-of-work-with-intake-off case that asserts the
+context failed with the CONFIG code.
+
+### D14-08 (LOW) - the ancestry gate moved into preflight and left `sample-smoke` behind
+
+`sample-smoke` in `release.yml` has no `needs:`. It checks out the tag's tree and runs
+`tools/run-sample-smoke.sh` from it, in parallel with `preflight`, so a `v*` tag still gets
+repository code executed inside the release workflow with nothing established about the tree - the
+same defect D14-04 closed one job to the left. Same reasons for LOW as D14-04: no secret, no
+environment, read-only token, and `publish` carries no Maven cache (M3), so there is no channel from
+this job to the signing job. The checklist line ("ancestry check on every path") is still the one
+unmet.
+
+Repro: `probe_sample_smoke_runs_unverified_tree_code` in `tools/cipher-probe-release-pipeline.sh`
+(added by this review) - executes the job's step body against a tampered `tools/run-sample-smoke.sh`,
+shows the tampering ran, then reads the job graph. **WEAK** on this HEAD; suite now 78 fixed, 1 weak.
+
+Fix (correction pass): `needs: preflight` on the `sample-smoke` job in `release.yml`. The `ci.yml`
+copy is on the pull-request path and is unaffected.
+
+### D14-09 (LOW) - the changelog denies the endpoint this module auto-configures
+
+`CHANGELOG.md`, 0.1.0 `Notes`: "This module auto-configures no HTTP endpoint at all". The module
+auto-configures `einvoiceWebhookController`, a POST endpoint that no host authentication stands in
+front of (it authenticates the sender by Stripe signature), whenever the intake is wired. The
+builder flagged this and asked for a ruling: **it is a finding, LOW, fixed in this branch.** A
+changelog is the public statement of what a version ships, and understating the attack surface is
+the kind of error a reader cannot catch.
+
+Repro: `CipherProbePr14bTest.probe_the_changelog_denies_the_endpoint_this_module_auto_configures` -
+RED: a wired context maps the controller while the file carries the sentence.
+
+Fix (correction pass): replace the sentence with what is true - the only auto-configured HTTP
+endpoint is the Stripe webhook controller, mapped only when the intake is wired (renderer, validator
+and Stripe source present, `einvoice.issuance.enabled` not false, `einvoice.webhook.enabled` not
+false); the privileged reprocess and the numbering API open no route of their own. Adopt the probe
+with the fix.
+
+### Probes added by this pass
+
+- `CipherProbePr14bTest.java` (D14-07 x2, D14-09; all three RED), in the internal probes folder for
+  this module; the correction pass copies it into the starter's test tree before touching
+  production code.
+- `probe_sample_smoke_runs_unverified_tree_code` in `tools/cipher-probe-release-pipeline.sh`
+  (D14-08; WEAK), committed with this review as the pass-1 probes were.
