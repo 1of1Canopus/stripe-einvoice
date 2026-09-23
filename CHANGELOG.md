@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-09-23
+
 ### Fixed
 
 - **A Stripe invoice whose only number was voided is terminal, and nothing loops.** The module's own
