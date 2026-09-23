@@ -1877,6 +1877,91 @@ probe probe_sources_jar_contents_are_never_asserted          "nothing asserts wh
 probe probe_sources_jar_allowlist_is_extension_only          "RP-3 the sources-jar check is extension-only"       probe_sources_jar_assertion_is_extension_only_not_path_based
 
 echo
+# ---------------------------------------------------------------------------
+# D-SCAN-01 (release run 35922939487, third failed tag). The pre-sign Grype step staged the
+# two published jars and then ran a BARE `dependency:copy-dependencies -pl core,starter` to
+# stage their runtime classpath. The starter depends on com.housedevinci:stripe-einvoice-core
+# at the release version, which at that moment exists in exactly one place - this reactor's
+# target/ - and, because the replay refusal two steps earlier just proved it, nowhere else.
+# With the job's empty local repository the only place Maven could look was Central, so the
+# step died with "Could not find artifact com.housedevinci:stripe-einvoice-core:jar:0.1.0 in
+# central" and the release stopped before signing. The shape is the one the checklist names:
+# a step that exists only in release.yml and therefore had never executed for real.
+#
+# Executed, not grepped: this probe extracts the step body from release.yml, builds a
+# synthetic reactor at a release version (versions:set, no -SNAPSHOT) with an EMPTY local
+# Maven repository, stubs the Grype binary the step invokes with one that reports the
+# artifacts it was handed, and runs the body. Weak while the body exits non-zero, or while
+# the scan set it produced does not contain both published jars plus their resolved runtime
+# dependencies.
+# ---------------------------------------------------------------------------
+probe_pre_sign_scan_cannot_resolve_the_reactors_own_modules() {
+  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe runs an inner Maven build against an empty local repository; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
+  local body work rc scanned
+  body="$(step_body "$WF" 'Scan the artifacts this release is about to sign')"
+  [ -n "$body" ] || return 0                       # step vanished: cannot prove the fix, weak
+  # The runner substitutes ${{ runner.temp }} before bash ever sees it; bash would read it
+  # as a bad substitution. RUNNER_TEMP is the same directory.
+  body="${body//\$\{\{ runner.temp \}\}/\$RUNNER_TEMP}"
+
+  work="$(mktemp -d)"
+  git clone -q --no-hardlinks . "$work/tree" || { rm -rf "$work"; return 1; }
+  mkdir -p "$work/t/bin" "$work/m2"
+  # A stand-in for the pinned Grype: it asserts nothing about vulnerabilities, it records
+  # what it was asked to scan, in the report shape the severity gate demands (an empty
+  # "artifacts" list is refused by check-vulnerability-report.py, D4-01).
+  cat > "$work/t/bin/grype" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+target=""; out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    dir:*) target="${1#dir:}" ;;
+    --file) out="$2"; shift ;;
+  esac
+  shift
+done
+{
+  printf '{"matches": [], "artifacts": ['
+  sep=""
+  while IFS= read -r jar; do
+    printf '%s{"name": "%s", "version": "0", "type": "java-archive"}' "$sep" "$(basename "$jar")"
+    sep=", "
+  done < <(find "$target" -name '*.jar' | sort)
+  printf ']}\n'
+} > "$out"
+STUB
+  chmod +x "$work/t/bin/grype"
+
+  (
+    cd "$work/tree" &&
+    export MAVEN_OPTS="-Dmaven.repo.local=$work/m2" &&
+    # A release version: no -SNAPSHOT, and no repository anywhere has it.
+    ./mvnw -B -q org.codehaus.mojo:versions-maven-plugin:2.21.0:set \
+      -Dmaven.repo.local="$work/m2" -DnewVersion=99.99.99-probe \
+      -DprocessAllModules=true -DgenerateBackupPoms=false &&
+    # What the reproducibility check leaves behind for the scan step: packaged jars in
+    # target/, and nothing installed into the local repository.
+    ./mvnw -B -q -DskipTests -Dmaven.repo.local="$work/m2" clean package
+  ) >>"$PROBE_CAPTURE" 2>&1 || {
+    PROBE_SKIP_REASON="the synthetic reactor could not be built at all, so the step body was never exercised"
+    rm -rf "$work"; return 0
+  }
+
+  ( cd "$work/tree" && RUNNER_TEMP="$work/t" PATH="$PATH" \
+      GITHUB_STEP_SUMMARY="$work/summary.md" bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  if [ "$rc" -ne 0 ]; then rm -rf "$work"; return 0; fi     # the step failed: weakness present
+
+  # It exited 0 - now prove it scanned the right set, from the report the scanner wrote.
+  scanned="$(cat "$work/t/grype.json" 2>/dev/null || true)"
+  rm -rf "$work"
+  grep -q 'stripe-einvoice-core-99.99.99-probe.jar' <<<"$scanned" || return 0
+  grep -q 'stripe-einvoice-spring-boot-starter-99.99.99-probe.jar' <<<"$scanned" || return 0
+  grep -q 'spring-' <<<"$scanned" || return 0        # the resolved runtime dependencies
+  return 1
+}
+
 probe probe_artifacts_ship_no_xslt2_processor                "S1 a default install can validate nothing"          probe_published_artifacts_ship_no_xslt2_processor
 probe probe_mpl_carve_out_is_not_coordinate_scoped           "S2 a second MPL dependency passes the gate"         probe_mpl_carve_out_is_not_scoped_to_one_coordinate
 probe probe_mpl_carve_out_admits_any_licence_on_saxon        "S3 GPL on the carved-out coordinate passes"         probe_mpl_carve_out_admits_any_denied_licence_on_that_coordinate
@@ -1888,6 +1973,7 @@ probe a_grype_report_that_scanned_nothing_is_refused         "D4-01 an empty Gry
 probe probe_medium_finding_is_never_written_down             "S8 a MEDIUM finding leaves no record"               probe_a_medium_finding_is_never_written_down
 probe probe_weekly_deep_scan_red_or_silent_without_a_key     "S9 the weekly run is red, or skips in silence"      probe_the_weekly_deep_scan_is_red_or_silent_without_a_key
 probe probe_scanner_downloads_are_unverified                 "S10 a tampered scanner binary installs"             probe_scanner_downloads_are_installed_without_verification
+probe probe_pre_sign_scan_cannot_resolve_reactor_modules      "D-SCAN-01 the pre-sign scan resolves its own module from Central" probe_pre_sign_scan_cannot_resolve_the_reactors_own_modules
 
 echo
 echo "still weak: $pass    fixed: $flipped"

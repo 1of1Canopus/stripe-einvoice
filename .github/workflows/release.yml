@@ -525,10 +525,32 @@ jobs:
           # sample is never published, and a release held back by an advisory in a dependency of
           # a reference application nobody deploys is the noise that gets a gate switched off.
           # The sample is not unscanned: the per-pull-request check covers the whole tree.
-          ./mvnw -B -q dependency:copy-dependencies \
-            -pl stripe-einvoice-core,stripe-einvoice-spring-boot-starter \
+          #
+          # `package` runs in the SAME invocation as copy-dependencies on purpose (release run
+          # 35922939487): the starter depends on com.housedevinci:stripe-einvoice-core at the
+          # release version, which at this point exists nowhere but this reactor - not in the
+          # job's empty local repository, and, because the replay refusal above just proved it,
+          # not on Central either. A bare `dependency:copy-dependencies` therefore asked Central
+          # for it and failed the release. Packaging the selected modules first inside one
+          # session makes Maven resolve the sibling from the reactor's own target/ jar.
+          # -am pulls in the parent pom project for the same reason.
+          ./mvnw -B -q -DskipTests package dependency:copy-dependencies \
+            -pl stripe-einvoice-core,stripe-einvoice-spring-boot-starter -am \
             -Dmaven.repo.local="${{ runner.temp }}/m2repo" \
             -DincludeScope=runtime -DoutputDirectory="$scan"
+          # And prove it resolved from the reactor: the core jar the starter's dependency set
+          # dragged in must be byte-identical to the core jar this job built and is about to
+          # sign. If a same-version artifact were ever fetched from a repository instead, the
+          # scan would be describing someone else's bytes.
+          for built in stripe-einvoice-core/target/stripe-einvoice-core-*.jar; do
+            case "$built" in *-sources.jar|*-javadoc.jar) continue ;; esac
+            resolved="$scan/$(basename "$built")"
+            [ -f "$resolved" ] || continue
+            if [ "$(shasum -a 256 "$built" | cut -d' ' -f1)" != "$(shasum -a 256 "$resolved" | cut -d' ' -f1)" ]; then
+              echo "::error::$(basename "$built") in the scan set is not the jar this job built: the sibling module was resolved from a repository, not from the reactor"
+              exit 1
+            fi
+          done
           count="$(find "$scan" -name '*.jar' | wc -l | tr -d ' ')"
           echo "scanning $count jar(s)"
           [ "$count" -gt 0 ] || { echo "::error::nothing to scan; refusing to call that clean"; exit 1; }
