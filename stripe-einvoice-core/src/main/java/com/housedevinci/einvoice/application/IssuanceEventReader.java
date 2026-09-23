@@ -25,8 +25,15 @@ public interface IssuanceEventReader {
    * forged, already-disposed row inserted out of band in a different fiscal year with the same
    * number.
    *
+   * <p>RC-02: the two void columns are part of that identity. The justification for a hole in the
+   * issued sequence is what an auditor is shown, it is chained, and the runtime role can
+   * legitimately {@code UPDATE} this table - so if the row and the chain disagree about why a
+   * number was burned, that is exactly the disagreement this cross-check exists to report.
+   *
    * @param legalNumber the rendered number, which is what the log and the row must agree on
    * @param stripeInvoiceId the source object id: one sale, one number, for all time
+   * @param voidReason the operator's or the pipeline's reason, screened, as the row holds it
+   * @param voidRuleId the failing rule id or refusal code the disposition recorded
    */
   record DisposedIssuance(
       String sellerId,
@@ -35,5 +42,7 @@ public interface IssuanceEventReader {
       int fiscalYear,
       String stripeInvoiceId,
       String legalNumber,
-      String state) {}
+      String state,
+      String voidReason,
+      String voidRuleId) {}
 }
