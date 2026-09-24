@@ -1895,21 +1895,41 @@ echo
 # the scan set it produced does not contain both published jars plus their resolved runtime
 # dependencies.
 # ---------------------------------------------------------------------------
-probe_pre_sign_scan_cannot_resolve_the_reactors_own_modules() {
-  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe runs an inner Maven build against an empty local repository; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
-  local body work rc scanned
-  body="$(step_body "$WF" 'Scan the artifacts this release is about to sign')"
-  [ -n "$body" ] || return 0                       # step vanished: cannot prove the fix, weak
-  # The runner substitutes ${{ runner.temp }} before bash ever sees it; bash would read it
-  # as a bad substitution. RUNNER_TEMP is the same directory.
-  body="${body//\$\{\{ runner.temp \}\}/\$RUNNER_TEMP}"
-
+# A synthetic reactor at a RELEASE version, built exactly the way the signing job builds it:
+# versions:set to a version no repository has, an empty local Maven repository, and the real
+# scripts/verify-reproducible.sh run over it so the checksum record the scan step binds to is
+# the genuine article rather than a hand-written file. Built once, then handed to each probe
+# as a private copy. The local repository is carried over the way it is in a release job
+# (warm from the reproducibility check) - and it holds nothing of our own group, because
+# those builds only ever `package`, which is precisely the condition that broke run
+# 35922939487.
+_SCAN_FIXTURE=""
+_scan_step_fixture() {   # echoes a work dir holding tree/, record.txt, t/ (the runner temp)
+  local base work
+  if [ -z "$_SCAN_FIXTURE" ]; then
+    base="$(mktemp -d)"
+    if ! ( git clone -q --no-hardlinks . "$base/tree" &&
+           cd "$base/tree" &&
+           export MAVEN_OPTS="-Dmaven.repo.local=$base/m2" &&
+           ./mvnw -B -q org.codehaus.mojo:versions-maven-plugin:2.21.0:set \
+             -Dmaven.repo.local="$base/m2" -DnewVersion=99.99.99-probe \
+             -DprocessAllModules=true -DgenerateBackupPoms=false &&
+           REPRODUCIBLE_SHA_FILE="$base/record.txt" scripts/verify-reproducible.sh
+         ) >>"$PROBE_CAPTURE" 2>&1; then
+      rm -rf "$base"; return 1
+    fi
+    # The defect this fixture exists to reproduce needs our own coordinates to be absent.
+    if [ -d "$base/m2/com/housedevinci" ]; then rm -rf "$base"; return 1; fi
+    _SCAN_FIXTURE="$base"
+  fi
   work="$(mktemp -d)"
-  git clone -q --no-hardlinks . "$work/tree" || { rm -rf "$work"; return 1; }
-  mkdir -p "$work/t/bin" "$work/m2"
-  # A stand-in for the pinned Grype: it asserts nothing about vulnerabilities, it records
-  # what it was asked to scan, in the report shape the severity gate demands (an empty
-  # "artifacts" list is refused by check-vulnerability-report.py, D4-01).
+  cp -a "$_SCAN_FIXTURE/tree" "$work/tree"
+  mkdir -p "$work/t/bin"
+  cp -a "$_SCAN_FIXTURE/m2" "$work/t/m2repo"
+  cp "$_SCAN_FIXTURE/record.txt" "$work/t/reproducible-sha256.txt"
+  # A stand-in for the pinned Grype: it asserts nothing about vulnerabilities, it records what
+  # it was asked to scan, in the report shape the severity gate demands (an empty "artifacts"
+  # list is refused by check-vulnerability-report.py, D4-01).
   cat > "$work/t/bin/grype" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1932,34 +1952,100 @@ done
 } > "$out"
 STUB
   chmod +x "$work/t/bin/grype"
+  printf '%s' "$work"
+}
 
-  (
-    cd "$work/tree" &&
-    export MAVEN_OPTS="-Dmaven.repo.local=$work/m2" &&
-    # A release version: no -SNAPSHOT, and no repository anywhere has it.
-    ./mvnw -B -q org.codehaus.mojo:versions-maven-plugin:2.21.0:set \
-      -Dmaven.repo.local="$work/m2" -DnewVersion=99.99.99-probe \
-      -DprocessAllModules=true -DgenerateBackupPoms=false &&
-    # What the reproducibility check leaves behind for the scan step: packaged jars in
-    # target/, and nothing installed into the local repository.
-    ./mvnw -B -q -DskipTests -Dmaven.repo.local="$work/m2" clean package
-  ) >>"$PROBE_CAPTURE" 2>&1 || {
-    PROBE_SKIP_REASON="the synthetic reactor could not be built at all, so the step body was never exercised"
-    rm -rf "$work"; return 0
-  }
-
-  ( cd "$work/tree" && RUNNER_TEMP="$work/t" PATH="$PATH" \
+# Runs the real "Scan the artifacts this release is about to sign" body in a fixture copy and
+# echoes its exit code. The runner substitutes ${{ ... }} before bash ever sees it; bash would
+# read ${{ as a bad substitution.
+_scan_step_exit() {   # _scan_step_exit <work dir>
+  local work="$1" body rc ts
+  body="$(step_body "$WF" 'Scan the artifacts this release is about to sign')"
+  [ -n "$body" ] || { echo 127; return; }
+  ts="$(cd "$work/tree" && scripts/git-commit-timestamp.sh)"
+  body="${body//\$\{\{ runner.temp \}\}/\$RUNNER_TEMP}"
+  body="${body//\$\{\{ steps.v.outputs.timestamp \}\}/\$PROBE_RELEASE_TIMESTAMP}"
+  ( cd "$work/tree" && RUNNER_TEMP="$work/t" PROBE_RELEASE_TIMESTAMP="$ts" \
       GITHUB_STEP_SUMMARY="$work/summary.md" bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1
   rc=$?
-  if [ "$rc" -ne 0 ]; then rm -rf "$work"; return 0; fi     # the step failed: weakness present
+  echo "$rc"
+}
 
-  # It exited 0 - now prove it scanned the right set, from the report the scanner wrote.
+# ---------------------------------------------------------------------------
+# D-SCAN-01 (release run 35922939487, third failed tag). The pre-sign Grype step staged the
+# published jars and then ran a BARE `dependency:copy-dependencies -pl core,starter` to stage
+# their runtime classpath. The starter depends on com.housedevinci:stripe-einvoice-core at the
+# release version, which at that moment exists in exactly one place - this reactor's target/ -
+# and, because the replay refusal two steps earlier just proved it, nowhere else. With the
+# job's local repository holding nothing of our group, the only place Maven could look was
+# Central, so the step died with "Could not find artifact
+# com.housedevinci:stripe-einvoice-core:jar:0.1.0 in central" and the release stopped before
+# signing. The shape is the one the checklist names: a step that exists only in release.yml
+# and had therefore never executed for real.
+#
+# Executed, not grepped: the step body is run against the synthetic reactor above. Weak while
+# the body exits non-zero, or while the scan set it produced does not contain both published
+# jars plus their resolved runtime dependencies.
+# ---------------------------------------------------------------------------
+probe_pre_sign_scan_cannot_resolve_the_reactors_own_modules() {
+  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe builds a synthetic release reactor; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
+  local work rc scanned
+  work="$(_scan_step_fixture)" || { PROBE_SKIP_REASON="the synthetic release reactor could not be built, so the step body was never exercised"; return 0; }
+  rc="$(_scan_step_exit "$work")"
+  if [ "$rc" -ne 0 ]; then rm -rf "$work"; return 0; fi      # the step failed: weakness present
   scanned="$(cat "$work/t/grype.json" 2>/dev/null || true)"
   rm -rf "$work"
   grep -q 'stripe-einvoice-core-99.99.99-probe.jar' <<<"$scanned" || return 0
   grep -q 'stripe-einvoice-spring-boot-starter-99.99.99-probe.jar' <<<"$scanned" || return 0
   grep -q 'spring-' <<<"$scanned" || return 0        # the resolved runtime dependencies
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# D15-01 / D15-02 (security review of this branch). The first version of the identity check
+# compared the jar in the scan set against the jar in target/ - the same directory the step's
+# own inner build writes to, so the reference was the file the step had just overwritten, and
+# deleting the whole check changed no probe's verdict. The reference must be the checksum
+# record the reproducibility check wrote, which is also what the post-deploy step compares the
+# uploaded bundle against.
+#
+# Executed: the fixture's core jar is replaced in target/ AFTER the record was written, which
+# is exactly the state a rewritten target/, or a same-version artifact arriving from a
+# repository, would leave behind. Weak unless the step body refuses.
+# ---------------------------------------------------------------------------
+probe_pre_sign_scan_accepts_a_jar_that_is_not_the_recorded_build() {
+  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe builds a synthetic release reactor; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
+  local work rc jar
+  work="$(_scan_step_fixture)" || { PROBE_SKIP_REASON="the synthetic release reactor could not be built, so the step body was never exercised"; return 0; }
+  jar="$work/tree/stripe-einvoice-core/target/stripe-einvoice-core-99.99.99-probe.jar"
+  if [ ! -f "$jar" ]; then rm -rf "$work"; PROBE_SKIP_REASON="the fixture produced no core jar to tamper with"; return 0; fi
+  # Appended, not replaced: the file stays a readable jar and stays newer than its inputs, so
+  # the inner build leaves it alone and the scan set really does carry the tampered bytes.
+  printf 'not the recorded build' >> "$jar"
+  rc="$(_scan_step_exit "$work")"
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]    # accepted a jar that is not the recorded artifact: weakness present
+}
+
+# ---------------------------------------------------------------------------
+# D15-03 (same review). `[ -f "$resolved" ] || continue` made an absent jar a skipped
+# iteration, and the only other guard - `count -gt 0` - is satisfied by the 88 dependency
+# jars on their own, so a scan set that had silently stopped containing our own artifacts read
+# as scanned and clean. The check must be over every recorded jar of ours, both modules, with
+# absence a refusal.
+#
+# Executed: a jar the reproducibility check recorded is one the scan set cannot produce. Weak
+# unless the step body refuses.
+# ---------------------------------------------------------------------------
+probe_pre_sign_scan_accepts_a_published_jar_missing_from_the_scan_set() {
+  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe builds a synthetic release reactor; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
+  local work rc
+  work="$(_scan_step_fixture)" || { PROBE_SKIP_REASON="the synthetic release reactor could not be built, so the step body was never exercised"; return 0; }
+  printf '%s  %s\n' "0000000000000000000000000000000000000000000000000000000000000000" \
+    "stripe-einvoice-core-99.99.99-probe-shaded.jar" >> "$work/t/reproducible-sha256.txt"
+  rc="$(_scan_step_exit "$work")"
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]    # a recorded jar absent from the scan set passed: weakness present
 }
 
 probe probe_artifacts_ship_no_xslt2_processor                "S1 a default install can validate nothing"          probe_published_artifacts_ship_no_xslt2_processor
@@ -1974,6 +2060,10 @@ probe probe_medium_finding_is_never_written_down             "S8 a MEDIUM findin
 probe probe_weekly_deep_scan_red_or_silent_without_a_key     "S9 the weekly run is red, or skips in silence"      probe_the_weekly_deep_scan_is_red_or_silent_without_a_key
 probe probe_scanner_downloads_are_unverified                 "S10 a tampered scanner binary installs"             probe_scanner_downloads_are_installed_without_verification
 probe probe_pre_sign_scan_cannot_resolve_reactor_modules      "D-SCAN-01 the pre-sign scan resolves its own module from Central" probe_pre_sign_scan_cannot_resolve_the_reactors_own_modules
+probe probe_pre_sign_scan_accepts_an_unrecorded_jar          "D15-01/02 the scan set is not bound to the recorded build" probe_pre_sign_scan_accepts_a_jar_that_is_not_the_recorded_build
+probe probe_pre_sign_scan_accepts_a_missing_published_jar    "D15-03 a published jar absent from the scan set passes"    probe_pre_sign_scan_accepts_a_published_jar_missing_from_the_scan_set
+
+[ -z "$_SCAN_FIXTURE" ] || rm -rf "$_SCAN_FIXTURE"
 
 echo
 echo "still weak: $pass    fixed: $flipped"
