@@ -513,22 +513,90 @@ jobs:
         run: |
           set -euo pipefail
           scan="${RUNNER_TEMP}/release-scan"
+          # D15-02: the reference for "the bytes this release signs" is the record the
+          # reproducibility check wrote, NOT whatever is in target/ at this moment - target/ is
+          # a directory this step's own inner build writes to, so a jar compared against it is
+          # only ever compared against itself. That record is also what the post-deploy step
+          # compares the uploaded bundle against, so binding the scan to it binds the scan, the
+          # proved build and the upload to one set of bytes.
+          record="${RUNNER_TEMP}/reproducible-sha256.txt"
           rm -rf "$scan"; mkdir -p "$scan"
-          # The two published jars, exactly as the reproducibility check just built them.
+          [ -f "$record" ] || { echo "::error::no checksum record from the reproducibility check; a scan that cannot be bound to the artifacts being signed is not evidence"; exit 1; }
+          # The published jars, exactly as the reproducibility check just built them.
           for module in stripe-einvoice-core stripe-einvoice-spring-boot-starter; do
             for jar in "$module"/target/*.jar; do
               [ -f "$jar" ] || { echo "::error::no jar in $module/target to scan"; exit 1; }
               cp "$jar" "$scan/"
             done
           done
+
+          # D15-01, D15-03: every jar of ours in the scan set must be, byte for byte, an artifact
+          # the reproducibility check recorded - checked over BOTH published modules and over
+          # every recorded jar, with an absent jar a refusal rather than a skipped iteration.
+          # Called twice: once on what was staged above, and once after copy-dependencies, which
+          # writes our own coordinates into the same directory and is the path a
+          # repository-fetched same-version artifact would arrive by.
+          assert_scan_set_is_the_recorded_build() { # <when>
+            local when="$1" name expected actual rc=0
+            # Every recorded jar must be present and identical. Javadoc jars follow the same
+            # not-enforced rule as the post-deploy comparison (javadoc embeds JDK build detail
+            # that -notimestamp does not remove).
+            while read -r expected name _; do
+              [ -n "${name:-}" ] || continue
+              case "$name" in *.jar) ;; *) continue ;; esac
+              if [ ! -f "$scan/$name" ]; then
+                echo "::error::$name was built and recorded for this release but is not in the scan set ($when): the scan does not cover what is about to be signed"
+                rc=1; continue
+              fi
+              actual="$(shasum -a 256 "$scan/$name" | cut -d' ' -f1)"
+              [ "$expected" = "$actual" ] && continue
+              case "$name" in
+                *-javadoc.jar)
+                  echo "::warning::$name in the scan set differs from the recorded build (not enforced: the javadoc jar is not diffed)" ;;
+                *)
+                  echo "::error::$name in the scan set ($when) is not the artifact the reproducibility check recorded: $expected vs $actual. Either target/ was rewritten after the check, or this coordinate was resolved from a repository instead of from the reactor"
+                  rc=1 ;;
+              esac
+            done < "$record"
+            # And the other direction, for our group only: a jar of ours in the scan set that the
+            # reproducibility check never recorded is an artifact nobody proved.
+            for f in "$scan"/stripe-einvoice-*.jar; do
+              [ -e "$f" ] || continue
+              name="$(basename "$f")"
+              if ! awk -v n=" $name" 'index($0, n) { found=1 } END { exit !found }' "$record"; then
+                echo "::error::$name is in the scan set ($when) but was never recorded by the reproducibility check"
+                rc=1
+              fi
+            done
+            return "$rc"
+          }
+          assert_scan_set_is_the_recorded_build "staged from target/"
+
           # Every jar a host actually gets at runtime, for the two PUBLISHED modules only. The
           # sample is never published, and a release held back by an advisory in a dependency of
           # a reference application nobody deploys is the noise that gets a gate switched off.
           # The sample is not unscanned: the per-pull-request check covers the whole tree.
-          ./mvnw -B -q dependency:copy-dependencies \
-            -pl stripe-einvoice-core,stripe-einvoice-spring-boot-starter \
+          #
+          # `package` runs in the SAME invocation as copy-dependencies on purpose (release run
+          # 35922939487): the starter depends on com.housedevinci:stripe-einvoice-core at the
+          # release version, which at this point exists nowhere but this reactor - not in the
+          # job's empty local repository, and, because the replay refusal above just proved it,
+          # not on Central either. A bare `dependency:copy-dependencies` therefore asked Central
+          # for it and failed the release. Packaging the selected modules first inside one
+          # session makes Maven resolve the sibling from the reactor's own target/ jar.
+          # -am pulls in the parent pom project for the same reason.
+          #
+          # Same profile, same timestamp and same test setting as the reproducibility check's
+          # builds (D15-02): an inner build with the pom's default timestamp would rewrite
+          # target/ with bytes nobody proved, and the assertion below would then - correctly -
+          # refuse the release.
+          ./mvnw -B -q -Prelease -Dgpg.skip=true -DskipTests \
+            -Dproject.build.outputTimestamp="${{ steps.v.outputs.timestamp }}" \
+            package dependency:copy-dependencies \
+            -pl stripe-einvoice-core,stripe-einvoice-spring-boot-starter -am \
             -Dmaven.repo.local="${{ runner.temp }}/m2repo" \
             -DincludeScope=runtime -DoutputDirectory="$scan"
+          assert_scan_set_is_the_recorded_build "after the dependency copy"
           count="$(find "$scan" -name '*.jar' | wc -l | tr -d ' ')"
           echo "scanning $count jar(s)"
           [ "$count" -gt 0 ] || { echo "::error::nothing to scan; refusing to call that clean"; exit 1; }
