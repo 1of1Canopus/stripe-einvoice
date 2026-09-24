@@ -8,18 +8,24 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 /**
- * Two properties that are cheaper to assert over the source than to re-derive in review, and that a
+ * Properties that are cheaper to assert over the source than to re-derive in review, and that a
  * future change would otherwise break silently.
  */
 class SourceAssertionsTest {
 
   private static final Path MAIN = Path.of("src/main/java");
+  private static final Path TEST = Path.of("src/test/java");
+  private static final Path SAMPLE_COMPOSE =
+      Path.of("../stripe-einvoice-sample/docker-compose.yml");
 
   @Test
   void no_sequence_no_nextval_and_no_generated_value_touches_the_legal_number() throws IOException {
@@ -101,6 +107,43 @@ class SourceAssertionsTest {
     // virtual threads into 200 pinned carriers.
     List<String> offenders =
         sources().filter(path -> read(path).contains("synchronized")).map(Path::toString).toList();
+    assertThat(offenders).isEmpty();
+  }
+
+  @Test
+  void every_container_image_reference_is_pinned_by_digest() throws IOException {
+    // D16-02. The digest pin on a Testcontainers image is a convention, not a guard, unless
+    // something refuses the tag-only form: a future edit (or a merge conflict resolved the easy
+    // way) can otherwise silently return the module's measurements to a moving tag.
+    Pattern dockerImageName = Pattern.compile("DockerImageName\\s*\\.\\s*parse\\s*\\(([^;]*?)\\)");
+    List<String> offenders = new ArrayList<>();
+    try (Stream<Path> main = Files.walk(MAIN);
+        Stream<Path> test = Files.walk(TEST)) {
+      for (Path path :
+          Stream.concat(main, test).filter(p -> p.toString().endsWith(".java")).toList()) {
+        String text = read(path);
+        Matcher m = dockerImageName.matcher(text);
+        while (m.find()) {
+          String argument =
+              m.group(1).replaceAll("\\s+", "").replace("\"+\"", "").replace("\"", "");
+          if (!argument.contains("@sha256:")) {
+            offenders.add(path + " -> " + argument);
+          }
+        }
+      }
+    }
+
+    // The sample's compose file pins the same way, with a plain "image:" line instead of
+    // DockerImageName.parse.
+    if (Files.exists(SAMPLE_COMPOSE)) {
+      for (String line : Files.readAllLines(SAMPLE_COMPOSE)) {
+        String trimmed = line.strip();
+        if (trimmed.startsWith("image:") && !trimmed.contains("@sha256:")) {
+          offenders.add(SAMPLE_COMPOSE + " -> " + trimmed);
+        }
+      }
+    }
+
     assertThat(offenders).isEmpty();
   }
 

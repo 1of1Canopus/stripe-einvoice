@@ -313,6 +313,11 @@ fails the build; four self-test cases and two probes hold each of those lines. *
 exemption to a dependency whose licence is reciprocal at the work level** (GPL, AGPL, SSPL): there
 the same shape of carve-out would relicense the product, and the invariant above does not hold.
 
+The test-only container images (S3Mock for the archive suite, PostgreSQL for the rest) are pinned
+by digest too, held to that by a source assertion (`SourceAssertionsTest`) that refuses a tag-only
+image reference anywhere in `src/main/java`, `src/test/java` or the sample's compose file; the full
+table (image, digest, registry, licence) is in the module's internal release document.
+
 Saxon brings `org.xmlresolver:xmlresolver` (Apache-2.0) with it. It is a resolver, which is exactly
 the component the hardening above neutralises: DOCTYPE is refused at the parser, external DTD,
 schema and stylesheet access is blanked, and the resolvers installed throw on any resolution
