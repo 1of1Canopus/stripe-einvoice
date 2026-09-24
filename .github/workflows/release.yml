@@ -641,7 +641,7 @@ jobs:
             echo
             echo "$count jar(s) staged; coverage reported by the gate:"
             echo
-            grep -E 'were scanned|matched by digest' "${RUNNER_TEMP}/vulnscan-gate.txt" | sed 's/^/- /'
+            { grep -E 'were scanned|matched by digest' "${RUNNER_TEMP}/vulnscan-gate.txt" || echo "the gate printed no coverage line"; } | sed 's/^/- /'
             echo
             echo "#### Vulnerabilities below the release threshold"
             echo
