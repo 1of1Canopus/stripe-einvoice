@@ -600,8 +600,24 @@ jobs:
           count="$(find "$scan" -name '*.jar' | wc -l | tr -d ' ')"
           echo "scanning $count jar(s)"
           [ "$count" -gt 0 ] || { echo "::error::nothing to scan; refusing to call that clean"; exit 1; }
+          # The digest of every staged jar, which the gate requires the scanner to have walked.
+          # Same reasoning as the record binding above, one level down: "98 jars were staged"
+          # and "98 jars were opened by the scanner" are different statements, and only the
+          # second one is a scan.
+          find "$scan" -name '*.jar' -print0 | xargs -0 shasum -a 256 > "${RUNNER_TEMP}/scan-staged.sha256"
           set +e
-          "${RUNNER_TEMP}/bin/grype" "dir:$scan" -o json --file "${RUNNER_TEMP}/grype.json"
+          # TWO documents out of ONE invocation (release run 36048639931). grype's JSON report
+          # has four top-level keys - matches, source, distro, descriptor - and lists what it
+          # scanned in none of them; "artifacts" is syft's key, and the gate used to look for it
+          # there, so a completed scan of 98 correctly cataloged jars was refused as "no
+          # artifacts at all". The CycloneDX document of the same run carries the catalog: one
+          # library component per package and one file component, with a SHA-256, per file
+          # walked. Rejected alternative: pinning a second binary (syft) to produce an SBOM and
+          # feeding it back with `grype sbom:` - a second supply-chain dependency and a second
+          # checksum to maintain, for a catalog this invocation already has.
+          "${RUNNER_TEMP}/bin/grype" "dir:$scan" \
+            -o json="${RUNNER_TEMP}/grype.json" \
+            -o cyclonedx-json="${RUNNER_TEMP}/grype-sbom.json"
           rc=$?
           set -e
           # grype exits 0 when it completed; with no --fail-on it does not use the exit code
@@ -610,11 +626,24 @@ jobs:
             echo "::error::grype exited $rc: the scan did not complete, so this release cannot claim its artifacts were scanned"
             exit 1
           fi
+          # --min-artifacts and --expect-digests are the coverage half of the gate: fewer
+          # packages than jars staged, or one staged jar the scanner never opened, is exit 2.
           tools/check-vulnerability-report.py \
-            --format grype --report "${RUNNER_TEMP}/grype.json" --fail-on high \
-            --summary-file "${RUNNER_TEMP}/vulnerabilities-below-threshold.txt"
+            --format grype --report "${RUNNER_TEMP}/grype.json" \
+            --sbom "${RUNNER_TEMP}/grype-sbom.json" \
+            --min-artifacts "$count" \
+            --expect-digests "${RUNNER_TEMP}/scan-staged.sha256" \
+            --fail-on high \
+            --summary-file "${RUNNER_TEMP}/vulnerabilities-below-threshold.txt" \
+            | tee "${RUNNER_TEMP}/vulnscan-gate.txt"
           {
-            echo "### Vulnerabilities below the release threshold"
+            echo "### Vulnerability scan of the artifacts about to be signed"
+            echo
+            echo "$count jar(s) staged; coverage reported by the gate:"
+            echo
+            grep -E 'were scanned|matched by digest' "${RUNNER_TEMP}/vulnscan-gate.txt" | sed 's/^/- /'
+            echo
+            echo "#### Vulnerabilities below the release threshold"
             echo
             if [ -s "${RUNNER_TEMP}/vulnerabilities-below-threshold.txt" ]; then
               cat "${RUNNER_TEMP}/vulnerabilities-below-threshold.txt"
