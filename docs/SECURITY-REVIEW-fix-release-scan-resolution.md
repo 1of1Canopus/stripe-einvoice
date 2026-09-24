@@ -179,3 +179,69 @@ loud and immediate; recorded here so the list is complete, no probe required.
 `-DskipPublishing=true` produces no `central-bundle.zip`, so a dry run with that flag cannot
 exercise the two post-deploy comparison steps. Belongs in the private release runbook next to the
 local-rehearsal instructions.
+
+## Pass 2 (2026-09-24) - second and last pass (HEAD e1cd0e6)
+
+Probe suite re-run unchanged, `CIPHER_PROBE_MAVEN=1 tools/cipher-probe-release-pipeline.sh`:
+**82 probes, still weak 0, fixed 82**, nothing skipped. No Java changed between the two passes
+(`git diff feecd02..e1cd0e6` touches `.github/workflows/release.yml` and
+`tools/cipher-probe-release-pipeline.sh` only), so pass 1's `./mvnw -B clean verify` - core 435,
+starter 130, sample 8, 0 failures, 0 skipped - stands.
+
+**Verdict: MERGE.** No new finding. D15-04 stays open as a named condition on the first tag, below.
+
+### Closures, each verified by an executing probe
+
+- **D15-01 closed.** The reference is now `${RUNNER_TEMP}/reproducible-sha256.txt`, and the control
+  is no longer invisible to the suite. My own mutation - both
+  `assert_scan_set_is_the_recorded_build` calls deleted from the step body, committed, whole suite
+  re-run - turns `probe_pre_sign_scan_accepts_an_unrecorded_jar` and
+  `probe_pre_sign_scan_accepts_a_missing_published_jar` WEAK (still weak: 2, fixed: 80) while
+  `probe_pre_sign_scan_cannot_resolve_reactor_modules` stays FIXED, which is the right shape: the
+  resolution fix and the binding are independently observable.
+- **D15-02 closed.** The inner build now carries `-Prelease -Dgpg.skip=true -DskipTests` and
+  `-Dproject.build.outputTimestamp=${{ steps.v.outputs.timestamp }}`. That timestamp and
+  `verify-reproducible.sh`'s `TS` are the same expression, `scripts/git-commit-timestamp.sh`, so the
+  inner build cannot rewrite `target/` with bytes the record does not know. The fixture proves the
+  stronger property I could not assume: a module-selected `-pl core,starter -am` build reproduces
+  the full-reactor recorded bytes exactly, otherwise probe one would be WEAK.
+- **D15-03 closed.** The check runs over every recorded `*.jar` of both published modules, in both
+  directions, with a recorded-but-absent jar a refusal and an unrecorded jar of our group a
+  refusal, and it is called twice - after staging and after `copy-dependencies`, the path a
+  repository-fetched same-version artifact would arrive by. `collect()` in
+  `verify-reproducible.sh` records core and starter only, never the sample, so the forward
+  direction demands exactly the six jars the staging loop copies: the gate cannot deadlock the
+  release on an artifact it never stages.
+- **D15-04 not closed, deferred by routing.** Recorded as QUESTIONS 34 for a follow-up PR. That is
+  the correct routing - executing probes for the ancestry and tag-signature bodies are new
+  harnesses, Thor's work, not a correction - but deferral is not closure. **The first tag must not
+  be cut until those two bodies have executed at least once.** They are the first gates a tag run
+  reaches and they have only ever been read, not run; the last three tag runs each died in a
+  release-only body that had never executed.
+
+### Attack on the new binding: can the record be regenerated inside the scan step?
+
+No. Repro attempt, closed without a code change.
+
+- One writer: the `Reproducibility check` step, through `REPRODUCIBLE_SHA_FILE:
+  ${{ runner.temp }}/reproducible-sha256.txt` (release.yml:399). `scripts/verify-reproducible.sh`
+  truncates with `: > "$sha_file"` before writing, so a stale file cannot accumulate a second,
+  agreeing entry.
+- Two readers: the scan step (release.yml:522) and the post-deploy bundle comparison
+  (release.yml:704). Same literal path, so the scan and the upload check are bound to one record.
+- The scan step has no write path to it. Its only inner command is `./mvnw ... package
+  dependency:copy-dependencies`, which writes to `target/`, to `$scan` and to the job-local
+  `m2repo`; it never invokes `verify-reproducible.sh`, and nothing in the `release` profile writes
+  into `RUNNER_TEMP`. The steps between the record and the scan are the replay refusal (network
+  reads only) and the Grype install (`RUNNER_TEMP/bin`).
+- Fail-closed if the record is gone: `[ -f "$record" ]` refuses with "a scan that cannot be bound
+  to the artifacts being signed is not evidence". An empty record does not pass either - the
+  reverse direction then reports every staged jar of ours as unrecorded.
+
+Three further attempts that closed without a finding, recorded so they are not re-opened: the
+reverse-direction `awk -v n=" $name" index(...)` match cannot collide (matching a shorter name
+inside a longer recorded one would need `" X.jar"` to appear inside `" X-sources.jar"`); javadoc
+jars are warn-not-enforce, which mirrors the post-deploy rule and cannot carry a dependency
+advisory; and the record being an unsigned file in `RUNNER_TEMP` is not a finding under this job's
+model, where every step comes from main's workflow definition and the job holds
+`permissions: contents: read`.
