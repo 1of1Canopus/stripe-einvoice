@@ -21,7 +21,7 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
 /**
- * The S3 store against a real S3-compatible server (MinIO in Testcontainers).
+ * The S3 store against a real S3-compatible server (S3Mock in Testcontainers).
  *
  * <p>The load-bearing test is {@link #the_startup_probe_does_not_lie_about_this_server}: whether a
  * given gateway honours {@code If-None-Match: *} is a property of the deployment, not something a
@@ -48,7 +48,7 @@ class S3ArchiveStoreTest {
 
   @BeforeAll
   static void bucket() {
-    client = MinioSupport.client();
+    client = S3MockSupport.client();
     try {
       client.createBucket(CreateBucketRequest.builder().bucket(BUCKET).build());
     } catch (S3Exception alreadyThere) {
