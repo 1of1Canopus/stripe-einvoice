@@ -15,6 +15,11 @@
 # The third block (F-ids) is the final verification of 1da507e, after the FSL-1.1-ALv2
 # licence switch: all WEAK there.
 #
+# A probe for a step that runs a scanner uses the REAL pinned scanner, never a stub: a stub
+# writes the report shape the gate expects, so the one thing that can be wrong - the gate and
+# the scanner disagreeing about the document - is the one thing the probe cannot see (release
+# run 36048639931, D-SCAN-02).
+#
 #   tools/cipher-probe-release-pipeline.sh            static probes only (seconds)
 #   CIPHER_PROBE_MAVEN=1 tools/cipher-probe-release-pipeline.sh   + the two build probes
 #
@@ -1661,10 +1666,25 @@ probe_the_release_signs_artifacts_it_never_scanned() {
   cat >"$work/grype.json" <<'REPORT'
 {"matches":[{"vulnerability":{"id":"CVE-synthetic-critical","severity":"Critical"},
              "artifact":{"name":"vulnerable","version":"1.0","type":"java-archive"}}],
- "artifacts":[{"name":"vulnerable","version":"1.0","type":"java-archive"}]}
+ "source":{"type":"directory","target":"/probe/scan"},
+ "descriptor":{"name":"grype","version":"0.118.0"}}
 REPORT
-  tools/check-vulnerability-report.py --format grype --report "$work/grype.json" --fail-on high \
-    >>"$PROBE_CAPTURE" 2>&1
+  # The coverage document grype writes beside the report (-o cyclonedx-json); the gate needs
+  # both, because a grype report does not say what it scanned. metadata.component.name and the
+  # grype tool version match the report above so this probe still exercises the CRITICAL path
+  # rather than tripping the D18-01 same-scan check.
+  cat >"$work/sbom.json" <<'SBOM'
+{"metadata":{"component":{"type":"file","name":"/probe/scan"},
+             "tools":{"components":[{"name":"grype","version":"0.118.0"}]}},
+ "components":[{"type":"library","name":"vulnerable","version":"1.0",
+                "purl":"pkg:maven/org.example/vulnerable@1.0"},
+               {"type":"file","name":"/probe/scan/vulnerable-1.0.jar",
+                "hashes":[{"alg":"SHA-256","content":"aa"}]}]}
+SBOM
+  printf 'aa  vulnerable-1.0.jar\n' > "$work/staged.sha256"
+  tools/check-vulnerability-report.py --format grype --report "$work/grype.json" \
+    --sbom "$work/sbom.json" --min-artifacts 1 --expect-digests "$work/staged.sha256" \
+    --fail-on high >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   rm -rf "$work"
   [ "$rc" -eq 0 ]   # a CRITICAL finding did not stop the release: weak
@@ -1705,15 +1725,30 @@ probe_an_unreadable_scan_report_counts_as_clean() {
 #      Weak while the gate exits 0 on it.
 # ---------------------------------------------------------------------------
 a_grype_report_that_scanned_nothing_is_refused() {
-  local work rc
+  local work weak=1
   work="$(mktemp -d)"
-  printf '{"matches":[],"source":{"type":"directory","target":"/nonexistent"},"artifacts":[]}' \
+  printf '{"matches":[],"source":{"type":"directory","target":"/nonexistent"}}' \
     > "$work/grype-empty.json"
-  tools/check-vulnerability-report.py --format grype --report "$work/grype-empty.json" \
-    --fail-on high >>"$PROBE_CAPTURE" 2>&1
-  rc=$?
+  printf '{"components":[]}' > "$work/grype-empty-sbom.json"
+  : > "$work/empty.sha256"
+  # Two shapes of "this scan looked at nothing", both refused or the gate is weak:
+  #  - a completed scan whose coverage document is empty;
+  #  - a report handed over with NO coverage document at all, which is the shape release run
+  #    36048639931 produced. Answering on coverage that was never supplied is the same defect
+  #    seen from the other side.
+  if tools/check-vulnerability-report.py --format grype --report "$work/grype-empty.json" \
+       --sbom "$work/grype-empty-sbom.json" --min-artifacts 1 --expect-digests "$work/empty.sha256" \
+       --fail-on high >>"$PROBE_CAPTURE" 2>&1; then
+    echo "the gate accepted an empty coverage document as a clean scan" >>"$PROBE_CAPTURE"
+    weak=0
+  fi
+  if tools/check-vulnerability-report.py --format grype --report "$work/grype-empty.json" \
+       --fail-on high >>"$PROBE_CAPTURE" 2>&1; then
+    echo "the gate answered without any coverage document at all" >>"$PROBE_CAPTURE"
+    weak=0
+  fi
   rm -rf "$work"
-  [ "$rc" -eq 0 ]   # an empty scan reported as clean: weak
+  [ "$weak" -eq 0 ]   # an empty scan reported as clean: weak
 }
 
 # ---------------------------------------------------------------------------
@@ -1727,9 +1762,21 @@ probe_a_medium_finding_is_never_written_down() {
   cat >"$work/grype.json" <<'REPORT'
 {"matches":[{"vulnerability":{"id":"CVE-synthetic-medium","severity":"Medium"},
              "artifact":{"name":"vulnerable","version":"1.0","type":"java-archive"}}],
- "artifacts":[{"name":"vulnerable","version":"1.0","type":"java-archive"}]}
+ "source":{"type":"directory","target":"/probe/scan"},
+ "descriptor":{"name":"grype","version":"0.118.0"}}
 REPORT
-  tools/check-vulnerability-report.py --format grype --report "$work/grype.json" --fail-on high \
+  cat >"$work/sbom.json" <<'SBOM'
+{"metadata":{"component":{"type":"file","name":"/probe/scan"},
+             "tools":{"components":[{"name":"grype","version":"0.118.0"}]}},
+ "components":[{"type":"library","name":"vulnerable","version":"1.0",
+                "purl":"pkg:maven/org.example/vulnerable@1.0"},
+               {"type":"file","name":"/probe/scan/vulnerable-1.0.jar",
+                "hashes":[{"alg":"SHA-256","content":"aa"}]}]}
+SBOM
+  printf 'aa  vulnerable-1.0.jar\n' > "$work/staged.sha256"
+  tools/check-vulnerability-report.py --format grype --report "$work/grype.json" \
+    --sbom "$work/sbom.json" --min-artifacts 1 --expect-digests "$work/staged.sha256" \
+    --fail-on high \
     --summary-file "$work/below.txt" >>"$PROBE_CAPTURE" 2>&1
   rc=$?
   if [ "$rc" -ne 0 ]; then rm -rf "$work"; return 0; fi   # a MEDIUM failed the release: also wrong
@@ -1933,25 +1980,53 @@ _scan_step_fixture() {   # echoes a work dir holding tree/, record.txt, t/ (the 
   cat > "$work/t/bin/grype" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-target=""; out=""
+# Mimics the pinned grype's OUTPUT CONTRACT as of 0.118.0: one invocation, two documents -
+# `-o json=<path>` (matches only; grype never lists what it scanned) and
+# `-o cyclonedx-json=<path>` (the catalog: one library component per package, one file
+# component with a SHA-256 per file walked). It asserts nothing about vulnerabilities.
+# This stub can only ever agree with the gate about the shape, which is why D-SCAN-02 runs
+# the real binary; see the header of the suite.
+target=""; report=""; sbom=""
 while [ $# -gt 0 ]; do
   case "$1" in
     dir:*) target="${1#dir:}" ;;
-    --file) out="$2"; shift ;;
+    -o) case "$2" in
+          json=*) report="${2#json=}" ;;
+          cyclonedx-json=*) sbom="${2#cyclonedx-json=}" ;;
+        esac
+        shift ;;
+    --file) report="$2"; shift ;;
   esac
   shift
 done
+[ -n "$report" ] || { echo "stub grype: no json output path given" >&2; exit 1; }
+[ -n "$sbom" ] || { echo "stub grype: no cyclonedx-json output path given" >&2; exit 1; }
+printf '{"matches": [], "source": {"type": "directory", "target": "%s"}, "descriptor": {"name": "grype", "version": "stub"}}\n' "$target" > "$report"
 {
-  printf '{"matches": [], "artifacts": ['
+  printf '{"metadata": {"component": {"type": "file", "name": "%s"}, "tools": {"components": [{"name": "grype", "version": "stub"}]}}, "components": [' "$target"
   sep=""
   while IFS= read -r jar; do
-    printf '%s{"name": "%s", "version": "0", "type": "java-archive"}' "$sep" "$(basename "$jar")"
+    printf '%s{"type": "library", "name": "%s", "version": "0", "purl": "pkg:maven/probe/%s@0"}' \
+      "$sep" "$(basename "$jar")" "$(basename "$jar")"
     sep=", "
+    printf '%s{"type": "file", "name": "%s", "hashes": [{"alg": "SHA-256", "content": "%s"}]}' \
+      "$sep" "$jar" "$(shasum -a 256 "$jar" | cut -d' ' -f1)"
   done < <(find "$target" -name '*.jar' | sort)
   printf ']}\n'
-} > "$out"
+} > "$sbom"
 STUB
   chmod +x "$work/t/bin/grype"
+  # D-SCAN-02: the same fixture, with the REAL pinned scanner in place of the stub. Installed
+  # once into the shared fixture and copied per probe, so the download and its checksum check
+  # happen at most once per suite run.
+  if [ "${1:-}" = "real" ]; then
+    if [ ! -x "$_SCAN_FIXTURE/realbin/grype" ]; then
+      if ! tools/install-scanner.sh grype "$_SCAN_FIXTURE/realbin" >>"$PROBE_CAPTURE" 2>&1; then
+        rm -rf "$work"; return 1
+      fi
+    fi
+    cp "$_SCAN_FIXTURE/realbin/grype" "$work/t/bin/grype"
+  fi
   printf '%s' "$work"
 }
 
@@ -1993,11 +2068,100 @@ probe_pre_sign_scan_cannot_resolve_the_reactors_own_modules() {
   work="$(_scan_step_fixture)" || { PROBE_SKIP_REASON="the synthetic release reactor could not be built, so the step body was never exercised"; return 0; }
   rc="$(_scan_step_exit "$work")"
   if [ "$rc" -ne 0 ]; then rm -rf "$work"; return 0; fi      # the step failed: weakness present
-  scanned="$(cat "$work/t/grype.json" 2>/dev/null || true)"
+  # What the scan CATALOGED lives in the CycloneDX document beside the report: a grype report
+  # names only the vulnerable packages (release run 36048639931).
+  scanned="$(cat "$work/t/grype-sbom.json" 2>/dev/null || true)"
   rm -rf "$work"
   grep -q 'stripe-einvoice-core-99.99.99-probe.jar' <<<"$scanned" || return 0
   grep -q 'stripe-einvoice-spring-boot-starter-99.99.99-probe.jar' <<<"$scanned" || return 0
   grep -q 'spring-' <<<"$scanned" || return 0        # the resolved runtime dependencies
+  return 1
+}
+
+# ===========================================================================
+# D-SCAN-02 / D-SCAN-03 block (release run 36048639931, FIFTH failed tag).
+# Kept together and separate from the probes above on purpose: they are the answer to why
+# D-SCAN-01 did not catch this one.
+#
+# What happened: the step staged 98 jars, grype exited 0, and the gate refused with "lists no
+# artifacts at all". grype's JSON report has four top-level keys - matches, source, distro,
+# descriptor - and names what it scanned in none of them. "artifacts" is SYFT's key. The scan
+# had in fact cataloged every jar; the gate was reading a key the scanner does not write.
+#
+# Why no probe caught it: D-SCAN-01 stubs the scanner with a script that writes the report
+# shape the gate expects. A stub cannot disagree with the gate about the format, so the one
+# thing that was wrong was the one thing the probe could not see. Hence the rule now in the
+# header of this file and in QUESTIONS: a probe for a scanner step runs the REAL pinned
+# scanner.
+#
+# D-SCAN-02 runs the real step body with the real pinned grype over the real staged set.
+#   Weak while the body exits non-zero, or while it does not report coverage of at least as
+#   many packages as it staged jars.
+# D-SCAN-03 runs the real pinned grype and the real gate over a synthetic scan set holding one
+#   jar that declares a coordinate with a published CRITICAL advisory
+#   (org.apache.commons:commons-text:1.9, CVE-2022-42889 / GHSA-599f-7c49-w659). No download:
+#   the fixture is a jar carrying only META-INF/maven/.../pom.properties, which is what syft
+#   reads. Weak unless the gate names that coordinate and refuses. The mutation is inside the
+#   probe: the same scanner and gate over an EMPTY directory must refuse too (exit 2), so a
+#   scan of nothing can never read as clean.
+# ===========================================================================
+probe_pre_sign_scan_reports_no_coverage_with_the_real_scanner() {
+  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe builds a synthetic release reactor and runs the real pinned grype; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
+  local work rc staged covered
+  work="$(_scan_step_fixture real)" || { PROBE_SKIP_REASON="the synthetic release reactor, or the pinned grype download, could not be prepared, so the step body was never exercised with a real scanner"; return 0; }
+  rc="$(_scan_step_exit "$work")"
+  if [ "$rc" -ne 0 ]; then rm -rf "$work"; return 0; fi      # the step failed: weakness present
+  # The step prints "scanning N jar(s)" and the gate prints "M package(s) were scanned"; the
+  # coverage claim is only worth something if M >= N.
+  staged="$(grep -oE 'scanning [0-9]+ jar' "$PROBE_CAPTURE" | tail -1 | grep -oE '[0-9]+')"
+  covered="$(grep -oE '[0-9]+ package\(s\) were scanned' "$PROBE_CAPTURE" | tail -1 | grep -oE '^[0-9]+')"
+  rm -rf "$work"
+  # Printed on every run, weak or not: the number is the evidence, and a FIXED probe prints
+  # no capture.
+  printf '        real pinned scanner: %s package(s) cataloged for %s staged jar(s)\n' \
+    "${covered:-none}" "${staged:-none}"
+  [ -n "$staged" ] && [ -n "$covered" ] || return 0          # no coverage reported at all: weak
+  [ "$covered" -ge "$staged" ] || return 0                   # scanned fewer than it staged: weak
+  return 1
+}
+
+probe_the_real_scanner_and_gate_miss_a_known_critical() {
+  local work bin rc out
+  work="$(mktemp -d)"
+  if ! tools/install-scanner.sh grype "$work/bin" >>"$PROBE_CAPTURE" 2>&1; then
+    rm -rf "$work"
+    PROBE_SKIP_REASON="the pinned grype could not be installed, so the real scanner was never run"
+    return 0
+  fi
+  bin="$work/bin/grype"
+  mkdir -p "$work/build/META-INF/maven/org.apache.commons/commons-text" "$work/scan" "$work/empty"
+  printf 'groupId=org.apache.commons\nartifactId=commons-text\nversion=1.9\n' \
+    > "$work/build/META-INF/maven/org.apache.commons/commons-text/pom.properties"
+  ( cd "$work/build" && jar cf "$work/scan/commons-text-1.9.jar" META-INF ) >>"$PROBE_CAPTURE" 2>&1 \
+    || { rm -rf "$work"; PROBE_SKIP_REASON="no jar tool to build the vulnerable fixture"; return 0; }
+  find "$work/scan" -name '*.jar' -print0 | xargs -0 shasum -a 256 > "$work/staged.sha256"
+  if ! "$bin" "dir:$work/scan" -o json="$work/grype.json" -o cyclonedx-json="$work/sbom.json" >>"$PROBE_CAPTURE" 2>&1; then
+    rm -rf "$work"
+    PROBE_SKIP_REASON="the pinned grype could not complete a scan (no vulnerability database?)"
+    return 0
+  fi
+  out="$(tools/check-vulnerability-report.py --format grype --report "$work/grype.json" \
+          --sbom "$work/sbom.json" --min-artifacts 1 --expect-digests "$work/staged.sha256" \
+          --fail-on high 2>&1)"
+  rc=$?
+  printf '%s\n' "$out" >>"$PROBE_CAPTURE"
+  if [ "$rc" -ne 1 ]; then rm -rf "$work"; return 0; fi                    # did not refuse: weak
+  grep -q 'commons-text@1.9' <<<"$out" || { rm -rf "$work"; return 0; }    # did not name it: weak
+  # The mutation, run every time rather than remembered: the same scanner and the same gate
+  # over a directory with nothing in it must refuse (exit 2), never report a clean scan.
+  "$bin" "dir:$work/empty" -o json="$work/empty-grype.json" -o cyclonedx-json="$work/empty-sbom.json" >>"$PROBE_CAPTURE" 2>&1
+  : > "$work/empty.sha256"
+  tools/check-vulnerability-report.py --format grype --report "$work/empty-grype.json" \
+    --sbom "$work/empty-sbom.json" --min-artifacts 1 --expect-digests "$work/empty.sha256" \
+    --fail-on high >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$work"
+  [ "$rc" -eq 2 ] || return 0      # a scan of nothing was not refused: weak
   return 1
 }
 
@@ -2048,6 +2212,79 @@ probe_pre_sign_scan_accepts_a_published_jar_missing_from_the_scan_set() {
   [ "$rc" -eq 0 ]    # a recorded jar absent from the scan set passed: weakness present
 }
 
+# ===========================================================================
+# D18 block (security review of fix/release-scan-sees-jars, e7fda4f). PR 18 bound the coverage
+# documents to the staged bytes and left the VERDICT document bound to nothing.
+#
+# D18-01: the grype JSON report of one scan, paired with the CycloneDX document of a
+#   different scan, passes every coverage check while answering with matches nobody computed
+#   over the staged set. Both documents name their run (report: source.target; CycloneDX:
+#   metadata.component.name) and their tool version; the gate must refuse a mismatch.
+# D18-02: --sbom is mandatory for --format grype; --expect-digests (the control that binds
+#   the scan to the bytes) and --min-artifacts (the floor) must be too, with no default of 1.
+# D18-03: the job-summary grep|sed pipeline under `set -euo pipefail` dies on a miss, killing
+#   the step after the gate already passed. Checklist RP-6: a lookup miss says "no record" and
+#   runs to the end.
+# ===========================================================================
+probe_verdict_document_accepted_from_a_different_scan() {
+  local work rc
+  work="$(mktemp -d)"
+  cat >"$work/a-report.json" <<'J'
+{"matches":[],"source":{"type":"directory","target":"/tmp/somewhere-else"},"descriptor":{"name":"grype","version":"0.118.0"}}
+J
+  cat >"$work/b-sbom.json" <<'J'
+{"bomFormat":"CycloneDX","metadata":{"component":{"type":"file","name":"/tmp/release-scan"},
+ "tools":{"components":[{"name":"grype","version":"0.118.0"}]}},
+ "components":[{"type":"library","name":"commons-text","version":"1.9",
+                "purl":"pkg:maven/org.apache.commons/commons-text@1.9"},
+               {"type":"file","name":"/tmp/release-scan/commons-text-1.9.jar",
+                "hashes":[{"alg":"SHA-256","content":"11"}]}]}
+J
+  printf '11  commons-text-1.9.jar\n' > "$work/staged.sha256"
+  tools/check-vulnerability-report.py --format grype --report "$work/a-report.json" \
+    --sbom "$work/b-sbom.json" --min-artifacts 1 --expect-digests "$work/staged.sha256" \
+    --fail-on high >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]   # accepted a report and an SBOM from two different scans: weak
+}
+
+probe_grype_verdict_without_a_digest_binding() {
+  local work rc
+  work="$(mktemp -d)"
+  cat >"$work/report.json" <<'J'
+{"matches":[],"source":{"type":"directory","target":"/tmp/release-scan"}}
+J
+  cat >"$work/sbom-one.json" <<'J'
+{"components":[{"type":"library","name":"whatever","version":"1","purl":"pkg:maven/x/whatever@1"}]}
+J
+  tools/check-vulnerability-report.py --format grype --report "$work/report.json" \
+    --sbom "$work/sbom-one.json" --fail-on high >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  rm -rf "$work"
+  [ "$rc" -eq 0 ]   # --sbom alone, no --min-artifacts, no --expect-digests, and a pass: weak
+}
+
+probe_summary_block_dies_on_a_missing_coverage_line() {
+  local line snippet work rc reached
+  line="$(grep -nE "were scanned\|matched by digest" "$WF" | head -1 | cut -d: -f1)"
+  [ -n "$line" ] || return 0   # no such line to extract at all: cannot prove it is safe
+  snippet="$(sed -n "${line}p" "$WF")"
+  work="$(mktemp -d)"
+  # A gate transcript with no coverage line at all - the shape a refusal earlier in the step
+  # (or a stale/empty file) would leave behind.
+  printf 'vulnerability gate (grype report, threshold HIGH): 0 finding(s)\n' > "$work/vulnscan-gate.txt"
+  RUNNER_TEMP="$work" bash -c "set -euo pipefail
+    { echo START; $snippet; echo TAIL-REACHED; } >> \"$work/summary.txt\"" \
+    >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  grep -q TAIL-REACHED "$work/summary.txt" 2>/dev/null; reached=$?
+  rm -rf "$work"
+  [ "$rc" -ne 0 ] && [ "$reached" -ne 0 ]   # the step died and the tail never printed: weak
+}
+
+# --- end of the D18 block ------------------------------------------------------------------
+
 probe probe_artifacts_ship_no_xslt2_processor                "S1 a default install can validate nothing"          probe_published_artifacts_ship_no_xslt2_processor
 probe probe_mpl_carve_out_is_not_coordinate_scoped           "S2 a second MPL dependency passes the gate"         probe_mpl_carve_out_is_not_scoped_to_one_coordinate
 probe probe_mpl_carve_out_admits_any_licence_on_saxon        "S3 GPL on the carved-out coordinate passes"         probe_mpl_carve_out_admits_any_denied_licence_on_that_coordinate
@@ -2060,6 +2297,15 @@ probe probe_medium_finding_is_never_written_down             "S8 a MEDIUM findin
 probe probe_weekly_deep_scan_red_or_silent_without_a_key     "S9 the weekly run is red, or skips in silence"      probe_the_weekly_deep_scan_is_red_or_silent_without_a_key
 probe probe_scanner_downloads_are_unverified                 "S10 a tampered scanner binary installs"             probe_scanner_downloads_are_installed_without_verification
 probe probe_pre_sign_scan_cannot_resolve_reactor_modules      "D-SCAN-01 the pre-sign scan resolves its own module from Central" probe_pre_sign_scan_cannot_resolve_the_reactors_own_modules
+# --- D-SCAN-02 / D-SCAN-03 block (real pinned scanner) -------------------------------------
+probe probe_pre_sign_scan_has_no_real_scanner_coverage       "D-SCAN-02 the real scanner reports no coverage of the staged jars" probe_pre_sign_scan_reports_no_coverage_with_the_real_scanner
+probe probe_real_scanner_and_gate_miss_a_known_critical      "D-SCAN-03 a known CRITICAL in a staged jar is not caught"          probe_the_real_scanner_and_gate_miss_a_known_critical
+# --- end of the D-SCAN-02 / D-SCAN-03 block ------------------------------------------------
+# --- D18 block (PR 18 review, e7fda4f) ------------------------------------------------------
+probe probe_verdict_document_accepted_from_a_different_scan   "D18-01 the verdict document is not bound to the coverage document" probe_verdict_document_accepted_from_a_different_scan
+probe probe_grype_verdict_without_a_digest_binding             "D18-02 --min-artifacts/--expect-digests are optional at the boundary" probe_grype_verdict_without_a_digest_binding
+probe probe_summary_block_dies_on_a_missing_coverage_line       "D18-03 the job summary can kill a step the gate already passed" probe_summary_block_dies_on_a_missing_coverage_line
+# --- end of the D18 block --------------------------------------------------------------------
 probe probe_pre_sign_scan_accepts_an_unrecorded_jar          "D15-01/02 the scan set is not bound to the recorded build" probe_pre_sign_scan_accepts_a_jar_that_is_not_the_recorded_build
 probe probe_pre_sign_scan_accepts_a_missing_published_jar    "D15-03 a published jar absent from the scan set passes"    probe_pre_sign_scan_accepts_a_published_jar_missing_from_the_scan_set
 
