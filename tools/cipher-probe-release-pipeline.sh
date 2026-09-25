@@ -2001,9 +2001,9 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$report" ] || { echo "stub grype: no json output path given" >&2; exit 1; }
 [ -n "$sbom" ] || { echo "stub grype: no cyclonedx-json output path given" >&2; exit 1; }
-printf '{"matches": [], "source": {"type": "directory", "target": "%s"}}\n' "$target" > "$report"
+printf '{"matches": [], "source": {"type": "directory", "target": "%s"}, "descriptor": {"name": "grype", "version": "stub"}}\n' "$target" > "$report"
 {
-  printf '{"components": ['
+  printf '{"metadata": {"component": {"type": "file", "name": "%s"}, "tools": {"components": [{"name": "grype", "version": "stub"}]}}, "components": [' "$target"
   sep=""
   while IFS= read -r jar; do
     printf '%s{"type": "library", "name": "%s", "version": "0", "purl": "pkg:maven/probe/%s@0"}' \
