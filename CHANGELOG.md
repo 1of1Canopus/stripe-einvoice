@@ -6,7 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **The pre-sign vulnerability gate's verdict document is now bound to its coverage document.**
+  A grype report and the CycloneDX document it is paired with are refused unless both name the
+  same scan target and the same scanner version, closing the gap where a stale or mismatched
+  file pairing could answer with matches nobody computed over the staged set. `--min-artifacts`
+  and `--expect-digests` are now mandatory for the Grype arm of `check-vulnerability-report.py`,
+  same as `--sbom`, with no default that lets a caller pass a weaker check unknowingly. The
+  release workflow's job-summary line no longer kills the step under `set -euo pipefail` when
+  the gate printed no coverage line.
 
 ## [0.1.0] - 2026-09-23
 
