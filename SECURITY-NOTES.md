@@ -345,6 +345,15 @@ scan that did not run is never a clean scan. What this does **not** cover, said 
   applied for and not issued, so it skips - loudly, with the reason in the run's own summary, never
   silently.
 
+**The Grype verdict document is bound to the coverage document it is paired with.** A grype JSON
+report and the CycloneDX document from the same invocation both name the run they came from (the
+report's `source.target`, the CycloneDX document's `metadata.component.name`) and the scanner
+version that produced them; the gate refuses the pair unless both agree, so a stale file, a path
+typo, or a future caller handing over mismatched documents cannot silently answer with matches
+computed over a different scan than the one whose coverage was checked. `--min-artifacts` and
+`--expect-digests` are mandatory for `--format grype`, the same way `--sbom` already was: a caller
+without them would be asking for a verdict on unknown, or unbound, coverage.
+
 **What the documents contain, and for how long.** An issued invoice carries the buyer's name,
 postal address and VAT identifier, by law, and it lives in the customer's own archive for the
 retention their tax authority requires. `customer_email` is deliberately not written to the
