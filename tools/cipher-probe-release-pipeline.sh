@@ -2324,9 +2324,11 @@ probe probe_pre_sign_scan_accepts_a_missing_published_jar    "D15-03 a published
 # reads WEAK while the weakness (a body nothing executes, or one that behaves wrongly when
 # executed) is present, and FIXED when the body behaves.
 #
-# Like N12-N14, each one reads WEAK when its step is renamed, commented out or switched off
-# with `if: false`: a control that has been unhooked is not a control, and a probe that
-# cannot find its step has proved nothing.
+# Like N12-N14, each one reads WEAK when its step is renamed (replaced OR appended to),
+# commented out, or switched off with any `if:` value this harness cannot evaluate: a control
+# that has been unhooked is not a control, and a probe that cannot find its step, or that
+# cannot say which of two same-named steps the runner runs, has proved nothing. The D17 block
+# at the end of this file asserts those properties of the harness itself.
 # ===========================================================================
 
 # The text of one job of a workflow. The ancestry and signature steps exist TWICE, once in
@@ -2342,43 +2344,113 @@ _job_block() { # _job_block <workflow> <job id>
 }
 
 # The body of a `run: |` block, read from workflow or job text on stdin.
+#
+# D17-04: the step name is matched EXACTLY, on its own line at step indentation. A substring
+# match found every step whose name merely CONTAINS this one, concatenated their scripts and
+# handed the lot back as one body, so a correct fragment in a disabled decoy satisfied the
+# probe while the runner executed a weakened gate underneath it. D17-05 is the same
+# mechanism seen from the other side: a rename that APPENDS to the name is a rename, and
+# must leave the harness with nothing.
+#
+# D17-04 (second half): if one job carries the same step name twice, the harness cannot say
+# which body the runner runs, so it refuses - counted per job, because the ancestry and
+# signature gates deliberately exist once in `preflight` and once in `publish` and this
+# helper is also called with the whole workflow on stdin.
+#
+# D17-08: the body stops at the next SIBLING key of the step (`shell:`, `env:`,
+# `timeout-minutes:`, a late `if:`), not only at the next step or job. A block scalar's
+# content is indented deeper than its own key, so a line at exactly step-key indentation is
+# never part of the script; sweeping one in used to append it to the body and execute it.
 _step_body_text() { # _step_body_text <step name>   (text on stdin)
-  awk -v want="- name: $1" '
-    index($0, want) { instep=1; next }
-    instep && /run: \|/ { inrun=1; next }
+  local text want
+  text="$(cat)"
+  want="      - name: $1"
+  awk -v want="$want" '
+    /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { job = $0 }
+    $0 == want { n[job]++ }
+    END { for (j in n) if (n[j] > 1) exit 1 }
+  ' <<<"$text" || return 0
+  awk -v want="$want" '
+    $0 == want { instep = 1; next }
+    instep && !inrun && /^        run: \|[[:space:]]*$/ { inrun = 1; next }
     instep && !inrun && /^      - name:/ { exit }
     inrun && /^      - name:/ { exit }
     inrun && /^  [a-z][a-z0-9-]*:/ { exit }
+    inrun && /^        [a-z][a-z0-9_-]*:/ { exit }
     inrun { print }
-  '
+  ' <<<"$text"
 }
 
 # The command of a single-line `run: <command>` step (the wrapper removal is one), read from
-# workflow or job text on stdin. Prints nothing for a block-scalar step.
+# workflow or job text on stdin. Prints nothing for a block-scalar step. Same exact match and
+# same per-job duplicate refusal as _step_body_text (D17-04).
 _step_command_text() { # _step_command_text <step name>   (text on stdin)
-  awk -v want="- name: $1" '
-    index($0, want) { instep=1; next }
+  local text want
+  text="$(cat)"
+  want="      - name: $1"
+  awk -v want="$want" '
+    /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { job = $0 }
+    $0 == want { n[job]++ }
+    END { for (j in n) if (n[j] > 1) exit 1 }
+  ' <<<"$text" || return 0
+  awk -v want="$want" '
+    $0 == want { instep = 1; next }
     instep && /^      - name:/ { exit }
     instep && /^  [a-z][a-z0-9-]*:/ { exit }
-    instep && /^[[:space:]]*run: / {
+    instep && /^        run: / {
       line = $0
-      sub(/^[[:space:]]*run: /, "", line)
+      sub(/^        run: /, "", line)
       if (line == "|" || line == ">") exit
       print line
       exit
     }
-  '
+  ' <<<"$text"
 }
 
-# True when the named step carries `if: false` (or a quoted false) - the N13 shape, applied
-# to a step instead of a job.
+# True when the named step is not certainly executed by the runner - the N13 shape, applied
+# to a step instead of a job. Three reasons, all of them "the harness cannot prove this step
+# runs", which is the same rule as everywhere else in this suite: unverifiable is not clean.
+#
+#   D17-01/D17-02: the step carries an `if:` whose value is not one this repository's own
+#     steps use. An ALLOWLIST, not a denylist of false spellings: `${{ false }}`,
+#     `false  # comment`, `1 == 2` and every other always-false expression are values this
+#     harness cannot evaluate, so they read as not running. Adding a new `if:` value to
+#     release.yml means adding it here, on purpose.
+#   D17-03: every line of the step block is scanned, not only the lines before `run:`. YAML
+#     mapping keys have no order, and an `if:` after a single-line `run:` used to be
+#     invisible while the runner skipped the step. `if:` is recognised at step-key
+#     indentation only, so a shell `if` inside a deeper-indented script cannot trip it.
+#   D17-04: the name occurs more than once in this job, so which body runs is undecidable.
 _step_is_disabled() { # _step_is_disabled <step name>   (text on stdin)
-  awk -v want="- name: $1" '
-    index($0, want) { instep=1; next }
+  local text want values value
+  text="$(cat)"
+  want="      - name: $1"
+  awk -v want="$want" '
+    /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { job = $0 }
+    $0 == want { n[job]++ }
+    END { for (j in n) if (n[j] > 1) exit 1 }
+  ' <<<"$text" || return 0
+  values="$(awk -v want="$want" '
+    $0 == want { instep = 1; next }
     instep && /^      - name:/ { exit }
-    instep && /^[[:space:]]*run:/ { exit }
-    instep { print }
-  ' | grep -Eq "^[[:space:]]*if:[[:space:]]*(false|'false'|\"false\")[[:space:]]*$"
+    instep && /^  [a-z][a-z0-9-]*:/ { exit }
+    instep && /^        if:/ {
+      line = $0
+      sub(/^        if:[[:space:]]*/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      print line
+    }
+  ' <<<"$text")"
+  [ -n "$values" ] || return 1
+  while IFS= read -r value; do
+    case "$value" in
+      'success()'|'failure()'|'always()') ;;
+      "github.event_name == 'push'") ;;
+      "github.event_name == 'workflow_dispatch'") ;;
+      *) return 0 ;;
+    esac
+  done <<<"$values"
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -2424,7 +2496,7 @@ probe_ancestry_gate_is_never_executed() {
       weak=1; break
     fi
     if _step_is_disabled 'Verify the released commit is on main' <<<"$text"; then
-      PROBE_SKIP_REASON="the ancestry gate is switched off with if: false in the '$job' job"
+      PROBE_SKIP_REASON="the ancestry gate is not certainly executed in the '$job' job (switched off, an if: value the harness cannot evaluate, or the same step name twice in that job)"
       weak=1; break
     fi
     body="$(_step_body_text 'Verify the released commit is on main' <<<"$text")"
@@ -2535,7 +2607,7 @@ probe_tag_signature_gate_is_never_executed() {
       weak=1; break
     fi
     if _step_is_disabled 'Verify the tag signature' <<<"$text"; then
-      PROBE_SKIP_REASON="the tag-signature gate is switched off with if: false in the '$job' job"
+      PROBE_SKIP_REASON="the tag-signature gate is not certainly executed in the '$job' job (switched off, an if: value the harness cannot evaluate, or the same step name twice in that job)"
       weak=1; break
     fi
     body="$(_step_body_text 'Verify the tag signature' <<<"$text")"
@@ -2551,6 +2623,11 @@ probe_tag_signature_gate_is_never_executed() {
     # gate accepts when it IS the configured key, otherwise the refusal above could be an
     # artefact of a broken signature rather than of the identity check.
     [ "$(_tag_signature_exit "$work" "$body" v9.9.9-other "$fp2")" -eq 0 ] || { weak=1; break; }
+    # D17-07: the one production line this branch changes is the normalisation of
+    # RELEASE_SIGNING_KEY_ID to upper case. Without this direction the whole pipeline could be
+    # deleted and the probe would stay green: a maintainer who pastes the fingerprint in lower
+    # case must get an accepted release, not a refused one.
+    [ "$(_tag_signature_exit "$work" "$body" v9.9.9 "$(printf '%s' "$fp1" | tr '[:upper:]' '[:lower:]')")" -eq 0 ] || { weak=1; break; }
   done
   rm -rf "$work"
   [ "$weak" -eq 1 ]
@@ -2571,7 +2648,7 @@ probe_wrapper_removal_is_never_executed() {
   text="$(_job_block "$WF" publish)"
   [ -n "$text" ] || { PROBE_SKIP_REASON="the publish job is gone"; return 0; }
   if _step_is_disabled 'Remove any pre-existing Maven wrapper distribution' <<<"$text"; then
-    PROBE_SKIP_REASON="the wrapper-removal step is switched off with if: false"
+    PROBE_SKIP_REASON="the wrapper-removal step is not certainly executed (switched off, an if: value the harness cannot evaluate, or the same step name twice in the job)"
     return 0
   fi
   cmd="$(_step_command_text 'Remove any pre-existing Maven wrapper distribution' <<<"$text")"
@@ -2681,7 +2758,7 @@ probe_version_set_step_is_never_executed() {
   text="$(_job_block "$WF" publish)"
   [ -n "$text" ] || { PROBE_SKIP_REASON="the publish job is gone"; return 0; }
   if _step_is_disabled 'Set the release version in the checkout' <<<"$text"; then
-    PROBE_SKIP_REASON="the version-set step is switched off with if: false"
+    PROBE_SKIP_REASON="the version-set step is not certainly executed (switched off, an if: value the harness cannot evaluate, or the same step name twice in the job)"
     return 0
   fi
   body="$(_step_body_text 'Set the release version in the checkout' <<<"$text")"
@@ -2766,7 +2843,7 @@ probe_bundle_coordinate_check_is_never_executed() {
   text="$(_job_block "$WF" publish)"
   [ -n "$text" ] || { PROBE_SKIP_REASON="the publish job is gone"; return 0; }
   if _step_is_disabled 'Confirm the bundle contains exactly the three published coordinates' <<<"$text"; then
-    PROBE_SKIP_REASON="the bundle-coordinate check is switched off with if: false"
+    PROBE_SKIP_REASON="the bundle-coordinate check is not certainly executed (switched off, an if: value the harness cannot evaluate, or the same step name twice in the job)"
     return 0
   fi
   body="$(_step_body_text 'Confirm the bundle contains exactly the three published coordinates' <<<"$text")"
@@ -2789,6 +2866,20 @@ probe_bundle_coordinate_check_is_never_executed() {
   _make_bundle "$work" stripe-einvoice-parent stripe-einvoice-spring-boot-starter
   ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 && weak=1   # must refuse
 
+  # D17-06: the step is named "exactly the three published coordinates" and until this branch
+  # it checked only that the three were present and that one literal name was absent. Any
+  # fourth coordinate was uploaded. Three directions, none of which a name denylist can hold:
+  # the module on this module's own roadmap, a coordinate nobody has ever heard of, and the
+  # sample under a different artifactId.
+  _make_bundle "$work" stripe-einvoice-parent stripe-einvoice-core stripe-einvoice-spring-boot-starter stripe-einvoice-pro
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 && weak=1   # must refuse
+
+  _make_bundle "$work" stripe-einvoice-parent stripe-einvoice-core stripe-einvoice-spring-boot-starter evil-lib
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 && weak=1   # must refuse
+
+  _make_bundle "$work" stripe-einvoice-parent stripe-einvoice-core stripe-einvoice-spring-boot-starter demo-app
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 && weak=1   # must refuse
+
   rm -rf "$work"
   [ "$weak" -eq 1 ]
 }
@@ -2798,6 +2889,164 @@ probe probe_tag_signature_gate_is_never_executed             "D15-04 the tag-sig
 probe probe_wrapper_removal_is_never_executed                "D15-04 the wrapper removal has never executed"      probe_wrapper_removal_is_never_executed
 probe probe_version_set_step_is_never_executed               "D15-04 the version rewrite has never executed"      probe_version_set_step_is_never_executed
 probe probe_bundle_coordinate_check_is_never_executed        "D15-04 the bundle-coordinate check never runs"      probe_bundle_coordinate_check_is_never_executed
+
+# ===========================================================================
+# D17 (security review of test/release-step-harness, pass 1). The five probes above find
+# their step by a SUBSTRING match on the FIRST occurrence in the job, and call a step
+# "switched off" only when its `if:` is the bare literal `false` written before `run:`.
+# Both gaps let a release gate be unhooked while its probe still reads FIXED, which is the
+# one thing this block exists to prevent. Each probe below mutates a throwaway copy of
+# release.yml the way the review reproduced it, runs the harness against that copy, and
+# asserts the harness sees the mutation - plus, in each case, that the UNMUTATED workflow is
+# still read as a live step, so a helper that simply refuses everything cannot satisfy them.
+# ===========================================================================
+
+_ANCESTRY_STEP='Verify the released commit is on main'
+_SIGNATURE_STEP='Verify the tag signature'
+_WRAPPER_STEP='Remove any pre-existing Maven wrapper distribution'
+_BUNDLE_STEP='Confirm the bundle contains exactly the three published coordinates'
+
+# A copy of release.yml with `if: <value>` inserted under the <occurrence>th step of that
+# name. Echoes the path; the caller removes it.
+_wf_with_an_if() { # _wf_with_an_if <step name> <occurrence> <if value>
+  local out; out="$(mktemp)"
+  awk -v want="      - name: $1" -v occ="$2" -v val="$3" '
+    { print }
+    $0 == want { n++; if (n == occ + 0) print "        if: " val }
+  ' "$WF" > "$out"
+  printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# D17-01 / D17-02 - a step switched off with any always-false expression, or with a trailing
+# comment after the literal, must read as not running. The harness cannot evaluate a GitHub
+# expression, so the rule is an allowlist of the `if:` values this repository's own steps
+# use: anything else is unverifiable, and unverifiable is not clean.
+# ---------------------------------------------------------------------------
+probe_a_step_disabled_by_an_expression_is_not_detected() {
+  local wf weak=0
+  wf="$(_wf_with_an_if "$_BUNDLE_STEP" 1 '${{ false }}')"
+  _step_is_disabled "$_BUNDLE_STEP" < <(_job_block "$wf" publish) || weak=1
+  _step_is_disabled "$_BUNDLE_STEP" < <(_job_block "$WF" publish) && weak=1   # control
+  rm -f "$wf"
+  [ "$weak" -eq 1 ]
+}
+
+probe_a_step_disabled_with_a_trailing_comment_is_not_detected() {
+  local wf weak=0
+  wf="$(_wf_with_an_if "$_ANCESTRY_STEP" 2 'false  # gate off for this release')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$WF" publish) && weak=1   # control
+  rm -f "$wf"
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D17-03 / D17-08 - YAML mapping keys have no order. An `if:` written AFTER `run:` skips the
+# step on the runner; for the single-line `run:` form the old helper stopped scanning at
+# `run:` and handed the command back to be executed. The same boundary in the other
+# direction is D17-08: a sibling key written after a block scalar (`shell: bash`, `env:`,
+# `timeout-minutes:`) must not be swept into the extracted body and executed as its last
+# line.
+# ---------------------------------------------------------------------------
+probe_an_if_after_the_run_key_is_not_detected() {
+  local wf cmd body weak=0
+  # (a) `if: false` after a single-line `run:`
+  wf="$(mktemp)"
+  awk -v want="      - name: $_WRAPPER_STEP" '
+    { print }
+    $0 == want { getline l; print l; print "        if: false" }
+  ' "$WF" > "$wf"
+  _step_is_disabled "$_WRAPPER_STEP" < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  # control: the real step is a live single-line `run:` and its command is still extracted
+  cmd="$(_step_command_text "$_WRAPPER_STEP" < <(_job_block "$WF" publish))"
+  [ -n "$cmd" ] || weak=1
+  _step_is_disabled "$_WRAPPER_STEP" < <(_job_block "$WF" publish) && weak=1
+
+  # (b) a sibling key after the block scalar must terminate the body, not join it
+  wf="$(mktemp)"
+  awk -v want="      - name: $_BUNDLE_STEP" '
+    $0 == want { instep = 1 }
+    instep && inrun && !done && $0 !~ /^          / && $0 !~ /^[[:space:]]*$/ {
+      print "        shell: bash"; done = 1
+    }
+    { print }
+    instep && /^        run: \|[[:space:]]*$/ { inrun = 1 }
+  ' "$WF" > "$wf"
+  body="$(_step_body_text "$_BUNDLE_STEP" < <(_job_block "$wf" publish))"
+  grep -q 'shell: bash' <<<"$body" && weak=1
+  [ -n "$body" ] || weak=1
+  rm -f "$wf"
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D17-04 - the substring match on the first occurrence means a step whose name merely
+# CONTAINS the gate's name is what the harness extracts, and every matching step's script is
+# concatenated into one body, so a correct fragment anywhere in that concatenation satisfies
+# the probe. Reproduced end to end, against the real probe: a disabled "legacy copy" of the
+# ancestry gate above a live gate that only warns. The harness must run the live gate, which
+# means probe_ancestry_gate_is_never_executed must read WEAK on this workflow.
+# ---------------------------------------------------------------------------
+probe_a_shadowing_step_name_is_executed_instead_of_the_gate() {
+  local wf rc
+  wf="$(mktemp)"
+  awk -v want="      - name: $_ANCESTRY_STEP" '
+    $0 == want {
+      n++
+      if (n == 2) {
+        print want " (legacy copy, kept for reference)"
+        print "        if: ${{ false }}"
+        print "        run: |"
+        print "          set -euo pipefail"
+        print "          git merge-base --is-ancestor \"$GITHUB_SHA\" origin/main \\"
+        print "            || { echo \"::error::not an ancestor\"; exit 1; }"
+        print ""
+        print want
+        print "        run: |"
+        print "          set -euo pipefail"
+        print "          git merge-base --is-ancestor \"$GITHUB_SHA\" origin/main \\"
+        print "            || echo \"::warning::not an ancestor, releasing anyway\""
+        print ""
+        skip = 1
+        next
+      }
+    }
+    skip && (/^      - name:/ || /^  [a-z][a-z0-9-]*:/) { skip = 0 }
+    !skip { print }
+  ' "$WF" > "$wf"
+  ( WF="$wf"; probe_ancestry_gate_is_never_executed )
+  rc=$?
+  rm -f "$wf"
+  # Weak while the real probe reads FIXED (rc non-zero) on a workflow whose live gate waves
+  # a non-ancestor commit through.
+  [ "$rc" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# D17-05 - a rename that APPENDS to the step name is a rename. The pull request body claims
+# every probe reads WEAK when its step is renamed; with a substring match, an appended
+# rename is not seen at all.
+# ---------------------------------------------------------------------------
+probe_a_renamed_step_is_still_found() {
+  local wf renamed real
+  wf="$(mktemp)"
+  sed "s|^      - name: $_SIGNATURE_STEP\$|      - name: $_SIGNATURE_STEP (advisory)|" "$WF" > "$wf"
+  renamed="$(_step_body_text "$_SIGNATURE_STEP" < <(_job_block "$wf" publish))"
+  rm -f "$wf"
+  real="$(_step_body_text "$_SIGNATURE_STEP" < <(_job_block "$WF" publish))"
+  # Weak while the renamed step is still found; the control keeps this from passing because
+  # the extractor stopped working altogether.
+  [ -n "$renamed" ] && [ -n "$real" ]
+}
+
+probe probe_a_step_disabled_by_an_expression_is_not_detected     "D17-01 an if: expression reads as enabled"       probe_a_step_disabled_by_an_expression_is_not_detected
+probe probe_a_step_disabled_with_a_trailing_comment_is_not_detected "D17-02 if: false + comment reads as enabled"  probe_a_step_disabled_with_a_trailing_comment_is_not_detected
+probe probe_an_if_after_the_run_key_is_not_detected              "D17-03/08 an if: after run: is invisible"        probe_an_if_after_the_run_key_is_not_detected
+probe probe_a_shadowing_step_name_is_executed_instead_of_the_gate "D17-04 a decoy step name is run, not the gate"  probe_a_shadowing_step_name_is_executed_instead_of_the_gate
+probe probe_a_renamed_step_is_still_found                        "D17-05 an appended rename is not detected"       probe_a_renamed_step_is_still_found
+
 [ -z "$_SCAN_FIXTURE" ] || rm -rf "$_SCAN_FIXTURE"
 
 echo
