@@ -962,6 +962,17 @@ probe_preflight_is_not_its_own_job() {
   pre="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  preflight:$/ {f=1} f' "$WF")"
   grep -q 'environment:' <<<"$pre" && return 0         # it holds the environment: weak
   grep -q 'secrets\.' <<<"$pre" && return 0            # it can see a secret: weak
+  # D17-12: `needs: preflight` is only a gate while preflight actually runs and the needing
+  # job does not run without it. `if: ${{ false }}` on preflight plus `if: always()` (or any
+  # other condition) on a job that needs it turns the dependency into a formality. No job in
+  # release.yml carries a job-level `if:` or `continue-on-error:`, so any occurrence is weak.
+  local job
+  for job in preflight publish sample-smoke; do
+    grep -q "^  $job:\$" "$WF" || continue
+    local block
+    block="$(awk -v want="  $job:" 'f && /^  [a-z][a-z0-9-]*:$/ {exit} $0 == want {f=1} f' "$WF")"
+    grep -qE '^    (if|continue-on-error):' <<<"$block" && return 0
+  done
   return 1
 }
 
@@ -2407,22 +2418,45 @@ _step_command_text() { # _step_command_text <step name>   (text on stdin)
   ' <<<"$text"
 }
 
-# True when the named step is not certainly executed by the runner - the N13 shape, applied
-# to a step instead of a job. Three reasons, all of them "the harness cannot prove this step
-# runs", which is the same rule as everywhere else in this suite: unverifiable is not clean.
+# The `if:` value each executed step is EXPECTED to carry, one line per step, empty meaning
+# "no `if:` at all" (D17-10). The D17-01 fix used a single GLOBAL allowlist of the values this
+# workflow uses somewhere, which admitted, on any step, three values that are FALSE on a path
+# a release actually takes: `failure()` (the gate runs only after something has already
+# failed), `github.event_name == 'workflow_dispatch'` (skipped on every tag push) and
+# `github.event_name == 'push'` (legitimate on the signature step, silences the four steps
+# that must run on both paths). Per step, the only accepted value is the one the step is meant
+# to carry: a condition added to a gate, removed from it, or changed on it, reads WEAK until
+# this table is changed with it, on purpose, in the same commit.
 #
-#   D17-01/D17-02: the step carries an `if:` whose value is not one this repository's own
-#     steps use. An ALLOWLIST, not a denylist of false spellings: `${{ false }}`,
-#     `false  # comment`, `1 == 2` and every other always-false expression are values this
-#     harness cannot evaluate, so they read as not running. Adding a new `if:` value to
-#     release.yml means adding it here, on purpose.
+# A step name with no entry has no recorded expectation, so any `if:` on it is unverifiable
+# and reads WEAK - the same rule as everywhere else in this suite. The table lives INSIDE
+# `_step_is_disabled`: a review probe file lifts that function out of this suite by name and
+# runs it standalone, so a helper called from it would be undefined there.
+#
+# True when the named step is not certainly executed, and obeyed, by the runner - the N13
+# shape, applied to a step instead of a job. Every reason below is "the harness cannot prove
+# this step runs and stops the release", which is the same rule as everywhere else in this
+# suite: unverifiable is not clean.
+#
+#   D17-01/D17-02/D17-10: the step's `if:` is not exactly the value the table below
+#     records for that step. `${{ false }}`, `false  # comment`, `1 == 2`, `failure()` on a gate
+#     that must run on a successful release, or a missing condition on a step that must
+#     carry one, all read as not certainly executed.
 #   D17-03: every line of the step block is scanned, not only the lines before `run:`. YAML
 #     mapping keys have no order, and an `if:` after a single-line `run:` used to be
 #     invisible while the runner skipped the step. `if:` is recognised at step-key
 #     indentation only, so a shell `if` inside a deeper-indented script cannot trip it.
 #   D17-04: the name occurs more than once in this job, so which body runs is undecidable.
+#   D17-11: the step, or its job, carries `continue-on-error:`. That is the one unhooking
+#     that still publishes - the gate runs, refuses, and the job signs and uploads anyway.
+#     No true/false parsing: no release step and no release job carries the key at all, so
+#     any occurrence is a condition this harness cannot evaluate.
+#   D17-12: the step's job carries an `if:`. A skipped `publish` publishes nothing, but a
+#     skipped `preflight` under a job that runs anyway silences the environment/ruleset
+#     gate, the one control with no second copy inside `publish`. No job in release.yml
+#     carries an `if:`, so the expected value is "absent" for every job.
 _step_is_disabled() { # _step_is_disabled <step name>   (text on stdin)
-  local text want values value
+  local text want values expected jobkeys stepkeys
   text="$(cat)"
   want="      - name: $1"
   awk -v want="$want" '
@@ -2430,6 +2464,23 @@ _step_is_disabled() { # _step_is_disabled <step name>   (text on stdin)
     $0 == want { n[job]++ }
     END { for (j in n) if (n[j] > 1) exit 1 }
   ' <<<"$text" || return 0
+  # D17-11 / D17-12, the job half: the job carrying this step must have neither an `if:` nor
+  # a `continue-on-error:` of its own, at job-key indentation.
+  jobkeys="$(awk -v want="$want" '
+    /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { job = $0; next }
+    $0 == want { hit[job] = 1 }
+    /^    if:/ || /^    continue-on-error:/ { key[job] = key[job] $0 "\n" }
+    END { for (j in hit) printf "%s", key[j] }
+  ' <<<"$text")"
+  [ -z "$jobkeys" ] || return 0
+  # D17-11, the step half.
+  stepkeys="$(awk -v want="$want" '
+    $0 == want { instep = 1; next }
+    instep && /^      - name:/ { exit }
+    instep && /^  [a-z][a-z0-9-]*:/ { exit }
+    instep && /^        continue-on-error:/ { print }
+  ' <<<"$text")"
+  [ -z "$stepkeys" ] || return 0
   values="$(awk -v want="$want" '
     $0 == want { instep = 1; next }
     instep && /^      - name:/ { exit }
@@ -2441,15 +2492,17 @@ _step_is_disabled() { # _step_is_disabled <step name>   (text on stdin)
       print line
     }
   ' <<<"$text")"
-  [ -n "$values" ] || return 1
-  while IFS= read -r value; do
-    case "$value" in
-      'success()'|'failure()'|'always()') ;;
-      "github.event_name == 'push'") ;;
-      "github.event_name == 'workflow_dispatch'") ;;
-      *) return 0 ;;
-    esac
-  done <<<"$values"
+  # D17-10: exactly the condition this step is expected to carry, no more and no less. Empty
+  # means "no `if:` at all"; a step with no entry is unverifiable as soon as it carries one.
+  case "$1" in
+    'Verify the released commit is on main')                                expected='' ;;
+    'Verify the tag signature')                                             expected="github.event_name == 'push'" ;;
+    'Remove any pre-existing Maven wrapper distribution')                   expected='' ;;
+    'Set the release version in the checkout')                              expected='' ;;
+    'Confirm the bundle contains exactly the three published coordinates')  expected='success()' ;;
+    *) [ -z "$values" ] || return 0; return 1 ;;
+  esac
+  [ "$values" = "$expected" ] || return 0
   return 1
 }
 
@@ -3041,11 +3094,117 @@ probe_a_renamed_step_is_still_found() {
   [ -n "$renamed" ] && [ -n "$real" ]
 }
 
+# A copy of release.yml with <line> inserted after the <occurrence>th step of that name, or
+# directly under a job key. Echoes the path; the caller removes it.
+_wf_after_step() { # _wf_after_step <step name> <occurrence> <line>
+  local out; out="$(mktemp)"
+  awk -v want="      - name: $1" -v occ="$2" -v add="$3" '
+    { print }
+    $0 == want { n++; if (n == occ + 0) print add }
+  ' "$WF" > "$out"
+  printf '%s' "$out"
+}
+
+_wf_after_job() { # _wf_after_job <job id> <line>
+  local out; out="$(mktemp)"
+  awk -v want="  $1:" -v add="$2" '{ print } $0 == want { print add }' "$WF" > "$out"
+  printf '%s' "$out"
+}
+
+# A copy of release.yml with the `if:` line of the <step name> step removed.
+_wf_without_the_if() { # _wf_without_the_if <step name>
+  local out; out="$(mktemp)"
+  awk -v want="      - name: $1" '
+    $0 == want { instep = 1; print; next }
+    instep && /^        if:/ { instep = 0; next }
+    instep && (/^      - name:/ || /^  [a-z][a-z0-9-]*:/) { instep = 0 }
+    { print }
+  ' "$WF" > "$out"
+  printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# D17-10 - the `if:` allowlist the D17-01 fix introduced was GLOBAL: five values accepted on
+# ANY step. Three of them are false on a path a release actually takes. `failure()` on the
+# ancestry gate means the gate runs only after something has already failed, never on a
+# successful release; `github.event_name == 'workflow_dispatch'` means it is skipped on every
+# tag push, which is the normal release path; `github.event_name == 'push'` is legitimate on
+# the signature step and silences the four steps that must run on both paths just as quietly.
+# The expectation is therefore per step (the table inside `_step_is_disabled`): the value the
+# step is meant to carry on this head and nothing else - not a value added to it, not one
+# removed from it.
+# ---------------------------------------------------------------------------
+probe_an_if_false_on_the_release_path_reads_as_running() {
+  local wf weak=0 v
+  for v in 'failure()' "github.event_name == 'workflow_dispatch'" "github.event_name == 'push'" \
+           'always()' 'success()'; do
+    wf="$(_wf_after_step "$_ANCESTRY_STEP" 2 "        if: $v")"
+    _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+    rm -f "$wf"
+  done
+  # the other direction: the bundle step's own condition REMOVED is a changed gate too
+  wf="$(_wf_without_the_if "$_BUNDLE_STEP")"
+  _step_is_disabled "$_BUNDLE_STEP" < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  # controls: on the unmutated workflow both steps read as live, conditions and all
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$WF" publish) && weak=1
+  _step_is_disabled "$_BUNDLE_STEP"   < <(_job_block "$WF" publish) && weak=1
+  _step_is_disabled "$_SIGNATURE_STEP" < <(_job_block "$WF" publish) && weak=1
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D17-11 - every shape the harness detects stops the release. `continue-on-error: true` does
+# not: the gate runs, refuses, and the job carries on to sign and upload. One line, at step
+# level or at job level. This suite already treats a job-level `continue-on-error: true` as a
+# disable for the CI probes job (probe_suite_probe_accepts_a_disabled_probes_job, case b);
+# the release gates must read the same way.
+# ---------------------------------------------------------------------------
+probe_continue_on_error_neutralises_a_gate_unseen() {
+  local wf weak=0
+  wf="$(_wf_after_step "$_ANCESTRY_STEP" 2 '        continue-on-error: true')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  wf="$(_wf_after_job publish '    continue-on-error: true')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+  _step_is_disabled "$_BUNDLE_STEP"   < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$WF" publish) && weak=1   # control
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D17-12 - an `if:` on the JOB is invisible to a step harness. On `publish` alone that is
+# fail safe (a skipped publish job publishes nothing), but `if: ${{ false }}` on `preflight`
+# plus `if: always()` on the job that `needs:` it silences the environment/ruleset gate, the
+# one control with no second copy inside `publish`. No job in release.yml carries an `if:`
+# today, so the expected value is "absent" for every job.
+# ---------------------------------------------------------------------------
+probe_a_job_level_if_is_invisible_to_the_step_harness() {
+  local wf weak=0
+  wf="$(_wf_after_job publish '    if: ${{ false }}')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  wf="$(_wf_after_job preflight '    if: ${{ false }}')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" preflight) || weak=1
+  rm -f "$wf"
+  wf="$(_wf_after_job publish '    if: always()')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  # controls: neither copy of the gate is refused on the unmutated workflow
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$WF" publish)   && weak=1
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$WF" preflight) && weak=1
+  [ "$weak" -eq 1 ]
+}
+
 probe probe_a_step_disabled_by_an_expression_is_not_detected     "D17-01 an if: expression reads as enabled"       probe_a_step_disabled_by_an_expression_is_not_detected
 probe probe_a_step_disabled_with_a_trailing_comment_is_not_detected "D17-02 if: false + comment reads as enabled"  probe_a_step_disabled_with_a_trailing_comment_is_not_detected
 probe probe_an_if_after_the_run_key_is_not_detected              "D17-03/08 an if: after run: is invisible"        probe_an_if_after_the_run_key_is_not_detected
 probe probe_a_shadowing_step_name_is_executed_instead_of_the_gate "D17-04 a decoy step name is run, not the gate"  probe_a_shadowing_step_name_is_executed_instead_of_the_gate
 probe probe_a_renamed_step_is_still_found                        "D17-05 an appended rename is not detected"       probe_a_renamed_step_is_still_found
+probe probe_an_if_false_on_the_release_path_reads_as_running      "D17-10 an if: false on the release path reads as running" probe_an_if_false_on_the_release_path_reads_as_running
+probe probe_continue_on_error_neutralises_a_gate_unseen          "D17-11 continue-on-error: true is not seen"      probe_continue_on_error_neutralises_a_gate_unseen
+probe probe_a_job_level_if_is_invisible_to_the_step_harness      "D17-12 a job-level if: is not seen"              probe_a_job_level_if_is_invisible_to_the_step_harness
 
 [ -z "$_SCAN_FIXTURE" ] || rm -rf "$_SCAN_FIXTURE"
 
