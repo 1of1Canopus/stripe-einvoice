@@ -238,3 +238,216 @@ above land. Public text: the diff carries no person or agent name and no host pa
 
 The Portal upload itself, the reproducibility and replay steps (covered by their own probes on
 earlier branches), and everything outside the release path.
+
+## 2026-09-26 - pass 2 (re-verification of the fix commit, head `a8c8d4c`)
+
+### Verdict
+
+**MERGE WITH FIXES** - eight of the nine pass-1 findings are closed and verified by probe; one
+INFO stays open in the pull request body; three new findings on the surface the fix introduced,
+none above MEDIUM, none needing a new mechanism.
+
+| Severity | Count | Ids |
+|---|---|---|
+| HIGH | 0 | - |
+| MEDIUM | 2 | D17-10, D17-11 |
+| LOW | 1 | D17-12 |
+| INFO | 1 (carried) | D17-09 |
+
+This is pass 2 of 2. The three new findings are corrections inside the one helper this fix
+rewrote (`_step_is_disabled`): a per-step table instead of a global allowlist, and two more keys
+read from the step and its job. I built that fix in a scratch copy and it keeps every probe in
+the suite FIXED while flipping all three (below), so it is a correction, not a mechanism, and
+does not need a design page or a third adversarial pass; a verification run's numbers are enough.
+
+### Numbers
+
+| What | Result |
+|---|---|
+| Probe suite on this head (runner record, `Cipher probes` job of run 36250768098) | still weak: 0, fixed: 97 |
+| Checks on the pull request, head `a8c8d4c` | 7 of 7 SUCCESS (read from the API, draft) |
+| Pass-1 probe file `cipher-probe-step-harness-round1.sh`, re-run by me on this head | **still weak: 0, fixed: 7** |
+| Pass-2 probe file `cipher-probe-step-harness-round2.sh` on this head | **still weak: 3, fixed: 0** |
+| Mutation matrix re-applied by me (8 mutations x 7 step/job copies) | **56 of 56 read WEAK** |
+| Bundle shapes executed against the real step body | 13 shapes, 11 refused, 2 accepted and covered downstream |
+| Full `verify` | not re-run locally; taken from the runner's `Build & test` (SUCCESS) |
+
+### Mutation matrix, re-applied on this head
+
+Each cell: a scratch copy of `release.yml` mutated, the real probe run against it. Applied to
+both job copies of the two duplicated gates. `decoy` is a second step carrying the **same** name
+with the correct body, switched off with `if: ${{ false }}`, above the live step.
+
+| step (job) | rename-replace | rename-append | commented out | `if: false` | `if: ${{ false }}` | `if: false # c` | `if:` after `run:` | same-name decoy |
+|---|---|---|---|---|---|---|---|---|
+| ancestry (preflight) | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK |
+| ancestry (publish) | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK |
+| signature (preflight) | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK |
+| signature (publish) | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK |
+| wrapper removal | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK |
+| bundle coordinates | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK |
+| version set | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK | WEAK |
+
+The version-set row is asserted at the helper level (`_step_is_disabled` / `_step_body_text`,
+the two calls that probe consults), because without `CIPHER_PROBE_MAVEN=1` that probe reads WEAK
+for its own stated reason and the cell would prove nothing. Each cell also carries the control
+this suite requires: on the unmutated workflow the same step reads live and its body is
+extracted, so a helper that refuses everything cannot produce this table.
+
+### Pass-1 findings: rulings
+
+| Id | Ruling | How I verified it on `a8c8d4c` |
+|---|---|---|
+| D17-01 MEDIUM | **CLOSED** | `if: ${{ false }}` on any of the five steps reads as not running; probe flips |
+| D17-02 LOW | **CLOSED** | `if: false  # gate off for this release` reads as not running; probe flips |
+| D17-03 MEDIUM | **CLOSED** | `if: false` after the single-line `run:` and after a block scalar both read as not running |
+| D17-04 MEDIUM | **CLOSED** | exact name match in all three extractors; the decoy workflow now drives `probe_ancestry_gate_is_never_executed` to WEAK, in every one of the eight decoy cells |
+| D17-05 LOW | **CLOSED** | `Verify the tag signature (advisory)` leaves the harness with nothing; probe flips |
+| D17-06 MEDIUM | **CLOSED** | set equality, executed against 13 synthetic bundles (below) |
+| D17-07 LOW | **CLOSED** | replacing the whole `tr` pipeline with `fingerprint="$RELEASE_SIGNING_KEY_ID"` in both copies now drives `probe_tag_signature_gate_is_never_executed` to **WEAK**; with the pipeline in place the lowercase fingerprint is accepted |
+| D17-08 INFO | **CLOSED** | `shell: bash` written after the bundle step's block scalar terminates the body (0 occurrences in the extracted text) and the live step still runs |
+| D17-09 INFO | **OPEN** | the body's opening line still reads "87 probes, still weak 0, fixed 87 ... run 36052568814" and the "Every probe also reads WEAK when its step is renamed, commented out or carries `if: false`" sentence is still unqualified; both are corrected further down the body, not in place |
+
+D17-09 closes by prescription, no further pass: mark those two lines superseded where they are
+(counts `still weak: 0, fixed: 97`, run 36250768098), or delete them in favour of the
+corrections section already written.
+
+### The bundle check, executed
+
+The real step body run against 13 bundles at the real path:
+
+| Bundle | Verdict | Correct? |
+|---|---|---|
+| exactly the three coordinates | accepted | yes (control) |
+| + `com/housedevinci/stripe-einvoice-pro` | refused | yes |
+| + `com/housedevinci/evil-lib` | refused | yes |
+| + `com/housedevinci/demo-app` (a renamed sample) | refused | yes |
+| missing `stripe-einvoice-core` | refused | yes |
+| + `com/evil/stripe-einvoice-core` (same artifact id, foreign group) | refused | yes |
+| `core` published ONLY under `com/evil` | refused | yes |
+| + `com/housedevinci/stripe-einvoice-core/0.1.0/extra/payload.jar` | refused | yes |
+| + `com/housedevinci/sub/stripe-einvoice-core` | refused | yes |
+| a stray top-level file (`README.txt`) | refused | yes |
+| an empty bundle | refused | yes |
+| `core` present as `.jar.asc` only, no jar | accepted | covered downstream |
+| a second version `core-9.9.9.jar` alongside `0.1.0` | accepted | covered downstream |
+
+The last two are the step's stated scope (coordinates, not files or versions) and both are caught
+in the same job by `Confirm the uploaded bundle matches the reproducibility check`: a missing jar
+is reported `MISSING FROM BUNDLE` and an extra one `NO RECORD`, both setting `status=1`. Checked
+by reading that body and its two loops, not assumed. Not findings.
+
+### The builder's judgement call: duplicate names refused in `_step_is_disabled`, counted per job
+
+**Sound, and the statement understates what was built.** The per-job duplicate count is in all
+three helpers, not only in `_step_is_disabled`: `_step_body_text` and `_step_command_text` return
+an empty body on a duplicate, which every probe already reports as WEAK. `_step_is_disabled` is
+consulted first, so the accurate message ("... or the same step name twice in that job") is the
+one that prints; verified in all eight decoy cells.
+
+Per-job is the right granularity and not a convenience: `_step_body_text` is also called with the
+whole workflow, where the ancestry and signature gates legitimately appear once per job, and a
+whole-file count would refuse forever - a probe that always reads WEAK stops being read. The only
+way to split a job's count would be a line matching `^  [a-z...]:$` between the two duplicates,
+which either starts a new job (so the second copy is no longer in the job the probe slices) or is
+not valid YAML (so the workflow does not run at all). Fail-safe either way. No change asked.
+
+### New findings
+
+#### D17-10 (MEDIUM) - the `if:` allowlist is global, so it admits values that are false on the path a release takes
+
+`_step_is_disabled` now accepts five `if:` values for **any** step: `success()`, `failure()`,
+`always()`, `github.event_name == 'push'` and `github.event_name == 'workflow_dispatch'`. That
+list is mine, from pass 1, and it is wrong: three of those five are false on a path a release
+actually takes.
+
+Repro (`probe_an_if_false_on_the_release_path_reads_as_running`, and end to end): add
+`if: failure()` to the publish copy of `Verify the released commit is on main`. The gate then
+runs only after something has already failed - never on a successful release - and
+`probe_ancestry_gate_is_never_executed` reads **FIXED**. Same with
+`if: github.event_name == 'workflow_dispatch'`: the gate is skipped on every tag push, which is
+the normal release path, and the probe reads FIXED. `github.event_name == 'push'` is on the list
+because the signature step legitimately carries it; added to the wrapper removal, the version
+rewrite or the bundle check - all of which must run on both paths - it silences them just as
+quietly. Measured, on the publish ancestry step: `failure()` FIXED, `workflow_dispatch` FIXED,
+`push` FIXED, `success()` FIXED, `always()` FIXED, and `true`, `${{ success() }}`,
+`github.ref_type == 'tag'` correctly WEAK.
+
+Fix: `tools/cipher-probe-release-pipeline.sh`, `_step_is_disabled` - replace the global allowlist
+with the `if:` value each of the five steps is **expected** to carry, and read WEAK on any other
+value, on an added value and on a removed one. The table on this head is: ancestry - none in both
+jobs; `Verify the tag signature` - `github.event_name == 'push'` in both jobs;
+`Remove any pre-existing Maven wrapper distribution` - none; `Set the release version in the
+checkout` - none; `Confirm the bundle contains exactly the three published coordinates` -
+`success()`. Changing a step's condition then means changing this table, on purpose, in the same
+commit. Probe to flip: `probe_an_if_false_on_the_release_path_reads_as_running`.
+
+#### D17-11 (MEDIUM) - `continue-on-error: true` neutralises a gate and is the one unhooking that still publishes
+
+Every shape the harness detects stops the release. `continue-on-error: true` does not: the gate
+runs, refuses, and the job carries on to sign and upload. It is one line, at step level or at job
+level, and the harness reads neither.
+
+Repro (`probe_continue_on_error_neutralises_a_gate_unseen`): add `continue-on-error: true` to the
+publish copy of the ancestry gate - `probe_ancestry_gate_is_never_executed` reads **FIXED**. Add
+it to the `publish` job instead: `probe_ancestry_gate_is_never_executed` and
+`probe_bundle_coordinate_check_is_never_executed` both read **FIXED**. A tag that was never on
+main, or signed by a key that is not the release key, then reaches the Portal with the probe suite
+green. This suite already treats a job-level `continue-on-error: true` as a disable for the CI
+probes job (`probe_suite_probe_accepts_a_disabled_probes_job`, case b); the release gates have no
+equivalent.
+
+Fix: same helper - read WEAK when the step carries `continue-on-error:` at step-key indentation,
+and when its job carries `continue-on-error:` at job-key indentation. No `true`/`false` parsing:
+this repository's release gates carry the key not at all, so any occurrence is unverifiable.
+Probe to flip: `probe_continue_on_error_neutralises_a_gate_unseen`.
+
+#### D17-12 (LOW) - an `if:` on the job is invisible to the step harness
+
+`if: ${{ false }}` on `publish` skips all five gates and all five probes read FIXED (measured).
+On its own that is fail safe: a skipped publish job publishes nothing. The reachable shape needs
+two edits - `if: ${{ false }}` on `preflight` plus `if: always()` on the job that `needs:` it -
+and it silences the environment/ruleset gate, which is the one control with no second copy inside
+`publish` (checklist line 11, "no release before go-public"). `probe_preflight_is_not_its_own_job`
+asserts `needs: preflight` is present; nothing asserts that the needed job is not skipped, or
+that the needing job does not run anyway. LOW because it takes two edits and the gates that
+matter most are duplicated in `publish`.
+
+Repro: `probe_a_job_level_if_is_invisible_to_the_step_harness`.
+
+Fix: same helper - read WEAK when the step's job carries an `if:` at job-key indentation (no
+job in `release.yml` carries one today, so the expected value is "absent"). The same line closes
+the `continue-on-error` half of D17-11 at job level. Probe to flip:
+`probe_a_job_level_if_is_invisible_to_the_step_harness`.
+
+### The fix is a correction, not a mechanism
+
+I wrote the three fixes above into a scratch copy of the suite (a per-step expected-`if` table,
+plus two greps over the step block and the job header) and ran everything against it:
+the three new probes flip to **FIXED**, the five D15-04 probes and the five D17 probes in the
+suite all stay **FIXED**, and pass 1's probe file stays **still weak: 0, fixed: 7**. So the
+correction is proved workable inside one helper, in about twenty lines, with no new hook,
+lifecycle or data structure other code depends on. No design page. Route it to the builder who
+wrote the mechanism, not to a fix pass, and let a verification run confirm the numbers.
+
+### Checked on this head and not findings
+
+- **Comment lines between steps** (`      # ...`, six spaces) are swept into the extracted body.
+  They are comments in bash too, and blank lines are inert; the executed bodies behave
+  identically. Not a finding.
+- **A step name in quotes, with a trailing space, or written as a flow mapping** does not match
+  the exact `      - name: <name>` line, so the harness hands back nothing and the probe reads
+  WEAK. Fail closed.
+- **`if: |`, `if: >`, `if: 'false'`, `if: true`, `if: ${{ success() }}`** all read as not running
+  under the new allowlist. Fail closed, and correct: the harness cannot evaluate an expression.
+- **The bundle body under a corrupt or unreadable zip**: `found="$(unzip -Z1 ...)"` under
+  `set -euo pipefail` kills the step. Fail closed.
+- **`_job_block` uses `^  [a-z][a-z0-9-]*:$` while the duplicate counter uses
+  `[a-z0-9_-]`**: a job id with an underscore would be sliced differently by the two. No such job
+  id exists in this workflow and a new one would have to be added deliberately; noted, not
+  raised.
+
+### What I did not review
+
+Unchanged from pass 1: the Portal upload itself, the reproducibility and replay steps, and
+everything outside the release path. The full `verify` was not re-run locally.
