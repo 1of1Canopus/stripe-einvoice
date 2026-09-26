@@ -962,6 +962,17 @@ probe_preflight_is_not_its_own_job() {
   pre="$(awk 'f && /^  [a-z][a-z-]*:$/ {exit} /^  preflight:$/ {f=1} f' "$WF")"
   grep -q 'environment:' <<<"$pre" && return 0         # it holds the environment: weak
   grep -q 'secrets\.' <<<"$pre" && return 0            # it can see a secret: weak
+  # D17-12: `needs: preflight` is only a gate while preflight actually runs and the needing
+  # job does not run without it. `if: ${{ false }}` on preflight plus `if: always()` (or any
+  # other condition) on a job that needs it turns the dependency into a formality. No job in
+  # release.yml carries a job-level `if:` or `continue-on-error:`, so any occurrence is weak.
+  local job
+  for job in preflight publish sample-smoke; do
+    grep -q "^  $job:\$" "$WF" || continue
+    local block
+    block="$(awk -v want="  $job:" 'f && /^  [a-z][a-z0-9-]*:$/ {exit} $0 == want {f=1} f' "$WF")"
+    grep -qE '^    (if|continue-on-error):' <<<"$block" && return 0
+  done
   return 1
 }
 
@@ -2308,6 +2319,892 @@ probe probe_summary_block_dies_on_a_missing_coverage_line       "D18-03 the job 
 # --- end of the D18 block --------------------------------------------------------------------
 probe probe_pre_sign_scan_accepts_an_unrecorded_jar          "D15-01/02 the scan set is not bound to the recorded build" probe_pre_sign_scan_accepts_a_jar_that_is_not_the_recorded_build
 probe probe_pre_sign_scan_accepts_a_missing_published_jar    "D15-03 a published jar absent from the scan set passes"    probe_pre_sign_scan_accepts_a_published_jar_missing_from_the_scan_set
+
+
+# ===========================================================================
+# D15-04 (security review of fix/release-scan-resolution). Five step bodies exist only in
+# release.yml, so nothing in CI ever runs them, and until this block they were asserted by
+# reading the YAML: the ancestry gate, the tag-signature gate, the wrapper-distribution
+# removal, the version rewrite and the bundle-coordinate assertion. Three of the last four
+# tag runs died inside a release-only body that had never executed once.
+#
+# Every probe below EXTRACTS the real body out of release.yml and RUNS it against synthetic
+# inputs - a throwaway git repository, a throwaway GPG keyring, a throwaway HOME, a synthetic
+# reactor, a synthetic bundle zip - and asserts both directions: the body accepts what it
+# must accept and refuses what it must refuse. Same rule as every block above: the probe
+# reads WEAK while the weakness (a body nothing executes, or one that behaves wrongly when
+# executed) is present, and FIXED when the body behaves.
+#
+# Like N12-N14, each one reads WEAK when its step is renamed (replaced OR appended to),
+# commented out, or switched off with any `if:` value this harness cannot evaluate: a control
+# that has been unhooked is not a control, and a probe that cannot find its step, or that
+# cannot say which of two same-named steps the runner runs, has proved nothing. The D17 block
+# at the end of this file asserts those properties of the harness itself.
+# ===========================================================================
+
+# The text of one job of a workflow. The ancestry and signature steps exist TWICE, once in
+# `preflight` and once in `publish` (deliberately: a gate that lives only in an upstream job
+# is one a workflow edit can drop with nothing noticing), and step_body above stops at the
+# first match, so each copy has to be sliced out of its own job before it can be run.
+_job_block() { # _job_block <workflow> <job id>
+  awk -v want="  $2:" '
+    f && /^  [a-z][a-z0-9-]*:$/ && $0 != want { exit }
+    $0 == want { f = 1 }
+    f
+  ' "$1"
+}
+
+# The body of a `run: |` block, read from workflow or job text on stdin.
+#
+# D17-04: the step name is matched EXACTLY, on its own line at step indentation. A substring
+# match found every step whose name merely CONTAINS this one, concatenated their scripts and
+# handed the lot back as one body, so a correct fragment in a disabled decoy satisfied the
+# probe while the runner executed a weakened gate underneath it. D17-05 is the same
+# mechanism seen from the other side: a rename that APPENDS to the name is a rename, and
+# must leave the harness with nothing.
+#
+# D17-04 (second half): if one job carries the same step name twice, the harness cannot say
+# which body the runner runs, so it refuses - counted per job, because the ancestry and
+# signature gates deliberately exist once in `preflight` and once in `publish` and this
+# helper is also called with the whole workflow on stdin.
+#
+# D17-08: the body stops at the next SIBLING key of the step (`shell:`, `env:`,
+# `timeout-minutes:`, a late `if:`), not only at the next step or job. A block scalar's
+# content is indented deeper than its own key, so a line at exactly step-key indentation is
+# never part of the script; sweeping one in used to append it to the body and execute it.
+_step_body_text() { # _step_body_text <step name>   (text on stdin)
+  local text want
+  text="$(cat)"
+  want="      - name: $1"
+  awk -v want="$want" '
+    /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { job = $0 }
+    $0 == want { n[job]++ }
+    END { for (j in n) if (n[j] > 1) exit 1 }
+  ' <<<"$text" || return 0
+  awk -v want="$want" '
+    $0 == want { instep = 1; next }
+    instep && !inrun && /^        run: \|[[:space:]]*$/ { inrun = 1; next }
+    instep && !inrun && /^      - name:/ { exit }
+    inrun && /^      - name:/ { exit }
+    inrun && /^  [a-z][a-z0-9-]*:/ { exit }
+    inrun && /^        [a-z][a-z0-9_-]*:/ { exit }
+    inrun { print }
+  ' <<<"$text"
+}
+
+# The command of a single-line `run: <command>` step (the wrapper removal is one), read from
+# workflow or job text on stdin. Prints nothing for a block-scalar step. Same exact match and
+# same per-job duplicate refusal as _step_body_text (D17-04).
+_step_command_text() { # _step_command_text <step name>   (text on stdin)
+  local text want
+  text="$(cat)"
+  want="      - name: $1"
+  awk -v want="$want" '
+    /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { job = $0 }
+    $0 == want { n[job]++ }
+    END { for (j in n) if (n[j] > 1) exit 1 }
+  ' <<<"$text" || return 0
+  awk -v want="$want" '
+    $0 == want { instep = 1; next }
+    instep && /^      - name:/ { exit }
+    instep && /^  [a-z][a-z0-9-]*:/ { exit }
+    instep && /^        run: / {
+      line = $0
+      sub(/^        run: /, "", line)
+      if (line == "|" || line == ">") exit
+      print line
+      exit
+    }
+  ' <<<"$text"
+}
+
+# The `if:` value each executed step is EXPECTED to carry, one line per step, empty meaning
+# "no `if:` at all" (D17-10). The D17-01 fix used a single GLOBAL allowlist of the values this
+# workflow uses somewhere, which admitted, on any step, three values that are FALSE on a path
+# a release actually takes: `failure()` (the gate runs only after something has already
+# failed), `github.event_name == 'workflow_dispatch'` (skipped on every tag push) and
+# `github.event_name == 'push'` (legitimate on the signature step, silences the four steps
+# that must run on both paths). Per step, the only accepted value is the one the step is meant
+# to carry: a condition added to a gate, removed from it, or changed on it, reads WEAK until
+# this table is changed with it, on purpose, in the same commit.
+#
+# A step name with no entry has no recorded expectation, so any `if:` on it is unverifiable
+# and reads WEAK - the same rule as everywhere else in this suite. The table lives INSIDE
+# `_step_is_disabled`: a review probe file lifts that function out of this suite by name and
+# runs it standalone, so a helper called from it would be undefined there.
+#
+# True when the named step is not certainly executed, and obeyed, by the runner - the N13
+# shape, applied to a step instead of a job. Every reason below is "the harness cannot prove
+# this step runs and stops the release", which is the same rule as everywhere else in this
+# suite: unverifiable is not clean.
+#
+#   D17-01/D17-02/D17-10: the step's `if:` is not exactly the value the table below
+#     records for that step. `${{ false }}`, `false  # comment`, `1 == 2`, `failure()` on a gate
+#     that must run on a successful release, or a missing condition on a step that must
+#     carry one, all read as not certainly executed.
+#   D17-03: every line of the step block is scanned, not only the lines before `run:`. YAML
+#     mapping keys have no order, and an `if:` after a single-line `run:` used to be
+#     invisible while the runner skipped the step. `if:` is recognised at step-key
+#     indentation only, so a shell `if` inside a deeper-indented script cannot trip it.
+#   D17-04: the name occurs more than once in this job, so which body runs is undecidable.
+#   D17-11: the step, or its job, carries `continue-on-error:`. That is the one unhooking
+#     that still publishes - the gate runs, refuses, and the job signs and uploads anyway.
+#     No true/false parsing: no release step and no release job carries the key at all, so
+#     any occurrence is a condition this harness cannot evaluate.
+#   D17-12: the step's job carries an `if:`. A skipped `publish` publishes nothing, but a
+#     skipped `preflight` under a job that runs anyway silences the environment/ruleset
+#     gate, the one control with no second copy inside `publish`. No job in release.yml
+#     carries an `if:`, so the expected value is "absent" for every job.
+_step_is_disabled() { # _step_is_disabled <step name>   (text on stdin)
+  local text want values expected jobkeys stepkeys
+  text="$(cat)"
+  want="      - name: $1"
+  awk -v want="$want" '
+    /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { job = $0 }
+    $0 == want { n[job]++ }
+    END { for (j in n) if (n[j] > 1) exit 1 }
+  ' <<<"$text" || return 0
+  # D17-11 / D17-12, the job half: the job carrying this step must have neither an `if:` nor
+  # a `continue-on-error:` of its own, at job-key indentation.
+  jobkeys="$(awk -v want="$want" '
+    /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { job = $0; next }
+    $0 == want { hit[job] = 1 }
+    /^    if:/ || /^    continue-on-error:/ { key[job] = key[job] $0 "\n" }
+    END { for (j in hit) printf "%s", key[j] }
+  ' <<<"$text")"
+  [ -z "$jobkeys" ] || return 0
+  # D17-11, the step half.
+  stepkeys="$(awk -v want="$want" '
+    $0 == want { instep = 1; next }
+    instep && /^      - name:/ { exit }
+    instep && /^  [a-z][a-z0-9-]*:/ { exit }
+    instep && /^        continue-on-error:/ { print }
+  ' <<<"$text")"
+  [ -z "$stepkeys" ] || return 0
+  values="$(awk -v want="$want" '
+    $0 == want { instep = 1; next }
+    instep && /^      - name:/ { exit }
+    instep && /^  [a-z][a-z0-9-]*:/ { exit }
+    instep && /^        if:/ {
+      line = $0
+      sub(/^        if:[[:space:]]*/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      print line
+    }
+  ' <<<"$text")"
+  # D17-10: exactly the condition this step is expected to carry, no more and no less. Empty
+  # means "no `if:` at all"; a step with no entry is unverifiable as soon as it carries one.
+  case "$1" in
+    'Verify the released commit is on main')                                expected='' ;;
+    'Verify the tag signature')                                             expected="github.event_name == 'push'" ;;
+    'Remove any pre-existing Maven wrapper distribution')                   expected='' ;;
+    'Set the release version in the checkout')                              expected='' ;;
+    'Confirm the bundle contains exactly the three published coordinates')  expected='success()' ;;
+    *) [ -z "$values" ] || return 0; return 1 ;;
+  esac
+  [ "$values" = "$expected" ] || return 0
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# D15-04 (1/5) - `Verify the released commit is on main`. The release's first gate, in both
+# the preflight job and the key-holding job, and until now asserted by a grep for the word
+# `merge-base`.
+#
+# Executed: a throwaway repository with a real `refs/remotes/origin/main`, a commit that IS
+# an ancestor of it and a commit on a scratch branch that is NOT. Both copies of the body
+# must accept the first and refuse the second. Weak if either copy is missing, disabled, or
+# gets either direction wrong.
+# ---------------------------------------------------------------------------
+_ancestry_repo() {   # echoes a repo dir carrying .on-main and .off-main
+  local repo
+  repo="$(mktemp -d)"
+  (
+    set -e
+    cd "$repo"
+    git init -q -b main .
+    git config user.email probe@example.invalid
+    git config user.name probe
+    git commit -q --allow-empty -m "root"
+    git commit -q --allow-empty -m "reviewed, on main"
+    git rev-parse HEAD > .on-main
+    # The runner's checkout carries origin/main as a remote-tracking ref, not a local branch.
+    git update-ref refs/remotes/origin/main HEAD
+    git checkout -q --detach HEAD~1
+    git commit -q --allow-empty -m "scratch branch, never merged"
+    git rev-parse HEAD > .off-main
+  ) >>"$PROBE_CAPTURE" 2>&1 || { rm -rf "$repo"; return 1; }
+  printf '%s' "$repo"
+}
+
+probe_ancestry_gate_is_never_executed() {
+  local repo on off job text body rc weak=0
+  repo="$(_ancestry_repo)" || { PROBE_SKIP_REASON="the synthetic git repository could not be built, so the ancestry body was never exercised"; return 0; }
+  on="$(cat "$repo/.on-main")"
+  off="$(cat "$repo/.off-main")"
+  for job in preflight publish; do
+    text="$(_job_block "$WF" "$job")"
+    if [ -z "$text" ]; then
+      PROBE_SKIP_REASON="the '$job' job is gone, so its ancestry gate could not be run"
+      weak=1; break
+    fi
+    if _step_is_disabled 'Verify the released commit is on main' <<<"$text"; then
+      PROBE_SKIP_REASON="the ancestry gate is not certainly executed in the '$job' job (switched off, an if: value the harness cannot evaluate, or the same step name twice in that job)"
+      weak=1; break
+    fi
+    body="$(_step_body_text 'Verify the released commit is on main' <<<"$text")"
+    if [ -z "$body" ]; then
+      PROBE_SKIP_REASON="no 'Verify the released commit is on main' body in the '$job' job (renamed or commented out)"
+      weak=1; break
+    fi
+    ( cd "$repo" && GITHUB_SHA="$on" bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] || { weak=1; break; }        # refused a commit that IS on main
+    ( cd "$repo" && GITHUB_SHA="$off" bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1
+    rc=$?
+    [ "$rc" -ne 0 ] || { weak=1; break; }        # accepted a commit that is NOT on main
+  done
+  rm -rf "$repo"
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D15-04 (2/5) - `Verify the tag signature`. The other first gate, in both jobs, and the one
+# F3 had to correct blind: every assertion about it so far has been a text match on the
+# VALIDSIG pattern.
+#
+# Executed: two throwaway GPG keys in a temporary GNUPGHOME, a tag signed by each, and the
+# real body run against them with RELEASE_SIGNING_KEY_ID set to the FIRST key's fingerprint.
+# Five directions, all of them the body's own logic:
+#   a tag signed by the configured key           -> accepted
+#   a tag signed by a second key in the keyring  -> refused (the attack F3 describes)
+#   RELEASE_SIGNING_KEY_ID unset                 -> refused
+#   a short key id instead of a fingerprint      -> refused
+#   the second key, configured                   -> accepted (control on the fixture)
+# The body's `gpg --keyserver ... --recv-keys` is the one thing a probe cannot let happen: it
+# is a network call to a public keyserver for a key that exists only in this temporary
+# keyring. A `gpg` wrapper on PATH answers that one invocation and execs the real gpg for
+# every other, including the one `git verify-tag` makes, so the logic under test is
+# unmodified.
+# ---------------------------------------------------------------------------
+_tag_signature_fixture() {   # echoes a work dir carrying repo/, gnupg/, bin/, fp1, fp2
+  local work real_gpg fp1 fp2 who
+  real_gpg="$(command -v gpg)" || return 1
+  work="$(mktemp -d)"
+  mkdir -p "$work/gnupg" "$work/bin"
+  chmod 700 "$work/gnupg"
+  (
+    set -e
+    export GNUPGHOME="$work/gnupg"
+    for who in one two; do
+      gpg --batch --quiet --pinentry-mode loopback --passphrase '' \
+        --quick-generate-key "Release Probe Key $who <$who@probe.invalid>" ed25519 sign never
+    done
+  ) >>"$PROBE_CAPTURE" 2>&1 || { rm -rf "$work"; return 1; }
+  fp1="$(GNUPGHOME="$work/gnupg" gpg --batch --with-colons --fingerprint --list-secret-keys one@probe.invalid 2>/dev/null | awk -F: '/^fpr:/ { print $10; exit }')"
+  fp2="$(GNUPGHOME="$work/gnupg" gpg --batch --with-colons --fingerprint --list-secret-keys two@probe.invalid 2>/dev/null | awk -F: '/^fpr:/ { print $10; exit }')"
+  if [ -z "${fp1:-}" ] || [ -z "${fp2:-}" ] || [ "$fp1" = "$fp2" ]; then rm -rf "$work"; return 1; fi
+  printf '%s' "$fp1" > "$work/fp1"
+  printf '%s' "$fp2" > "$work/fp2"
+  (
+    set -e
+    export GNUPGHOME="$work/gnupg"
+    mkdir "$work/repo"
+    cd "$work/repo"
+    git init -q -b main .
+    git config user.email probe@example.invalid
+    git config user.name probe
+    git config gpg.program gpg
+    git commit -q --allow-empty -m "released commit"
+    git -c user.signingkey="$fp1" tag -s -u "$fp1" v9.9.9 -m "signed by the configured key"
+    git -c user.signingkey="$fp2" tag -s -u "$fp2" v9.9.9-other -m "signed by another key"
+  ) >>"$PROBE_CAPTURE" 2>&1 || { rm -rf "$work"; return 1; }
+  cat > "$work/bin/gpg" <<STUB
+#!/usr/bin/env bash
+# Answers the keyserver fetch the step body makes - the key under test is already in this
+# throwaway keyring - and forwards everything else, unchanged, to the real gpg.
+for arg in "\$@"; do
+  if [ "\$arg" = "--recv-keys" ]; then
+    echo "probe: --recv-keys answered locally, no keyserver was contacted"
+    exit 0
+  fi
+done
+exec "$real_gpg" "\$@"
+STUB
+  chmod +x "$work/bin/gpg"
+  printf '%s' "$work"
+}
+
+_tag_signature_exit() {   # _tag_signature_exit <work> <body> <ref> <key id>; echoes rc
+  local work="$1" body="$2" ref="$3" key="$4" rc
+  (
+    cd "$work/repo" &&
+    PATH="$work/bin:$PATH" GNUPGHOME="$work/gnupg" \
+    GITHUB_REF_NAME="$ref" RELEASE_SIGNING_KEY_ID="$key" \
+    bash -c "$body"
+  ) >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  echo "$rc"
+}
+
+probe_tag_signature_gate_is_never_executed() {
+  command -v gpg >>"$PROBE_CAPTURE" 2>&1 || { PROBE_SKIP_REASON="gpg is not installed, so the tag-signature body was never exercised"; return 0; }
+  local work fp1 fp2 job text body weak=0
+  work="$(_tag_signature_fixture)" || { PROBE_SKIP_REASON="the throwaway keys and signed tags could not be created, so the tag-signature body was never exercised"; return 0; }
+  fp1="$(cat "$work/fp1")"
+  fp2="$(cat "$work/fp2")"
+  for job in preflight publish; do
+    text="$(_job_block "$WF" "$job")"
+    if [ -z "$text" ]; then
+      PROBE_SKIP_REASON="the '$job' job is gone, so its tag-signature gate could not be run"
+      weak=1; break
+    fi
+    if _step_is_disabled 'Verify the tag signature' <<<"$text"; then
+      PROBE_SKIP_REASON="the tag-signature gate is not certainly executed in the '$job' job (switched off, an if: value the harness cannot evaluate, or the same step name twice in that job)"
+      weak=1; break
+    fi
+    body="$(_step_body_text 'Verify the tag signature' <<<"$text")"
+    if [ -z "$body" ]; then
+      PROBE_SKIP_REASON="no 'Verify the tag signature' body in the '$job' job (renamed or commented out)"
+      weak=1; break
+    fi
+    [ "$(_tag_signature_exit "$work" "$body" v9.9.9 "$fp1")" -eq 0 ] || { weak=1; break; }
+    [ "$(_tag_signature_exit "$work" "$body" v9.9.9-other "$fp1")" -ne 0 ] || { weak=1; break; }
+    [ "$(_tag_signature_exit "$work" "$body" v9.9.9 "")" -ne 0 ] || { weak=1; break; }
+    [ "$(_tag_signature_exit "$work" "$body" v9.9.9 "${fp1: -16}")" -ne 0 ] || { weak=1; break; }
+    # Control on the fixture itself: the second key must really be able to produce a tag the
+    # gate accepts when it IS the configured key, otherwise the refusal above could be an
+    # artefact of a broken signature rather than of the identity check.
+    [ "$(_tag_signature_exit "$work" "$body" v9.9.9-other "$fp2")" -eq 0 ] || { weak=1; break; }
+    # D17-07: the one production line this branch changes is the normalisation of
+    # RELEASE_SIGNING_KEY_ID to upper case. Without this direction the whole pipeline could be
+    # deleted and the probe would stay green: a maintainer who pastes the fingerprint in lower
+    # case must get an accepted release, not a refused one.
+    [ "$(_tag_signature_exit "$work" "$body" v9.9.9 "$(printf '%s' "$fp1" | tr '[:upper:]' '[:lower:]')")" -eq 0 ] || { weak=1; break; }
+  done
+  rm -rf "$work"
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D15-04 (3/5) - `Remove any pre-existing Maven wrapper distribution`. M3's operational half:
+# mvnw execs an already-unpacked distribution with no checksum check at all, so the job that
+# holds the signing key must start with none on disk. Nothing had ever run the line.
+#
+# Executed: a throwaway HOME carrying an unpacked distribution, a settings.xml (the file
+# setup-java writes with the Central credentials) and a local repository. After the body the
+# distribution must be gone and the other two must still be there - `rm -rf ~/.m2` would also
+# satisfy "no distribution" and would take the release's credentials file with it.
+# ---------------------------------------------------------------------------
+probe_wrapper_removal_is_never_executed() {
+  local text cmd home weak=0
+  text="$(_job_block "$WF" publish)"
+  [ -n "$text" ] || { PROBE_SKIP_REASON="the publish job is gone"; return 0; }
+  if _step_is_disabled 'Remove any pre-existing Maven wrapper distribution' <<<"$text"; then
+    PROBE_SKIP_REASON="the wrapper-removal step is not certainly executed (switched off, an if: value the harness cannot evaluate, or the same step name twice in the job)"
+    return 0
+  fi
+  cmd="$(_step_command_text 'Remove any pre-existing Maven wrapper distribution' <<<"$text")"
+  if [ -z "$cmd" ]; then
+    cmd="$(_step_body_text 'Remove any pre-existing Maven wrapper distribution' <<<"$text")"
+  fi
+  if [ -z "$cmd" ]; then
+    PROBE_SKIP_REASON="no 'Remove any pre-existing Maven wrapper distribution' step body (renamed or commented out)"
+    return 0
+  fi
+  home="$(mktemp -d)"
+  mkdir -p "$home/.m2/wrapper/dists/apache-maven-3.9.11-bin/2f1b3c/apache-maven-3.9.11/bin"
+  printf 'poisoned distribution\n' > "$home/.m2/wrapper/dists/apache-maven-3.9.11-bin/2f1b3c/apache-maven-3.9.11/bin/mvn"
+  printf '<settings/>\n' > "$home/.m2/settings.xml"
+  mkdir -p "$home/.m2/repository/com/example"
+  ( cd "$home" && HOME="$home" bash -c "$cmd" ) >>"$PROBE_CAPTURE" 2>&1 || weak=1
+  [ -e "$home/.m2/wrapper/dists" ] && weak=1          # the unpacked distribution survived
+  [ -f "$home/.m2/settings.xml" ] || weak=1           # took the Central credentials with it
+  [ -d "$home/.m2/repository/com/example" ] || weak=1 # took the local repository with it
+  rm -rf "$home"
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D15-04 (4/5) - `Set the release version in the checkout`. The step that decides which
+# version is signed and uploaded; never executed as a body, and the only thing standing
+# between it and a hostile version string is the step two above it, whose output the runner
+# substitutes into this one's command line.
+#
+# Executed as the runner composes it: the real `Derive the release version` body produces the
+# version, that literal is substituted into the real `Set the release version in the checkout`
+# body (${{ }} never reaches bash on a runner), and the pair runs against a synthetic
+# aggregator with two modules.
+#   a tag version           -> the parent and every module carry it afterwards, exit 0,
+#                              and no versionsBackup pom is left in the tree
+#   an embedded newline     -> the composition refuses and the rewrite never runs
+#   shell metacharacters    -> same, and nothing is executed in the checkout
+#   a SNAPSHOT              -> same
+# The refusal deliberately belongs to the derivation step (M4's whole-string `=~`, which no
+# newline, `$`, `(` or `;` can satisfy), which is why this probe runs the composition rather
+# than the second body alone: asserting the refusal inside the rewrite step would be
+# asserting a control this workflow does not have and does not need.
+# ---------------------------------------------------------------------------
+_derive_version() {   # _derive_version <ref name>; echoes "<rc> <version>"
+  local body out rc version
+  body="$(step_body "$WF" 'Derive the release version')"
+  [ -n "$body" ] || { echo "127 "; return; }
+  out="$(mktemp)"
+  GITHUB_EVENT_NAME=push GITHUB_REF_NAME="$1" GITHUB_OUTPUT="$out" \
+    bash -c "$body" >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  version="$(awk -F= '/^version=/ { print $2; exit }' "$out" 2>/dev/null)"
+  rm -f "$out"
+  echo "$rc ${version:-}"
+}
+
+_version_set_reactor() {   # echoes a work dir carrying tree/ (wrapper included) and t/
+  local work module
+  work="$(mktemp -d)"
+  mkdir -p "$work/tree/probe-a" "$work/tree/probe-b" "$work/t"
+  cp -a .mvn "$work/tree/.mvn" 2>/dev/null || { rm -rf "$work"; return 1; }
+  cp mvnw "$work/tree/mvnw" 2>/dev/null || { rm -rf "$work"; return 1; }
+  cat > "$work/tree/pom.xml" <<'POM'
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.housedevinci.probe</groupId>
+  <artifactId>version-set-probe-parent</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <modules>
+    <module>probe-a</module>
+    <module>probe-b</module>
+  </modules>
+</project>
+POM
+  for module in probe-a probe-b; do
+    cat > "$work/tree/$module/pom.xml" <<POM
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.housedevinci.probe</groupId>
+    <artifactId>version-set-probe-parent</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+  </parent>
+  <artifactId>$module</artifactId>
+</project>
+POM
+  done
+  # An empty local repository would make this probe download the versions plugin on every
+  # run. The release job's own reason for an empty one (M3) is about the artifacts it signs,
+  # which is not what is under test here, so reuse the caller's repository when there is one.
+  if [ -d "$HOME/.m2/repository" ]; then
+    ln -s "$HOME/.m2/repository" "$work/t/m2repo"
+  fi
+  printf '%s' "$work"
+}
+
+probe_version_set_step_is_never_executed() {
+  [ "${CIPHER_PROBE_MAVEN:-0}" = "1" ] || { PROBE_SKIP_REASON="this probe runs a Maven plugin against a synthetic reactor; set CIPHER_PROBE_MAVEN=1 to run it"; return 0; }
+  local text body run_body work tree rc derived version hostile module weak=0
+  text="$(_job_block "$WF" publish)"
+  [ -n "$text" ] || { PROBE_SKIP_REASON="the publish job is gone"; return 0; }
+  if _step_is_disabled 'Set the release version in the checkout' <<<"$text"; then
+    PROBE_SKIP_REASON="the version-set step is not certainly executed (switched off, an if: value the harness cannot evaluate, or the same step name twice in the job)"
+    return 0
+  fi
+  body="$(_step_body_text 'Set the release version in the checkout' <<<"$text")"
+  if [ -z "$body" ]; then
+    PROBE_SKIP_REASON="no 'Set the release version in the checkout' body (renamed or commented out)"
+    return 0
+  fi
+
+  # 1. The honest path: a real tag name through the real derivation, then the real rewrite.
+  derived="$(_derive_version v7.8.9)"
+  version="${derived#* }"
+  if [ "${derived%% *}" -ne 0 ] || [ "$version" != "7.8.9" ]; then
+    PROBE_SKIP_REASON="the derivation step did not yield a version for v7.8.9, so the rewrite was never composed"
+    return 0
+  fi
+  work="$(_version_set_reactor)" || { PROBE_SKIP_REASON="the synthetic reactor could not be built, so the rewrite body was never exercised"; return 0; }
+  tree="$work/tree"
+  run_body="$body"
+  run_body="${run_body//\$\{\{ runner.temp \}\}/$work/t}"
+  run_body="${run_body//\$\{\{ steps.v.outputs.version \}\}/$version}"
+  ( cd "$tree" && bash -c "$run_body" ) >>"$PROBE_CAPTURE" 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || weak=1
+  grep -q "<version>$version</version>" "$tree/pom.xml" || weak=1
+  grep -q "<version>$version</version>" "$tree/probe-a/pom.xml" || weak=1
+  grep -q "<version>$version</version>" "$tree/probe-b/pom.xml" || weak=1
+  for module in probe-a probe-b; do
+    grep -q '0.0.1-SNAPSHOT' "$tree/$module/pom.xml" && weak=1
+  done
+  grep -q '0.0.1-SNAPSHOT' "$tree/pom.xml" && weak=1
+  # -DgenerateBackupPoms=false: a release must not carry a pom.xml.versionsBackup into the
+  # tree it is about to build, sign and publish.
+  [ -e "$tree/pom.xml.versionsBackup" ] && weak=1
+
+  # 2. The hostile paths, through the same composition. Each must be refused before the
+  #    rewrite body is reached, and must leave the checkout untouched.
+  for hostile in "$(printf 'v7.8.9\nmalicious=1')" 'v7.8.9$(touch pwned)' 'v7.8.9; touch pwned' 'v7.8.9-SNAPSHOT'; do
+    derived="$(_derive_version "$hostile")"
+    if [ "${derived%% *}" -eq 0 ]; then
+      weak=1                                    # a hostile version reached the rewrite step
+      continue
+    fi
+    version="${derived#* }"
+    [ -z "$version" ] || weak=1                 # it still wrote a version to $GITHUB_OUTPUT
+  done
+  [ -e pwned ] && { weak=1; rm -f pwned; }
+  [ -e "$tree/pwned" ] && weak=1
+
+  rm -rf "$work"
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D15-04 (5/5) - `Confirm the bundle contains exactly the three published coordinates`. L5's
+# only mechanism for keeping the sample out of what is uploaded, and N4 already caught it
+# pointing at a path the plugin never writes - after the upload had happened. Executed once
+# by hand during that fix, never by a gate.
+#
+# Executed: synthetic central-bundle.zip files at the real path.
+#   exactly the three published coordinates -> accepted
+#   plus the sample                         -> refused
+#   one published coordinate missing        -> refused
+#   no bundle at all                        -> refused (the N4 shape)
+# ---------------------------------------------------------------------------
+_make_bundle() {   # _make_bundle <work dir> <coordinate>...
+  local work="$1"; shift
+  local layout="$work/bundle-src" coord
+  rm -rf "$layout" "$work/target/central-publishing/central-bundle.zip"
+  mkdir -p "$layout" "$work/target/central-publishing"
+  for coord in "$@"; do
+    mkdir -p "$layout/com/housedevinci/$coord/0.1.0"
+    printf 'pom bytes\n' > "$layout/com/housedevinci/$coord/0.1.0/$coord-0.1.0.pom"
+    printf 'jar bytes\n' > "$layout/com/housedevinci/$coord/0.1.0/$coord-0.1.0.jar"
+    printf 'signature\n' > "$layout/com/housedevinci/$coord/0.1.0/$coord-0.1.0.jar.asc"
+  done
+  ( cd "$layout" && zip -q -r "$work/target/central-publishing/central-bundle.zip" . ) >>"$PROBE_CAPTURE" 2>&1
+}
+
+probe_bundle_coordinate_check_is_never_executed() {
+  command -v zip >>"$PROBE_CAPTURE" 2>&1 || { PROBE_SKIP_REASON="zip is not installed, so the synthetic bundle this probe needs cannot be built"; return 0; }
+  local text body work weak=0
+  text="$(_job_block "$WF" publish)"
+  [ -n "$text" ] || { PROBE_SKIP_REASON="the publish job is gone"; return 0; }
+  if _step_is_disabled 'Confirm the bundle contains exactly the three published coordinates' <<<"$text"; then
+    PROBE_SKIP_REASON="the bundle-coordinate check is not certainly executed (switched off, an if: value the harness cannot evaluate, or the same step name twice in the job)"
+    return 0
+  fi
+  body="$(_step_body_text 'Confirm the bundle contains exactly the three published coordinates' <<<"$text")"
+  if [ -z "$body" ]; then
+    PROBE_SKIP_REASON="no 'Confirm the bundle contains exactly the three published coordinates' body (renamed or commented out)"
+    return 0
+  fi
+  work="$(mktemp -d)"
+
+  # No bundle at all: the shape N4 found, where the step read a path nothing writes.
+  mkdir -p "$work/target/central-publishing"
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 && weak=1
+
+  _make_bundle "$work" stripe-einvoice-parent stripe-einvoice-core stripe-einvoice-spring-boot-starter
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 || weak=1   # must accept
+
+  _make_bundle "$work" stripe-einvoice-parent stripe-einvoice-core stripe-einvoice-spring-boot-starter stripe-einvoice-sample
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 && weak=1   # must refuse
+
+  _make_bundle "$work" stripe-einvoice-parent stripe-einvoice-spring-boot-starter
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 && weak=1   # must refuse
+
+  # D17-06: the step is named "exactly the three published coordinates" and until this branch
+  # it checked only that the three were present and that one literal name was absent. Any
+  # fourth coordinate was uploaded. Three directions, none of which a name denylist can hold:
+  # the module on this module's own roadmap, a coordinate nobody has ever heard of, and the
+  # sample under a different artifactId.
+  _make_bundle "$work" stripe-einvoice-parent stripe-einvoice-core stripe-einvoice-spring-boot-starter stripe-einvoice-pro
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 && weak=1   # must refuse
+
+  _make_bundle "$work" stripe-einvoice-parent stripe-einvoice-core stripe-einvoice-spring-boot-starter evil-lib
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 && weak=1   # must refuse
+
+  _make_bundle "$work" stripe-einvoice-parent stripe-einvoice-core stripe-einvoice-spring-boot-starter demo-app
+  ( cd "$work" && bash -c "$body" ) >>"$PROBE_CAPTURE" 2>&1 && weak=1   # must refuse
+
+  rm -rf "$work"
+  [ "$weak" -eq 1 ]
+}
+
+probe probe_ancestry_gate_is_never_executed                  "D15-04 the ancestry gate is read, never run"        probe_ancestry_gate_is_never_executed
+probe probe_tag_signature_gate_is_never_executed             "D15-04 the tag-signature gate is read, never run"   probe_tag_signature_gate_is_never_executed
+probe probe_wrapper_removal_is_never_executed                "D15-04 the wrapper removal has never executed"      probe_wrapper_removal_is_never_executed
+probe probe_version_set_step_is_never_executed               "D15-04 the version rewrite has never executed"      probe_version_set_step_is_never_executed
+probe probe_bundle_coordinate_check_is_never_executed        "D15-04 the bundle-coordinate check never runs"      probe_bundle_coordinate_check_is_never_executed
+
+# ===========================================================================
+# D17 (security review of test/release-step-harness, pass 1). The five probes above find
+# their step by a SUBSTRING match on the FIRST occurrence in the job, and call a step
+# "switched off" only when its `if:` is the bare literal `false` written before `run:`.
+# Both gaps let a release gate be unhooked while its probe still reads FIXED, which is the
+# one thing this block exists to prevent. Each probe below mutates a throwaway copy of
+# release.yml the way the review reproduced it, runs the harness against that copy, and
+# asserts the harness sees the mutation - plus, in each case, that the UNMUTATED workflow is
+# still read as a live step, so a helper that simply refuses everything cannot satisfy them.
+# ===========================================================================
+
+_ANCESTRY_STEP='Verify the released commit is on main'
+_SIGNATURE_STEP='Verify the tag signature'
+_WRAPPER_STEP='Remove any pre-existing Maven wrapper distribution'
+_BUNDLE_STEP='Confirm the bundle contains exactly the three published coordinates'
+
+# A copy of release.yml with `if: <value>` inserted under the <occurrence>th step of that
+# name. Echoes the path; the caller removes it.
+_wf_with_an_if() { # _wf_with_an_if <step name> <occurrence> <if value>
+  local out; out="$(mktemp)"
+  awk -v want="      - name: $1" -v occ="$2" -v val="$3" '
+    { print }
+    $0 == want { n++; if (n == occ + 0) print "        if: " val }
+  ' "$WF" > "$out"
+  printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# D17-01 / D17-02 - a step switched off with any always-false expression, or with a trailing
+# comment after the literal, must read as not running. The harness cannot evaluate a GitHub
+# expression, so the rule is an allowlist of the `if:` values this repository's own steps
+# use: anything else is unverifiable, and unverifiable is not clean.
+# ---------------------------------------------------------------------------
+probe_a_step_disabled_by_an_expression_is_not_detected() {
+  local wf weak=0
+  wf="$(_wf_with_an_if "$_BUNDLE_STEP" 1 '${{ false }}')"
+  _step_is_disabled "$_BUNDLE_STEP" < <(_job_block "$wf" publish) || weak=1
+  _step_is_disabled "$_BUNDLE_STEP" < <(_job_block "$WF" publish) && weak=1   # control
+  rm -f "$wf"
+  [ "$weak" -eq 1 ]
+}
+
+probe_a_step_disabled_with_a_trailing_comment_is_not_detected() {
+  local wf weak=0
+  wf="$(_wf_with_an_if "$_ANCESTRY_STEP" 2 'false  # gate off for this release')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$WF" publish) && weak=1   # control
+  rm -f "$wf"
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D17-03 / D17-08 - YAML mapping keys have no order. An `if:` written AFTER `run:` skips the
+# step on the runner; for the single-line `run:` form the old helper stopped scanning at
+# `run:` and handed the command back to be executed. The same boundary in the other
+# direction is D17-08: a sibling key written after a block scalar (`shell: bash`, `env:`,
+# `timeout-minutes:`) must not be swept into the extracted body and executed as its last
+# line.
+# ---------------------------------------------------------------------------
+probe_an_if_after_the_run_key_is_not_detected() {
+  local wf cmd body weak=0
+  # (a) `if: false` after a single-line `run:`
+  wf="$(mktemp)"
+  awk -v want="      - name: $_WRAPPER_STEP" '
+    { print }
+    $0 == want { getline l; print l; print "        if: false" }
+  ' "$WF" > "$wf"
+  _step_is_disabled "$_WRAPPER_STEP" < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  # control: the real step is a live single-line `run:` and its command is still extracted
+  cmd="$(_step_command_text "$_WRAPPER_STEP" < <(_job_block "$WF" publish))"
+  [ -n "$cmd" ] || weak=1
+  _step_is_disabled "$_WRAPPER_STEP" < <(_job_block "$WF" publish) && weak=1
+
+  # (b) a sibling key after the block scalar must terminate the body, not join it
+  wf="$(mktemp)"
+  awk -v want="      - name: $_BUNDLE_STEP" '
+    $0 == want { instep = 1 }
+    instep && inrun && !done && $0 !~ /^          / && $0 !~ /^[[:space:]]*$/ {
+      print "        shell: bash"; done = 1
+    }
+    { print }
+    instep && /^        run: \|[[:space:]]*$/ { inrun = 1 }
+  ' "$WF" > "$wf"
+  body="$(_step_body_text "$_BUNDLE_STEP" < <(_job_block "$wf" publish))"
+  grep -q 'shell: bash' <<<"$body" && weak=1
+  [ -n "$body" ] || weak=1
+  rm -f "$wf"
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D17-04 - the substring match on the first occurrence means a step whose name merely
+# CONTAINS the gate's name is what the harness extracts, and every matching step's script is
+# concatenated into one body, so a correct fragment anywhere in that concatenation satisfies
+# the probe. Reproduced end to end, against the real probe: a disabled "legacy copy" of the
+# ancestry gate above a live gate that only warns. The harness must run the live gate, which
+# means probe_ancestry_gate_is_never_executed must read WEAK on this workflow.
+# ---------------------------------------------------------------------------
+probe_a_shadowing_step_name_is_executed_instead_of_the_gate() {
+  local wf rc
+  wf="$(mktemp)"
+  awk -v want="      - name: $_ANCESTRY_STEP" '
+    $0 == want {
+      n++
+      if (n == 2) {
+        print want " (legacy copy, kept for reference)"
+        print "        if: ${{ false }}"
+        print "        run: |"
+        print "          set -euo pipefail"
+        print "          git merge-base --is-ancestor \"$GITHUB_SHA\" origin/main \\"
+        print "            || { echo \"::error::not an ancestor\"; exit 1; }"
+        print ""
+        print want
+        print "        run: |"
+        print "          set -euo pipefail"
+        print "          git merge-base --is-ancestor \"$GITHUB_SHA\" origin/main \\"
+        print "            || echo \"::warning::not an ancestor, releasing anyway\""
+        print ""
+        skip = 1
+        next
+      }
+    }
+    skip && (/^      - name:/ || /^  [a-z][a-z0-9-]*:/) { skip = 0 }
+    !skip { print }
+  ' "$WF" > "$wf"
+  ( WF="$wf"; probe_ancestry_gate_is_never_executed )
+  rc=$?
+  rm -f "$wf"
+  # Weak while the real probe reads FIXED (rc non-zero) on a workflow whose live gate waves
+  # a non-ancestor commit through.
+  [ "$rc" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# D17-05 - a rename that APPENDS to the step name is a rename. The pull request body claims
+# every probe reads WEAK when its step is renamed; with a substring match, an appended
+# rename is not seen at all.
+# ---------------------------------------------------------------------------
+probe_a_renamed_step_is_still_found() {
+  local wf renamed real
+  wf="$(mktemp)"
+  sed "s|^      - name: $_SIGNATURE_STEP\$|      - name: $_SIGNATURE_STEP (advisory)|" "$WF" > "$wf"
+  renamed="$(_step_body_text "$_SIGNATURE_STEP" < <(_job_block "$wf" publish))"
+  rm -f "$wf"
+  real="$(_step_body_text "$_SIGNATURE_STEP" < <(_job_block "$WF" publish))"
+  # Weak while the renamed step is still found; the control keeps this from passing because
+  # the extractor stopped working altogether.
+  [ -n "$renamed" ] && [ -n "$real" ]
+}
+
+# A copy of release.yml with <line> inserted after the <occurrence>th step of that name, or
+# directly under a job key. Echoes the path; the caller removes it.
+_wf_after_step() { # _wf_after_step <step name> <occurrence> <line>
+  local out; out="$(mktemp)"
+  awk -v want="      - name: $1" -v occ="$2" -v add="$3" '
+    { print }
+    $0 == want { n++; if (n == occ + 0) print add }
+  ' "$WF" > "$out"
+  printf '%s' "$out"
+}
+
+_wf_after_job() { # _wf_after_job <job id> <line>
+  local out; out="$(mktemp)"
+  awk -v want="  $1:" -v add="$2" '{ print } $0 == want { print add }' "$WF" > "$out"
+  printf '%s' "$out"
+}
+
+# A copy of release.yml with the `if:` line of the <step name> step removed.
+_wf_without_the_if() { # _wf_without_the_if <step name>
+  local out; out="$(mktemp)"
+  awk -v want="      - name: $1" '
+    $0 == want { instep = 1; print; next }
+    instep && /^        if:/ { instep = 0; next }
+    instep && (/^      - name:/ || /^  [a-z][a-z0-9-]*:/) { instep = 0 }
+    { print }
+  ' "$WF" > "$out"
+  printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# D17-10 - the `if:` allowlist the D17-01 fix introduced was GLOBAL: five values accepted on
+# ANY step. Three of them are false on a path a release actually takes. `failure()` on the
+# ancestry gate means the gate runs only after something has already failed, never on a
+# successful release; `github.event_name == 'workflow_dispatch'` means it is skipped on every
+# tag push, which is the normal release path; `github.event_name == 'push'` is legitimate on
+# the signature step and silences the four steps that must run on both paths just as quietly.
+# The expectation is therefore per step (the table inside `_step_is_disabled`): the value the
+# step is meant to carry on this head and nothing else - not a value added to it, not one
+# removed from it.
+# ---------------------------------------------------------------------------
+probe_an_if_false_on_the_release_path_reads_as_running() {
+  local wf weak=0 v
+  for v in 'failure()' "github.event_name == 'workflow_dispatch'" "github.event_name == 'push'" \
+           'always()' 'success()'; do
+    wf="$(_wf_after_step "$_ANCESTRY_STEP" 2 "        if: $v")"
+    _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+    rm -f "$wf"
+  done
+  # the other direction: the bundle step's own condition REMOVED is a changed gate too
+  wf="$(_wf_without_the_if "$_BUNDLE_STEP")"
+  _step_is_disabled "$_BUNDLE_STEP" < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  # controls: on the unmutated workflow both steps read as live, conditions and all
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$WF" publish) && weak=1
+  _step_is_disabled "$_BUNDLE_STEP"   < <(_job_block "$WF" publish) && weak=1
+  _step_is_disabled "$_SIGNATURE_STEP" < <(_job_block "$WF" publish) && weak=1
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D17-11 - every shape the harness detects stops the release. `continue-on-error: true` does
+# not: the gate runs, refuses, and the job carries on to sign and upload. One line, at step
+# level or at job level. This suite already treats a job-level `continue-on-error: true` as a
+# disable for the CI probes job (probe_suite_probe_accepts_a_disabled_probes_job, case b);
+# the release gates must read the same way.
+# ---------------------------------------------------------------------------
+probe_continue_on_error_neutralises_a_gate_unseen() {
+  local wf weak=0
+  wf="$(_wf_after_step "$_ANCESTRY_STEP" 2 '        continue-on-error: true')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  wf="$(_wf_after_job publish '    continue-on-error: true')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+  _step_is_disabled "$_BUNDLE_STEP"   < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$WF" publish) && weak=1   # control
+  [ "$weak" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# D17-12 - an `if:` on the JOB is invisible to a step harness. On `publish` alone that is
+# fail safe (a skipped publish job publishes nothing), but `if: ${{ false }}` on `preflight`
+# plus `if: always()` on the job that `needs:` it silences the environment/ruleset gate, the
+# one control with no second copy inside `publish`. No job in release.yml carries an `if:`
+# today, so the expected value is "absent" for every job.
+# ---------------------------------------------------------------------------
+probe_a_job_level_if_is_invisible_to_the_step_harness() {
+  local wf weak=0
+  wf="$(_wf_after_job publish '    if: ${{ false }}')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  wf="$(_wf_after_job preflight '    if: ${{ false }}')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" preflight) || weak=1
+  rm -f "$wf"
+  wf="$(_wf_after_job publish '    if: always()')"
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$wf" publish) || weak=1
+  rm -f "$wf"
+  # controls: neither copy of the gate is refused on the unmutated workflow
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$WF" publish)   && weak=1
+  _step_is_disabled "$_ANCESTRY_STEP" < <(_job_block "$WF" preflight) && weak=1
+  [ "$weak" -eq 1 ]
+}
+
+probe probe_a_step_disabled_by_an_expression_is_not_detected     "D17-01 an if: expression reads as enabled"       probe_a_step_disabled_by_an_expression_is_not_detected
+probe probe_a_step_disabled_with_a_trailing_comment_is_not_detected "D17-02 if: false + comment reads as enabled"  probe_a_step_disabled_with_a_trailing_comment_is_not_detected
+probe probe_an_if_after_the_run_key_is_not_detected              "D17-03/08 an if: after run: is invisible"        probe_an_if_after_the_run_key_is_not_detected
+probe probe_a_shadowing_step_name_is_executed_instead_of_the_gate "D17-04 a decoy step name is run, not the gate"  probe_a_shadowing_step_name_is_executed_instead_of_the_gate
+probe probe_a_renamed_step_is_still_found                        "D17-05 an appended rename is not detected"       probe_a_renamed_step_is_still_found
+probe probe_an_if_false_on_the_release_path_reads_as_running      "D17-10 an if: false on the release path reads as running" probe_an_if_false_on_the_release_path_reads_as_running
+probe probe_continue_on_error_neutralises_a_gate_unseen          "D17-11 continue-on-error: true is not seen"      probe_continue_on_error_neutralises_a_gate_unseen
+probe probe_a_job_level_if_is_invisible_to_the_step_harness      "D17-12 a job-level if: is not seen"              probe_a_job_level_if_is_invisible_to_the_step_harness
 
 [ -z "$_SCAN_FIXTURE" ] || rm -rf "$_SCAN_FIXTURE"
 

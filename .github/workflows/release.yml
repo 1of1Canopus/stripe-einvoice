@@ -119,7 +119,9 @@ jobs:
             echo "::error::RELEASE_SIGNING_KEY_ID must be the full 40-character key fingerprint, not a short key id or email"
             exit 1
           fi
-          fingerprint="${RELEASE_SIGNING_KEY_ID^^}"
+          # Uppercased with tr, not with bash 4's ${x^^}: identical result, and it lets the
+          # probe that executes this body run it on a host whose /bin/bash is 3.2 (macOS).
+          fingerprint="$(printf '%s' "$RELEASE_SIGNING_KEY_ID" | tr '[:lower:]' '[:upper:]')"
           gpg --keyserver keyserver.ubuntu.com --recv-keys "$fingerprint"
           git verify-tag --raw "$GITHUB_REF_NAME" 2>&1 | tee /tmp/verify-tag.out
           # Same VALIDSIG match as the publish job: the LAST field of the status line is the
@@ -251,7 +253,9 @@ jobs:
             echo "::error::RELEASE_SIGNING_KEY_ID must be the full 40-character key fingerprint, not a short key id or email"
             exit 1
           fi
-          fingerprint="${RELEASE_SIGNING_KEY_ID^^}"
+          # Uppercased with tr, not with bash 4's ${x^^}: identical result, and it lets the
+          # probe that executes this body run it on a host whose /bin/bash is 3.2 (macOS).
+          fingerprint="$(printf '%s' "$RELEASE_SIGNING_KEY_ID" | tr '[:lower:]' '[:upper:]')"
           gpg --keyserver keyserver.ubuntu.com --recv-keys "$fingerprint"
           git verify-tag --raw "$GITHUB_REF_NAME" 2>&1 | tee /tmp/verify-tag.out
           # F3: "VALIDSIG <fpr> ..." names the key that MADE the signature in its first field,
@@ -693,18 +697,39 @@ jobs:
           # an earlier module.
           bundle="target/central-publishing/central-bundle.zip"
           [ -f "$bundle" ] || { echo "::error::$bundle was not created"; exit 1; }
-          listing="$(unzip -l "$bundle")"
-          echo "$listing"
-          if printf '%s' "$listing" | grep -q 'stripe-einvoice-sample'; then
-            echo "::error::the bundle contains stripe-einvoice-sample, which must never be published"
+          unzip -l "$bundle"
+          # D17-06: SET EQUALITY, not "the three are present". The previous body denied one
+          # literal artifact name and checked the three expected coordinates were there, so
+          # any fourth coordinate rode along: a renamed sample, or the -pro module that is on
+          # this module's roadmap, was accepted and uploaded. <excludeArtifacts> in the
+          # release profile is keyed on that same literal name, so both halves of the control
+          # failed to the same rename.
+          #
+          # The coordinate of an entry is its path minus the version directory and the file
+          # name, so the comparison covers the group id too: anything published under a
+          # foreign group is an unexpected coordinate, not an invisible one. Directory
+          # entries are skipped; a file entry too shallow to be a coordinate is reported as
+          # itself so that it also fails the comparison.
+          found="$(unzip -Z1 "$bundle" | awk '
+            { sub(/^\.\//, "") }
+            /\/$/ || $0 == "" { next }
+            {
+              n = split($0, p, "/")
+              if (n < 3) { print "<not a coordinate: " $0 ">"; next }
+              c = p[1]
+              for (i = 2; i <= n - 2; i++) c = c "/" p[i]
+              print c
+            }' | sort -u)"
+          expected="$(printf '%s\n' \
+            com/housedevinci/stripe-einvoice-parent \
+            com/housedevinci/stripe-einvoice-core \
+            com/housedevinci/stripe-einvoice-spring-boot-starter | sort)"
+          if [ "$found" != "$expected" ]; then
+            echo "::error::the bundle does not contain exactly the three published coordinates"
+            echo "expected:"; printf '%s\n' "$expected"
+            echo "found:";    printf '%s\n' "${found:-<none>}"
             exit 1
           fi
-          for coord in stripe-einvoice-parent stripe-einvoice-core stripe-einvoice-spring-boot-starter; do
-            if ! printf '%s' "$listing" | grep -q "com/housedevinci/${coord}/"; then
-              echo "::error::the bundle is missing $coord"
-              exit 1
-            fi
-          done
 
       # L1, as amended: compare the bytes that were UPLOADED, entry by entry, against the
       # checksums the reproducibility check recorded - not the jars left lying in each
