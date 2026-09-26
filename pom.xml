@@ -103,7 +103,7 @@
       stripe-java: MIT. AWS SDK v2: Apache-2.0.
     -->
     <stripe-java.version>33.4.2</stripe-java.version>
-    <awssdk.version>2.54.18</awssdk.version>
+    <awssdk.version>2.55.1</awssdk.version>
     <!--
       The XSLT 2.0 processor the vendored EN 16931, XRechnung and Peppol schematron need. RUNTIME
       scope in stripe-einvoice-core, never compile scope: no code imports a Saxon type, the
@@ -128,8 +128,8 @@
     <dependency-check.version>13.0.0</dependency-check.version>
     <central-publishing.version>0.11.0</central-publishing.version>
     <maven-gpg.version>3.2.8</maven-gpg.version>
-    <build-helper-plugin.version>3.6.1</build-helper-plugin.version>
-    <exec-plugin.version>3.6.3</exec-plugin.version>
+    <build-helper-plugin.version>3.6.2</build-helper-plugin.version>
+    <exec-plugin.version>3.6.4</exec-plugin.version>
     <deployment.name>stripe-einvoice ${project.version}</deployment.name>
     <jacoco.minimum.line>0.85</jacoco.minimum.line>
     <!-- The sample's smoke gate (L2): proves the end-to-end test actually exercises the sample
