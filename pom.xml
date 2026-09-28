@@ -75,6 +75,12 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <!--
+      GHSA-q4xh-88c3-wmh7: tools.jackson.core:jackson-databind before 3.1.6 has a
+      denial-of-service flaw. Spring Boot 4.1.1's dependency BOM pins the Jackson 3
+      line at 3.1.5 via jackson-bom.version; override until the parent BOM catches up.
+    -->
+    <jackson-bom.version>3.1.6</jackson-bom.version>
+    <!--
       Reproducible builds. Every archive entry is stamped with this instant instead of "now".
       The default below is the commit date of the commit that introduced the release pipeline;
       the release workflow overrides it with the date of the commit being released:
