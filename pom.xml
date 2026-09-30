@@ -76,10 +76,12 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <!--
       GHSA-q4xh-88c3-wmh7: tools.jackson.core:jackson-databind before 3.1.6 has a
-      denial-of-service flaw. Spring Boot 4.1.1's dependency BOM pins the Jackson 3
-      line at 3.1.5 via jackson-bom.version; override until the parent BOM catches up.
+      denial-of-service flaw. GHSA-cxp5-3px4-pw24: quadratic-time forward-reference
+      completion before 3.1.7. GHSA-wv8q-qhhj-9h54: retains every unknown raw type ID
+      before 3.1.7. Spring Boot 4.1.1's dependency BOM pins the Jackson 3 line at
+      3.1.5 via jackson-bom.version; override until the parent BOM catches up.
     -->
-    <jackson-bom.version>3.1.6</jackson-bom.version>
+    <jackson-bom.version>3.1.7</jackson-bom.version>
     <!--
       Reproducible builds. Every archive entry is stamped with this instant instead of "now".
       The default below is the commit date of the commit that introduced the release pipeline;

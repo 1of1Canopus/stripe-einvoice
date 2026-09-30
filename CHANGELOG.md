@@ -19,12 +19,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
-- **`tools.jackson.core:jackson-databind` pinned to 3.1.6 (GHSA-q4xh-88c3-wmh7, HIGH, CVSS 7.5,
-  denial of service).** The Spring Boot 4.1.1 dependency BOM pins the Jackson 3 line at 3.1.5,
-  below the fixed version; the parent POM now overrides `jackson-bom.version` to 3.1.6, resolved
-  across every module. The Stripe SDK dependency (`stripe-java`) uses Gson, not Jackson, so it
-  carries no Jackson 2 line and is not affected by this advisory or by CVE fixes in the
-  `com.fasterxml.jackson.core` 2.18.x/2.21.x/2.22.x series.
+- **`tools.jackson.core:jackson-databind` pinned to 3.1.7 (GHSA-q4xh-88c3-wmh7, HIGH, CVSS 7.5,
+  denial of service; GHSA-cxp5-3px4-pw24, HIGH, quadratic-time forward-reference completion;
+  GHSA-wv8q-qhhj-9h54, HIGH, retains every unknown raw type ID).** The Spring Boot 4.1.1
+  dependency BOM pins the Jackson 3 line at 3.1.5, below all three fixed versions; the parent
+  POM now overrides `jackson-bom.version` to 3.1.7, resolved across every module (verified with
+  `dependency:tree` on the starter and the sample). The Stripe SDK dependency (`stripe-java`)
+  uses Gson, not Jackson, so it carries no Jackson 2 line and is not affected by this advisory
+  or by CVE fixes in the `com.fasterxml.jackson.core` 2.18.x/2.21.x/2.22.x series.
 
 ## [0.1.0] - 2026-09-23
 
