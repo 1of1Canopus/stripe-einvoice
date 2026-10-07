@@ -3206,6 +3206,65 @@ probe probe_an_if_false_on_the_release_path_reads_as_running      "D17-10 an if:
 probe probe_continue_on_error_neutralises_a_gate_unseen          "D17-11 continue-on-error: true is not seen"      probe_continue_on_error_neutralises_a_gate_unseen
 probe probe_a_job_level_if_is_invisible_to_the_step_harness      "D17-12 a job-level if: is not seen"              probe_a_job_level_if_is_invisible_to_the_step_harness
 
+# ---------------------------------------------------------------------------
+# W1 - the Maven wrapper moved to 3.10.x (Dependabot, PR 17) while central-publishing-maven-plugin
+#      0.11.0 cannot build a valid bundle on Maven 3.10: the Portal refused the v0.2.0 bundle
+#      ("content that does NOT have a .pom file", maven-metadata-local.xml and
+#      _remote.repositories inside it). Upstream: jboss/jboss-parent-pom#584,
+#      cuioss/cuioss-parent-pom#1501. No plugin release supports 3.10 yet, so every 0.x plugin
+#      is treated as unsupported; revisit this condition when a plugin version documents support.
+#      Weak while the wrapper is >= 3.10 and the plugin is a 0.x release (or unreadable).
+# ---------------------------------------------------------------------------
+# First central-publishing-maven-plugin version whose release notes state Maven 3.10 support.
+# Empty = none known: while empty, a wrapper >= 3.10 is WEAK for every plugin version.
+CENTRAL_PUBLISHING_FIRST_MAVEN_310_SUPPORT=""
+
+probe_maven_wrapper_is_compatible_with_central_publishing() {
+  local props=".mvn/wrapper/maven-wrapper.properties"
+  local lines url wv plugin wmaj wmin
+  [ -f "$props" ] || return 0                              # missing: unverifiable is weak
+  lines="$(tr -d '\r' < "$props" | grep -c '^distributionUrl=' || true)"
+  [ "$lines" -eq 1 ] || return 0                           # zero or duplicate: weak
+  url="$(tr -d '\r' < "$props" | sed -n 's/^distributionUrl=//p')"
+  # the whole URL must be the repo1 distribution with the same version in path and file name
+  local re='^https://repo\.maven\.apache\.org/maven2/org/apache/maven/apache-maven/([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?)/apache-maven-([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?)-bin\.zip$'
+  [[ "$url" =~ $re ]] || return 0                          # any other shape: weak
+  [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[3]}" ] || return 0   # path and file name disagree: weak
+  wv="${BASH_REMATCH[1]}"
+  plugin="$(sed -n 's#.*<central-publishing.version>\([^<]*\)</central-publishing.version>.*#\1#p' pom.xml | head -1)"
+  [[ "$plugin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0  # unreadable or pre-release plugin version: weak
+  wmaj="${wv%%.*}"; wmin="${wv#*.}"; wmin="${wmin%%.*}"
+  if [ "$wmaj" -gt 3 ] || { [ "$wmaj" -eq 3 ] && [ "$wmin" -ge 10 ]; }; then
+    [ -n "$CENTRAL_PUBLISHING_FIRST_MAVEN_310_SUPPORT" ] || return 0
+    [ "$(printf '%s\n%s\n' "$CENTRAL_PUBLISHING_FIRST_MAVEN_310_SUPPORT" "$plugin" | sort -V | head -1)" = "$CENTRAL_PUBLISHING_FIRST_MAVEN_310_SUPPORT" ] || return 0
+  fi
+  return 1
+}
+
+probe probe_maven_wrapper_incompatible_with_central_publishing "W1 the Maven wrapper is 3.10+ while central-publishing is a 0.x release" probe_maven_wrapper_is_compatible_with_central_publishing
+
+U=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven
+_w1_fixture() { # $1 url line, $2 plugin version
+  local d; d=$(mktemp -d); mkdir -p "$d/.mvn/wrapper"
+  printf 'distributionUrl=%s\n' "$1" > "$d/.mvn/wrapper/maven-wrapper.properties"
+  printf '<properties><central-publishing.version>%s</central-publishing.version></properties>\n' "$2" > "$d/pom.xml"
+  echo "$d"; }
+# C-30-1: an unreadable or pre-release plugin version counts as "supports 3.10" once the constant is set.
+probe_w1_accepts_unparsed_plugin_version() {
+  local d rc=1 v
+  for v in '${x}' '1.2.0-SNAPSHOT'; do
+    d=$(_w1_fixture "$U/3.10.0/apache-maven-3.10.0-bin.zip" "$v")
+    ( cd "$d" && CENTRAL_PUBLISHING_FIRST_MAVEN_310_SUPPORT=1.2.0 probe_maven_wrapper_is_compatible_with_central_publishing ) || rc=0
+  done; return $rc; }
+# C-30-2: the version is read from the last "apache-maven-X-bin.zip" in the URL, not from the path mvnw downloads.
+probe_w1_reads_version_from_url_suffix_not_path() {
+  local d; d=$(_w1_fixture "$U/3.10.0/apache-maven-3.10.0-bin.zip#/apache-maven-3.9.16-bin.zip" 0.11.0)
+  ( cd "$d" && probe_maven_wrapper_is_compatible_with_central_publishing ) && return 1 || return 0; }
+
+probe probe_w1_accepts_unparsed_plugin_version "C-30-1 an unparsed or pre-release plugin version passes the W1 check" probe_w1_accepts_unparsed_plugin_version
+probe probe_w1_reads_version_from_url_suffix "C-30-2 the W1 version is read from the URL suffix, not the downloaded path" probe_w1_reads_version_from_url_suffix_not_path
+
+
 [ -z "$_SCAN_FIXTURE" ] || rm -rf "$_SCAN_FIXTURE"
 
 echo
