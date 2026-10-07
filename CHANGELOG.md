@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Build: Maven wrapper pinned to 3.9.16 and Dependabot ignores Maven >= 3.10 until central-publishing-maven-plugin supports it; 7-day Dependabot cooldown.
 - **The pre-sign vulnerability gate's verdict document is now bound to its coverage document.**
   A grype report and the CycloneDX document it is paired with are refused unless both name the
   same scan target and the same scanner version, closing the gap where a stale or mismatched
