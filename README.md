@@ -13,7 +13,7 @@ Every date in that sentence is sourced and dated in [`docs/mandates.md`](docs/ma
 could not be confirmed against an official source is marked "not confirmed" there rather than
 repeated here.
 
-> **Status: under construction.** This repository is pre-release and nothing is published yet.
+> **Status: 0.1.0 is on Maven Central.** The API may still change before 1.0; see CHANGELOG.md.
 > Three pieces are in place: the legal numbering series, the issuance unit of work that drives one
 > Stripe event to one archived document or to none, and the EN 16931 documents themselves -
 > XRechnung 3.0 and Peppol BIS Billing 3.0 in UBL, judged by the official validator artefacts.
