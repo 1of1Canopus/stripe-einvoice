@@ -13,7 +13,20 @@
     ".mvn"
   ],
   "excludeFiles": [
-    "CONTRIBUTING.md"
+    "CONTRIBUTING.md",
+    "SECURITY-REVIEW-feat-en16931-documents.md",
+    "SECURITY-REVIEW-feat-issuance-preflight.md",
+    "SECURITY-REVIEW-feat-issuance-unit-of-work.md",
+    "SECURITY-REVIEW-feat-numbering-allocator.md",
+    "SECURITY-REVIEW-feat-release-wiring.md",
+    "SECURITY-REVIEW-feat-reprocess-refused.md",
+    "SECURITY-REVIEW-feat-void-terminal-disposition.md",
+    "SECURITY-REVIEW-fix-release-preflight-and-sample.md",
+    "SECURITY-REVIEW-fix-release-scan-resolution.md",
+    "SECURITY-REVIEW-fix-release-scan-sees-jars.md",
+    "SECURITY-REVIEW-fix-s3-test-image.md",
+    "SECURITY-REVIEW-release-0.1.0.md",
+    "SECURITY-REVIEW-test-release-step-harness.md"
   ],
   "rules": [
     "Maven coordinate: com.housedevinci:stripe-einvoice-spring-boot-starter, current version 0.1.0.",
