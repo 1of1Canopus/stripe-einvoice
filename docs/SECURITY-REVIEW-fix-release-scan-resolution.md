@@ -68,7 +68,7 @@ Repro: delete the loop from the step body, run
 The assertion itself does work when exercised directly: replacing `$scan/stripe-einvoice-core-*.jar`
 with foreign bytes makes it exit 1 with its `::error::` line.
 
-Fix (Isis): extend `probe_pre_sign_scan_cannot_resolve_the_reactors_own_modules` in
+Fix (the fix pass): extend `probe_pre_sign_scan_cannot_resolve_the_reactors_own_modules` in
 `tools/cipher-probe-release-pipeline.sh`, or add a second probe beside it, that runs the step body
 against a scan directory where the staged core jar has been replaced after the copy, and is WEAK
 unless the body exits non-zero with that error. Note the loop is at the end of the step, so a probe
@@ -107,7 +107,7 @@ The scan set is also internally inconsistent after the step: the core jar comes 
 `copy-dependencies` (the scan-step build), the starter jar from the earlier `cp` loop (the
 reproducibility build).
 
-Fix (Isis), in the `Scan the artifacts this release is about to sign` step of
+Fix (the fix pass), in the `Scan the artifacts this release is about to sign` step of
 `.github/workflows/release.yml`:
 1. Pass the release build's own coordinates to the inner invocation so it cannot perturb the
    recorded bytes: add `-Dproject.build.outputTimestamp=${{ steps.v.outputs.timestamp }}`.
@@ -137,7 +137,7 @@ for built in stripe-einvoice-core/target/stripe-einvoice-core-*.jar; do
   today (it is a selected module, not a dependency), which is why this is LOW rather than MEDIUM,
   but the asymmetry is not stated anywhere.
 
-Fix (Isis): drop `|| continue` - a missing `$resolved` is a refusal, with its own error message -
+Fix (the fix pass): drop `|| continue` - a missing `$resolved` is a refusal, with its own error message -
 and run the loop over both published modules. Folds naturally into the D15-02 fix, since comparing
 against the recorded digest covers both modules and all six jars in one pass.
 
@@ -167,7 +167,7 @@ reading the YAML. Each is testable for real - a temporary git repository, an eph
 tag signed by it and a tag signed by another - in the same style as the probes that already build
 synthetic reactors.
 
-Fix (Thor, not Isis - these are new probe harnesses, not corrections): add executing probes for
+Fix (the builder, not the fix pass - these are new probe harnesses, not corrections): add executing probes for
 `Verify the released commit is on main` and `Verify the tag signature` against a synthetic
 repository, and one for `Confirm the bundle contains exactly the three published coordinates`
 against a synthetic bundle zip. The two remaining rows (`Remove any pre-existing Maven wrapper
@@ -214,7 +214,7 @@ starter 130, sample 8, 0 failures, 0 skipped - stands.
   release on an artifact it never stages.
 - **D15-04 not closed, deferred by routing.** Recorded as QUESTIONS 34 for a follow-up PR. That is
   the correct routing - executing probes for the ancestry and tag-signature bodies are new
-  harnesses, Thor's work, not a correction - but deferral is not closure. **The first tag must not
+  harnesses, the builder's work, not a correction - but deferral is not closure. **The first tag must not
   be cut until those two bodies have executed at least once.** They are the first gates a tag run
   reaches and they have only ever been read, not run; the last three tag runs each died in a
   release-only body that had never executed.

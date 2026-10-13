@@ -92,7 +92,7 @@ release path feeds mismatched documents; a stale file left in `RUNNER_TEMP`, a p
 edit of the step, or a future caller is all it takes, and the failure mode is silent success - the
 exact shape of the defect this branch exists to remove, seen from the other side.
 
-Fix (Isis): in `run()`, after the catalog loads, refuse unless the two documents describe the same
+Fix (the fix pass): in `run()`, after the catalog loads, refuse unless the two documents describe the same
 scan. Both carry the target: the report has `source.target`, the CycloneDX document has
 `metadata.component.name` (verified on 0.118.0: both were `/tmp/.../scan` for the same run). Exit 2
 on a mismatch and exit 2 when either field is absent - an unverifiable pairing is not a pairing.
@@ -118,7 +118,7 @@ exit 0
 Only the convention inside one workflow step keeps the release on the strong path. House rule: the
 secure mode is the default, a weaker one is an explicit choice that says so.
 
-Fix (Isis): for `--format grype`, `parser.error` unless `--expect-digests` is given, exactly as for
+Fix (the fix pass): for `--format grype`, `parser.error` unless `--expect-digests` is given, exactly as for
 `--sbom`; make `--min-artifacts` required for that format and remove the default of `1`. Update the
 crafted grype probes in the suite and the empty-directory mutation inside D-SCAN-03 to pass both
 flags. No caller outside the release step uses the grype arm, so nothing else moves.
@@ -132,7 +132,7 @@ at the heading. Repro: run the block against a gate transcript with no coverage 
 the text after the grep never reaches the summary. Release-hygiene checklist RP-6: a lookup miss
 reports that there is no record and runs to the end; it never kills the step under `pipefail`.
 
-Fix (Isis): `{ grep -E 'were scanned|matched by digest' "$f" || echo "the gate printed no coverage
+Fix (the fix pass): `{ grep -E 'were scanned|matched by digest' "$f" || echo "the gate printed no coverage
 line"; } | sed 's/^/- /'`.
 
 ### Not findings

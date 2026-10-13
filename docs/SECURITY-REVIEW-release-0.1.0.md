@@ -135,7 +135,7 @@ ends with no document and nothing on the row saying why.
 is a declared answer to "what does this module do with a Stripe invoice whose only number has been
 voided", and that answer has to hold on four paths at once: a later Stripe event for the same
 object, a Stripe redelivery, the reconciliation sweep's re-enqueue, and a privileged reprocess.
-Thor writes a one-page design, reviewed before any code, establishing:
+The builder writes a one-page design, reviewed before any code, establishing:
 
 - **Property.** After a number is voided, no path re-enters the issuance pipeline for that Stripe
   invoice; every such path terminates on a recorded state with a stable code and a compliance
@@ -192,7 +192,7 @@ a loss of evidence — but detecting exactly this is what the cross-check exists
 README's "a rewrite by a role that outranks the triggers is still detectable … a cross-check that a
 disposed issuance row has a chained event agreeing with it" is read as covering it.
 
-**Fix (Thor, the run that built the chained burn).**
+**Fix (the builder, the run that built the chained burn).**
 - `einvoice_issuance_guard`: make `void_rule_id` write-once on the same clause shape as
   `archive_key`, and make `void_reason` refuse any change once the row's state is terminal, not
   only once the column is non-empty.
@@ -214,7 +214,7 @@ through the same idempotent path."* On a voided invoice that path is not idempot
 re-enters on every sweep (RC-01). The adjacent row, *"A crash leaves something a retry can finish"*,
 is false in the same case.
 
-**Fix (Isis, after RC-01's design lands).** Reword both rows to what the fixed code does, and add
+**Fix (the fix pass, after RC-01's design lands).** Reword both rows to what the fixed code does, and add
 the voided-invoice outcome to `SECURITY-NOTES.md`'s "What still costs a number, and needs an
 operator void" section, which today stops at the void and never says what happens to a later event
 for the same invoice. No claim is to be written before the RC-01 design is reviewed.
@@ -230,7 +230,7 @@ the list is not *wrong* — but it must be re-read after the two fixes land and 
 the sentence "a burned number is also chained … so the justification for a gap lives in the
 tamper-evident record" must not ship until the cross-check actually reads it (RC-02).
 
-**Fix (Isis, last, after RC-01 and RC-02).** Re-read the residual list against the fixed code;
+**Fix (the fix pass, last, after RC-01 and RC-02).** Re-read the residual list against the fixed code;
 adjust the D7-03 paragraph so it claims the comparison that exists.
 
 ---
@@ -264,9 +264,9 @@ applied and the list is re-read; not before.
 
 ### What to do next
 
-1. Thor: the RC-01 design page, reviewed before any code.
-2. Thor: RC-02, in the run that built the chained burn.
-3. Isis: RC-03 and RC-04, last, after both.
+1. The builder: the RC-01 design page, reviewed before any code.
+2. The builder: RC-02, in the run that built the chained burn.
+3. The fix pass: RC-03 and RC-04, last, after both.
 4. A second release-candidate pass on the fixed tree before the tag. The two probes in
    `CipherProbeRcScenariosTest` must flip green with a mutation run each.
 
@@ -412,7 +412,7 @@ checked the three new sentences against the three mechanisms rather than accepti
 
 ### What to do next
 
-1. Isis: RC-05, one paragraph in `SECURITY-NOTES.md`. No code.
+1. The fix pass: RC-05, one paragraph in `SECURITY-NOTES.md`. No code.
 2. Re-run `probe_a_forged_conclusion_suppresses_the_unfinished_reprocess_finding`? No — it is a
    documentation finding and the probe asserts the code's behaviour, which is intended. It stays in
    the internal probe set as the evidence for the sentence, and is not added to the suite.
