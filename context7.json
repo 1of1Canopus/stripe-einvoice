@@ -1,0 +1,24 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "stripe-einvoice",
+  "description": "EN 16931 e-invoices from Stripe Billing, for Spring Boot applications.",
+  "folders": [
+    "docs"
+  ],
+  "excludeFolders": [
+    "target",
+    ".github",
+    "tools",
+    "scripts",
+    ".mvn"
+  ],
+  "excludeFiles": [
+    "CONTRIBUTING.md"
+  ],
+  "rules": [
+    "Maven coordinate: com.housedevinci:stripe-einvoice-spring-boot-starter, current version 0.1.0.",
+    "Outputs are XRechnung 3.0 (UBL) and Peppol BIS Billing 3.0 (UBL), both EN 16931 documents.",
+    "The API may still change before 1.0; see CHANGELOG.md.",
+    "Validation artefacts are vendored with a SHA-256 each; nothing is downloaded at build or run time."
+  ]
+}
