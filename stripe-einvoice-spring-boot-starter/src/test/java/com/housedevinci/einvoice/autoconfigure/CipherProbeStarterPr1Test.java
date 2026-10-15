@@ -7,7 +7,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 
-/** Cipher probe for PR 1, starter side. FAILS on 71ce8d6. */
+/** Security review probe for PR 1, starter side. FAILS on 71ce8d6. */
 class CipherProbeStarterPr1Test {
 
   // D1-07

@@ -17,7 +17,7 @@ import java.sql.Connection;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
-/** Cipher pass-2 probes (D1-13). Each one FAILS without the fix. */
+/** Security review pass-2 probes (D1-13). Each one FAILS without the fix. */
 class CipherProbePass2Test {
 
   // D1-13
