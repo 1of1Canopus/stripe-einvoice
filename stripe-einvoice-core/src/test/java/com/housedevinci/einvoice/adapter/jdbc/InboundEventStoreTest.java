@@ -186,13 +186,16 @@ class InboundEventStoreTest {
     String recent = freshId();
     store.record(received(old), BODY);
     PostgresSupport.execute(
-        "UPDATE einvoice_inbound_event SET received_at = now() - interval '90 days'"
-            + " WHERE event_id = '"
+        "UPDATE einvoice_inbound_event SET received_at = timestamptz '"
+            + NOW
+            + "' - interval '90 days' WHERE event_id = '"
             + old
             + "'");
     store.record(received(recent), BODY);
 
-    int purged = store.purgeOlderThan(Instant.now().minus(Duration.ofDays(30)), 100);
+    // Both rows and the cutoff hang off the fixed NOW. The wall clock made this a date bomb:
+    // from 2026-10-15 the "recent" row (received at NOW) was older than now() - 30 days.
+    int purged = store.purgeOlderThan(NOW.minus(Duration.ofDays(30)), 100);
     assertThat(purged).isGreaterThanOrEqualTo(1);
     assertThat(store.find(old)).isEmpty();
     assertThat(store.find(recent)).isPresent();
