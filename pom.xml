@@ -111,7 +111,7 @@
       stripe-java: MIT. AWS SDK v2: Apache-2.0.
     -->
     <stripe-java.version>33.4.2</stripe-java.version>
-    <awssdk.version>2.55.8</awssdk.version>
+    <awssdk.version>2.55.12</awssdk.version>
     <!--
       The XSLT 2.0 processor the vendored EN 16931, XRechnung and Peppol schematron need. RUNTIME
       scope in stripe-einvoice-core, never compile scope: no code imports a Saxon type, the
