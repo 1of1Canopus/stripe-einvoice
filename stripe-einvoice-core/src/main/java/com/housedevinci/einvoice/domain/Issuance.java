@@ -25,7 +25,8 @@ public record Issuance(
     String rulePackVersion,
     IssuanceState state,
     String voidReason,
-    String voidRuleId) {
+    String voidRuleId,
+    Optional<Long> correctsIssuanceId) {
 
   public Issuance {
     Identifiers.validate("stripe invoice id", stripeInvoiceId);
@@ -43,6 +44,48 @@ public record Issuance(
     rulePackVersion = rulePackVersion == null ? "" : rulePackVersion;
     voidReason = voidReason == null ? "" : voidReason;
     voidRuleId = voidRuleId == null ? "" : voidRuleId;
+    correctsIssuanceId = correctsIssuanceId == null ? Optional.empty() : correctsIssuanceId;
+    // The database CHECK says the same thing; the value object refuses it first, so a row read
+    // back in any other shape fails loudly instead of travelling (credit-note series design).
+    if (seriesKey.documentType().isCreditNote() != correctsIssuanceId.isPresent()) {
+      throw new EInvoiceException(
+          ErrorCodes.INVALID,
+          "a credit note names the invoice it corrects, and an invoice names none");
+    }
+  }
+
+  /** An invoice row, which corrects nothing: the shape every 0.1.0 row has. */
+  public Issuance(
+      long id,
+      SeriesKey seriesKey,
+      String stripeInvoiceId,
+      String stripeAccountId,
+      String stripeNumber,
+      LegalNumber legalNumber,
+      Instant issuedAt,
+      Instant allocatedAt,
+      String documentSha256,
+      String archiveKey,
+      String rulePackVersion,
+      IssuanceState state,
+      String voidReason,
+      String voidRuleId) {
+    this(
+        id,
+        seriesKey,
+        stripeInvoiceId,
+        stripeAccountId,
+        stripeNumber,
+        legalNumber,
+        issuedAt,
+        allocatedAt,
+        documentSha256,
+        archiveKey,
+        rulePackVersion,
+        state,
+        voidReason,
+        voidRuleId,
+        Optional.empty());
   }
 
   /** The archived document's content hash, absent while the number has no document. */

@@ -327,7 +327,13 @@ class VoidTerminalDispositionTest {
         .store()
         .allocate(
             new AllocationRequest(
-                harness.seriesKey(), invoiceId, "", "STRIPE-1", harness.now(), "fr-2026.1"));
+                harness.seriesKey(),
+                invoiceId,
+                "",
+                "STRIPE-1",
+                harness.now(),
+                java.time.LocalDate.ofInstant(harness.now(), java.time.ZoneOffset.UTC),
+                "fr-2026.1"));
     if (target != IssuanceState.NUMBERED) {
       Issuance numbered = harness.issuance(invoiceId).orElseThrow();
       harness

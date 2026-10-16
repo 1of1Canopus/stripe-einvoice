@@ -88,6 +88,55 @@ public final class ErrorCodes {
    */
   public static final String NUMBER_VOIDED = "DEI-122";
 
+  /**
+   * The allocator was asked for a number of a document type nothing in this application can
+   * produce: through the public allocator, any type other than an invoice (S-02, D-PS1-06).
+   *
+   * <p>Raised before the series row is locked, so no number is consumed. A credit-note number that
+   * no document will ever carry is a hole in a legal series, made by this module itself.
+   */
+  public static final String DOCUMENT_TYPE_NOT_ISSUABLE = "DEI-123";
+
+  /**
+   * The issue date (BT-2) is earlier than the latest issue date already numbered in the series.
+   *
+   * <p>For a credit note it is a refusal, raised under the series row lock before the counter moves
+   * (T9). For an invoice it is not a refusal: a sale must get its invoice. The number is given and
+   * this code is recorded as an open finding that names it (D-PS1-27, D-PS1-38), until the
+   * date-order design is built.
+   */
+  public static final String ISSUE_DATE_OUT_OF_ORDER = "DEI-127";
+
+  /**
+   * A credit note names no invoice, or names one it may not correct: not an invoice, not issued,
+   * another seller or mode, or a stored document hash that no longer matches its chained issue
+   * event (D-CNS-S12). Refused before a number is consumed.
+   */
+  public static final String CREDIT_TARGET_INVALID = "DEI-128";
+
+  /**
+   * The schema version row could not be read for a reason other than "it does not exist" (S-05).
+   * Usually a missing grant: the runtime role needs {@code SELECT} on {@code einvoice_schema}.
+   * Unreadable is not absent, so startup stops instead of attempting a migration.
+   */
+  public static final String SCHEMA_VERSION_UNREADABLE = "DEI-133";
+
+  /**
+   * The schema upgrade refused to run because existing data breaks a rule the new format enforces,
+   * for example two numbered rows of one seller and mode sharing a legal number (S-06). The schema
+   * is left unchanged. This is a data condition, not an outage: retrying changes nothing.
+   */
+  public static final String SCHEMA_UPGRADE_REFUSED = "DEI-134";
+
+  /** The database carries a schema format newer than this version of the module understands. */
+  public static final String SCHEMA_VERSION_UNSUPPORTED = "DEI-135";
+
+  /**
+   * The schema is older than this version of the module and {@code einvoice.initialize-schema} is
+   * false, so nothing will upgrade it. Run the bundled schema script as the schema owner first.
+   */
+  public static final String SCHEMA_NOT_PREPARED = "DEI-136";
+
   // -------------------------------------------------------------------------------------------
   // DEI-2xx - the issuance unit of work: intake, routing, fetch, mapping, archive, validation.
   // -------------------------------------------------------------------------------------------

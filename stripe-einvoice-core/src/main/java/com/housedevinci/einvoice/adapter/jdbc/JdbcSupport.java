@@ -11,8 +11,10 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Locale;
+import java.util.Optional;
 import javax.sql.DataSource;
 
 /** Plain-JDBC helpers shared by the adapters. No Spring. */
@@ -80,7 +82,38 @@ public final class JdbcSupport {
           + " AND EXISTS (SELECT 1 FROM pg_trigger"
           + "   WHERE tgname = 'einvoice_issuance_anchor_monotonic'"
           + "     AND tgrelid ="
-          + "       to_regclass(quote_ident(current_schema()) || '.einvoice_issuance_anchor'))";
+          + "       to_regclass(quote_ident(current_schema()) || '.einvoice_issuance_anchor'))"
+          + " AND EXISTS (SELECT 1 FROM pg_trigger"
+          + "   WHERE tgname = 'einvoice_issuance_insert_guard'"
+          + "     AND tgrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_issuance'))"
+          + " AND EXISTS (SELECT 1 FROM pg_trigger"
+          + "   WHERE tgname = 'einvoice_series_insert_guard'"
+          + "     AND tgrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_series'))"
+          + " AND EXISTS (SELECT 1 FROM pg_trigger"
+          + "   WHERE tgname = 'einvoice_schema_guard'"
+          + "     AND tgrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_schema'))";
+
+  /**
+   * The schema format this version of the module writes and reads: 2 since 0.2.0 (typed series, the
+   * corrected-invoice link and the series' latest issue date). 0.1.0 had no version row.
+   */
+  public static final int FORMAT_VERSION = 2;
+
+  static final String READ_SCHEMA_VERSION =
+      "SELECT format_version, min_compatible_version FROM einvoice_schema WHERE id = 1";
+
+  /** This module's own SQLSTATEs raised by the schema script, mapped to {@code DEI-134}. */
+  private static final java.util.Set<String> UPGRADE_REFUSALS = java.util.Set.of("EIU01", "EIU02");
+
+  /** What the version row says. {@code 0} when the table exists without its row. */
+  record SchemaVersion(boolean present, int formatVersion, int minCompatibleVersion) {
+
+    static final SchemaVersion ABSENT = new SchemaVersion(false, 0, 0);
+
+    boolean current() {
+      return present && formatVersion == FORMAT_VERSION;
+    }
+  }
 
   /**
    * Runs the bundled PostgreSQL schema; idempotent, and serialised by its own advisory lock.
@@ -97,7 +130,24 @@ public final class JdbcSupport {
    * is reported by name rather than as a generic outage.
    */
   public static void initializeSchema(DataSource ds) {
-    if (schemaFullyPresent(ds)) {
+    initializeSchema(ds, Optional.empty());
+  }
+
+  /**
+   * As {@link #initializeSchema(DataSource)}, with the seller's tax zone, which the upgrade from
+   * format 1 needs to record each series' latest issue date as a calendar date. The starter always
+   * passes it; a fresh database needs none.
+   *
+   * <p><b>Format 2.</b> "Fully present" is now first a read of {@code einvoice_schema}: on a 0.1.0
+   * database every table, function and trigger of 0.1.0 exists, so the old presence test passed and
+   * the upgrade would silently never run (credit-note series design, section 5). Only {@code 42P01}
+   * means "absent, run the script"; any other failure refuses startup with {@code DEI-133} (S-05),
+   * and a newer format refuses with {@code DEI-135} before anything is written.
+   */
+  public static void initializeSchema(DataSource ds, Optional<ZoneId> taxZone) {
+    SchemaVersion before = readSchemaVersion(ds);
+    refuseIfNewer(before);
+    if (before.current() && schemaFullyPresent(ds)) {
       return;
     }
     String sql;
@@ -114,12 +164,34 @@ public final class JdbcSupport {
       inTransaction(
           ds,
           c -> {
+            if (taxZone.isPresent()) {
+              // A transaction-local setting the script reads for the backfill. Bound, never
+              // concatenated: the value is configuration, and it still goes through a parameter.
+              try (var ps = c.prepareStatement("SELECT set_config('einvoice.tax_zone', ?, true)")) {
+                ps.setString(1, taxZone.get().getId());
+                ps.execute();
+              }
+            }
             try (Statement st = c.createStatement()) {
               st.execute(sql);
             }
             return null;
           });
     } catch (EInvoiceException e) {
+      if (e.getCause() instanceof SQLException se && UPGRADE_REFUSALS.contains(se.getSQLState())) {
+        // S-06: a data condition, not an outage. The unavailability path would tell the operator
+        // to retry, for ever, and nothing about the data would change. The script's own message
+        // carries a count and no identifiers, so it is safe to repeat here.
+        throw new EInvoiceException(
+            ErrorCodes.SCHEMA_UPGRADE_REFUSED,
+            "the schema upgrade to format "
+                + FORMAT_VERSION
+                + " refused to run and changed nothing (SQLState "
+                + se.getSQLState()
+                + "): "
+                + firstLine(se.getMessage()),
+            se);
+      }
       if (e.getCause() instanceof SQLException se && "42501".equals(se.getSQLState())) {
         throw new EInvoiceException(
             ErrorCodes.CONFIG,
@@ -132,6 +204,85 @@ public final class JdbcSupport {
       }
       throw e;
     }
+    SchemaVersion after = readSchemaVersion(ds);
+    if (!after.current()) {
+      throw new EInvoiceException(
+          ErrorCodes.SCHEMA_NOT_PREPARED,
+          "the bundled schema script ran but the schema does not report format "
+              + FORMAT_VERSION
+              + "; refusing to start on a schema this module cannot vouch for");
+    }
+  }
+
+  /**
+   * For {@code einvoice.initialize-schema=false}: the schema must already be at this module's
+   * format. An older one is refused by name ({@code DEI-136}) rather than used: format 1 has no
+   * document type, and every numbering statement of this version would fail on it mid-run.
+   */
+  public static void verifySchema(DataSource ds) {
+    SchemaVersion version = readSchemaVersion(ds);
+    refuseIfNewer(version);
+    if (!version.current()) {
+      throw new EInvoiceException(
+          ErrorCodes.SCHEMA_NOT_PREPARED,
+          "einvoice.initialize-schema=false and the database schema is "
+              + (version.present() ? "at format " + version.formatVersion() : "at format 1 (0.1.x)")
+              + ", older than format "
+              + FORMAT_VERSION
+              + " which this version needs. Stop every instance of the older version, run the"
+              + " bundled schema-postgresql.sql once as the schema owner with einvoice.tax_zone set"
+              + " to the seller's tax zone, then start this version.");
+    }
+  }
+
+  static SchemaVersion readSchemaVersion(DataSource ds) {
+    try (Connection c = ds.getConnection();
+        Statement st = c.createStatement()) {
+      try (var rs = st.executeQuery(READ_SCHEMA_VERSION)) {
+        return rs.next()
+            ? new SchemaVersion(true, rs.getInt(1), rs.getInt(2))
+            : new SchemaVersion(true, 0, 0);
+      }
+    } catch (SQLException e) {
+      if ("42P01".equals(e.getSQLState())) {
+        return SchemaVersion.ABSENT;
+      }
+      // S-05: unreadable is not absent. Treating a permission error as "absent, run the script"
+      // would attempt DDL as a role with no CREATE and then tell the operator to install a schema
+      // that is already installed.
+      throw new EInvoiceException(
+          ErrorCodes.SCHEMA_VERSION_UNREADABLE,
+          "the schema version row einvoice_schema could not be read (SQLState "
+              + e.getSQLState()
+              + "). Only a missing table means the schema is absent; anything else stops startup."
+              + " If the SQLState is 42501, grant SELECT on einvoice_schema to this role (see"
+              + " docs/schema-grants.sql).",
+          e);
+    }
+  }
+
+  private static void refuseIfNewer(SchemaVersion version) {
+    if (version.formatVersion() > FORMAT_VERSION
+        || version.minCompatibleVersion() > FORMAT_VERSION) {
+      throw new EInvoiceException(
+          ErrorCodes.SCHEMA_VERSION_UNSUPPORTED,
+          "the database schema is at format "
+              + version.formatVersion()
+              + " (oldest compatible "
+              + version.minCompatibleVersion()
+              + "), newer than format "
+              + FORMAT_VERSION
+              + " which this version of the module understands. Run the newer version, or restore"
+              + " the database it was upgraded from.");
+    }
+  }
+
+  private static String firstLine(String message) {
+    if (message == null) {
+      return "";
+    }
+    String line = message.lines().findFirst().orElse("");
+    return line.startsWith("ERROR: ") ? line.substring("ERROR: ".length()) : line;
   }
 
   private static boolean schemaFullyPresent(DataSource ds) {

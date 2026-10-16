@@ -6,6 +6,41 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Number series per document type (schema format 2).** The document type (BT-3) is part of the
+  series key: invoices (`380`) and credit notes (`381`) count in separate series, a series name
+  serves one type, and a legal number is unique per seller and mode across series. This edition
+  still issues invoices only: the allocator refuses any other type with `DEI-123` before it locks
+  anything.
+- **The corrected-invoice link.** `einvoice_issuance.corrects_issuance_id`, required for a credit
+  note and forbidden for an invoice by a `CHECK`, immutable, and bounded by the database: the target
+  must be an invoice of the same seller and mode that this module issued, whose stored hash still
+  matches its chained issue event (`DEI-128`). The chained event of a credit note records the
+  corrected invoice's full identity.
+- **The latest issue date of a series** (`einvoice_series.last_issue_date`). It moves only with
+  the counter and never backwards. A credit note dated before it is refused (`DEI-127`); an
+  invoice dated before it is numbered and recorded as an open finding `DEI-127`.
+- **Chain forms `ei3` and `ei4h`.** New events hash the document type and the corrected invoice.
+  The verifier still reads `ei1` and `ei2h`, reports how many rows it checked in each form, and
+  reports BROKEN when a series row's type disagrees with its events.
+- **Schema version gate.** A one-row `einvoice_schema` table, read at every boot. Codes `DEI-133`
+  (version row unreadable), `DEI-134` (upgrade refused, data unchanged), `DEI-135` (schema newer
+  than this version), `DEI-136` (schema not upgraded and `initialize-schema=false`).
+
+### Changed
+
+- **Upgrade from 0.1.x.** The bundled schema script upgrades a 0.1.x database in place, as the
+  schema owner, in one transaction, rewriting no number, hash or archived byte. Stop every 0.1.x
+  instance first; see "Upgrading a 0.1.x database to format 2" in `docs/index.md`. The runtime role
+  needs the new `SELECT` grant on `einvoice_schema` (`docs/schema-grants.sql`).
+- **`AllocationRequest` takes the issue date** (BT-2 as a date in the seller's tax zone) as a new
+  required component. Code that calls `NumberAllocator.allocate` directly must pass it;
+  `IssuanceNumberingService` is unchanged.
+- `SeriesKey`, `Issuance`, `IssuanceEvent`, `IssuanceEventReader.DisposedIssuance` and
+  `IssuanceChainVerifier.Report` carry the new fields. The earlier constructors of the first four
+  remain and mean an invoice.
+
 ### Fixed
 
 - Build: the reference guard (`tools/check-private-references.sh`) now also refuses the first names of the studio's agents in the tree, the main jar and the sources jar, so public text keeps to roles. Case-sensitive and whole-word; the script's header lists each name left out and why. The jar scan reads class files as text, so a string length byte cannot read as a name on GNU grep.

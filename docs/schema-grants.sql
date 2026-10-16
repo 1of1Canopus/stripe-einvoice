@@ -44,6 +44,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON einvoice_finding TO einvoice_runtime;
 GRANT SELECT, INSERT ON einvoice_reprocess_request TO einvoice_runtime;
 GRANT USAGE ON SEQUENCE einvoice_reprocess_request_seq_seq TO einvoice_runtime;
 
+-- The schema version row (format 2, module 0.2.0). SELECT only: the starter reads it at every boot
+-- to decide whether this version may run against this schema. No UPDATE and no DELETE, so the
+-- role cannot rewrite its own version gate; a trigger also refuses a lowered version and any
+-- DELETE or TRUNCATE, for every role it binds.
+GRANT SELECT ON einvoice_schema TO einvoice_runtime;
+
 -- Deliberately NOT granted: DELETE and TRUNCATE on the four ledger tables, and any DDL anywhere.
 -- There is no code path in this module that needs them, and a legal ledger that can be deleted by
 -- the application that writes it proves nothing about what it once held.

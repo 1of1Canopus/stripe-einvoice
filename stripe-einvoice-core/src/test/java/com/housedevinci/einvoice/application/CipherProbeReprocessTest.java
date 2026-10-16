@@ -233,6 +233,7 @@ class CipherProbeReprocessTest {
                 invoice.accountId(),
                 invoice.number(),
                 invoice.finalizedAt(),
+                java.time.LocalDate.ofInstant(invoice.finalizedAt(), java.time.ZoneOffset.UTC),
                 "fr-2026.1"));
     long numberedBefore = harness.numberedRows();
 

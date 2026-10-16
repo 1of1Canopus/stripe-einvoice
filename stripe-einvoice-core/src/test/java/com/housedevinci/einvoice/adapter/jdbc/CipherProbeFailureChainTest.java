@@ -114,10 +114,10 @@ class CipherProbeFailureChainTest {
     PostgresSupport.executeOn(
         fixture.dataSource(),
         "INSERT INTO einvoice_issuance (seller_id, mode, stripe_invoice_id, series, fiscal_year,"
-            + " legal_number, counter, issued_at, allocated_at, state) VALUES ('"
+            + " legal_number, counter, issued_at, allocated_at, state, document_type) VALUES ('"
             + fixture.seller()
             + "', 'live', 'in_forged_burn', 'DEFAULT', 2026, 'INV-2026-009999', 9999, now(),"
-            + " now(), 'FAILED_VALIDATION')");
+            + " now(), 'FAILED_VALIDATION', '380')");
 
     IssuanceChainVerifier.Report report = new IssuanceChainVerifier(store, store, KEYRING).verify();
     assertThat(report.status()).isEqualTo(IssuanceChainVerifier.Status.BROKEN);

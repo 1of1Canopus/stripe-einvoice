@@ -148,6 +148,26 @@ module is where that is set out.
 
 ## Residual risks on the issuance path
 
+- **Invoice dates can run backwards inside a series, in 0.1.x and in this version.** An invoice is
+  dated by Stripe's finalisation time, and it is numbered when its work reaches the allocator. A
+  late webhook, a retry, a reprocess or the reconciliation sweep can number an older invoice after
+  a newer one. 0.1.x did this silently. This version numbers it anyway and records an open finding
+  `DEI-127` that names the number, so every case is visible. It does not yet prevent it; a separate
+  change addresses the order of dates. Nothing in this module claims that numbering is
+  chronological.
+- **Mixed versions during the upgrade to format 2.** A 0.1.x instance left running against an
+  upgraded database cannot number anything (its inserts fail and roll back), but its verifier
+  reports BROKEN on rows written in the new form. That verdict is meaningless. Stop every 0.1.x
+  instance before the upgrade, and never act on a 0.1.x verdict afterwards.
+- **What the typed chain form does not buy on an unkeyed log.** The new form hashes the document
+  type and the corrected invoice's identity, so a type flip or a swapped link is BROKEN. On an
+  unkeyed log, a role that can bypass the triggers can rewrite rows and re-chain the whole log,
+  because the anchor's own guard is a trigger too. On a keyed log it cannot without the secret.
+  Witness the anchor head outside the database if the log is unkeyed.
+- **Rows written before the upgrade hash no document type.** The verifier treats every such row as
+  an invoice and checks that its series row still says invoice, so flipping an old series to
+  credit notes reads as BROKEN.
+
 - **A configured intake with a missing renderer or validator fails startup, by name (D2-02).** The
   unit of work, the worker, the sweeper, the webhook controller and the health indicator are all
   conditional, transitively, on a `DocumentRenderer` and a `DocumentValidator` bean. Silently not
