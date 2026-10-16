@@ -103,7 +103,7 @@ public final class JdbcSupport {
       "SELECT format_version, min_compatible_version FROM einvoice_schema WHERE id = 1";
 
   /** This module's own SQLSTATEs raised by the schema script, mapped to {@code DEI-134}. */
-  private static final java.util.Set<String> UPGRADE_REFUSALS = java.util.Set.of("EIU01", "EIU02");
+  private static final java.util.Set<String> UPGRADE_REFUSALS = java.util.Set.of("EIU01", "EIU02", "EIU03");
 
   /** What the version row says. {@code 0} when the table exists without its row. */
   record SchemaVersion(boolean present, int formatVersion, int minCompatibleVersion) {

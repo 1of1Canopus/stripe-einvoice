@@ -194,10 +194,23 @@ in place. It rewrites no number, no hash and no archived byte.
    in the new form. That verdict is meaningless; never act on it. Findings and inbound purges of a
    0.1.x binary are not refused, because those tables gain no column.
 2. **Run the script once as the schema owner**, either by starting 0.2.0 with
-   `einvoice.initialize-schema=true` and an owner-capable role, or by hand with `psql`. By hand,
-   set the seller's tax zone first (`SET einvoice.tax_zone = 'Europe/Paris'`): the upgrade records
-   each series' latest issue date as a date in that zone, and it refuses (`DEI-134`) rather than
-   guess when the zone is missing. The starter sets it from `einvoice.seller.tax-zone`.
+   `einvoice.initialize-schema=true` and an owner-capable role, or by hand with this one command:
+
+   ```
+   PGOPTIONS='-c einvoice.tax_zone=Europe/Paris' psql -X -v ON_ERROR_STOP=1 --single-transaction \
+     -f schema-postgresql.sql
+   ```
+
+   Put your own region id in place of `Europe/Paris`. It must be a region id that PostgreSQL lists
+   (`Europe/Paris`, `America/New_York`); an offset such as `+02:00` is refused, because PostgreSQL
+   reads its sign the other way round. The upgrade records each series' latest issue date as a date
+   in that zone, and it refuses (`DEI-134`) rather than guess when the zone is missing. The starter
+   sets it from `einvoice.seller.tax-zone`. Why each flag: `-X` skips your `~/.psqlrc`, which could
+   change the session. `ON_ERROR_STOP=1` stops at the first error; without it psql prints the error
+   and carries on. `--single-transaction` makes the run all or nothing, so a refusal changes nothing.
+   The last step of the script also checks every format-2 condition before it stamps the version and
+   raises `DEI-134` if one is missing, so a run that went wrong in some other way is still not
+   accepted as format 2.
 3. **Expect a short stop.** The upgrade adds columns, rebuilds the series primary key and builds
    unique indexes in one transaction. Every issuance waits until it commits. It runs under the
    module's advisory lock, so two instances starting together run it one after the other, and an

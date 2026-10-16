@@ -302,8 +302,17 @@ BEGIN
       -- A credit note names the invoice it corrects; an invoice names none.
       ('einvoice_issuance_correction_shape',    'einvoice_issuance',
        'CHECK ((document_type = ''381'') = (corrects_issuance_id IS NOT NULL))'),
+      -- D-A1-C06: the six corrects_* columns are empty together (an invoice) or filled together
+      -- (a credit note). A full identity planted on an invoice event is neither hashed nor read.
       ('einvoice_issuance_event_correction_shape', 'einvoice_issuance_event',
-       'CHECK ((document_type = ''381'') = (corrects_issuance_id IS NOT NULL))')
+       'CHECK ((document_type = ''381'' AND corrects_issuance_id IS NOT NULL'
+         || ' AND corrects_seller_id IS NOT NULL AND corrects_mode IS NOT NULL'
+         || ' AND corrects_series IS NOT NULL AND corrects_fiscal_year IS NOT NULL'
+         || ' AND corrects_legal_number IS NOT NULL)'
+         || ' OR (document_type = ''380'' AND corrects_issuance_id IS NULL'
+         || ' AND corrects_seller_id IS NULL AND corrects_mode IS NULL'
+         || ' AND corrects_series IS NULL AND corrects_fiscal_year IS NULL'
+         || ' AND corrects_legal_number IS NULL))')
     ) AS t(name, tbl, definition)
   LOOP
     IF NOT EXISTS (
@@ -353,7 +362,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS einvoice_series_name_binding
 -- seller and mode, as a string, across series and fiscal years. It already holds on a 0.1.0
 -- database whose resetting series carries the year in its prefix. Where it does not, the upgrade
 -- refuses by name with a count and no identifiers, and changes nothing (S-06): it never drops a
--- row to make itself pass. SQLSTATE EIU01 is this module's own, mapped to DEI-134.
+-- row to make itself pass. "Changes nothing" holds when the script is run as documented, in one
+-- transaction with ON_ERROR_STOP (docs/index.md); the final block below holds it for any runner. SQLSTATE EIU01 is this module's own, mapped to DEI-134.
 DO $$
 DECLARE
   duplicated bigint;
@@ -367,7 +377,7 @@ BEGIN
         ERRCODE = 'EIU01',
         MESSAGE = format('schema upgrade refused: %s legal number(s) are carried by more than one'
           || ' row of one seller and mode. Format 2 requires a legal number to be unique per seller'
-          || ' and mode; nothing was changed.', duplicated);
+          || ' and mode. If run as documented, nothing was changed.', duplicated);
     END IF;
   END IF;
 END $$;
@@ -482,11 +492,17 @@ $$ LANGUAGE plpgsql;
 -- every fiscal year, so "the type of a number is readable from its series" holds beyond one year.
 -- A new series row starts with no issue date: the first allocation sets it. SQLSTATE EIS01.
 CREATE OR REPLACE FUNCTION einvoice_series_insert_guard() RETURNS trigger AS $$
+DECLARE
+  other boolean;
 BEGIN
-  IF EXISTS (
-      SELECT 1 FROM einvoice_series s
-       WHERE s.seller_id = NEW.seller_id AND s.mode = NEW.mode AND s.series = NEW.series
-         AND s.document_type <> NEW.document_type) THEN
+  -- NR-1: the table is read through the trigger's own schema, never through search_path, where a
+  -- temporary table of the same name would come first.
+  EXECUTE format(
+    'SELECT EXISTS (SELECT 1 FROM %I.einvoice_series s'
+    || ' WHERE s.seller_id = $1 AND s.mode = $2 AND s.series = $3 AND s.document_type <> $4)',
+    TG_TABLE_SCHEMA)
+    INTO other USING NEW.seller_id, NEW.mode, NEW.series, NEW.document_type;
+  IF other THEN
     RAISE EXCEPTION USING
       ERRCODE = 'EIS01',
       MESSAGE = 'einvoice_series: this series name already numbers another document type for this'
@@ -515,10 +531,15 @@ BEGIN
   IF NEW.corrects_issuance_id IS NULL THEN
     RETURN NEW;
   END IF;
-  SELECT id, seller_id, mode, document_type, state, legal_number, btrim(document_sha256) AS sha
-    INTO t
-    FROM einvoice_issuance WHERE id = NEW.corrects_issuance_id;
-  IF NOT FOUND
+  -- NR-1: every table read here is qualified with the trigger's own schema (a guard that reads a
+  -- table qualifies it with TG_TABLE_SCHEMA). EXECUTE does not set FOUND, so absence is read from
+  -- the NOT NULL columns.
+  EXECUTE format(
+    'SELECT id, seller_id, mode, document_type, state, legal_number,'
+    || ' btrim(document_sha256) AS sha FROM %I.einvoice_issuance WHERE id = $1',
+    TG_TABLE_SCHEMA)
+    INTO t USING NEW.corrects_issuance_id;
+  IF t.id IS NULL
      OR t.document_type <> '380' OR t.state <> 'ISSUED'
      OR t.seller_id <> NEW.seller_id OR t.mode <> NEW.mode OR t.sha = '' THEN
     RAISE EXCEPTION USING
@@ -526,11 +547,12 @@ BEGIN
       MESSAGE = 'einvoice_issuance: a credit note may correct only an issued invoice of the same'
         || ' seller and mode';
   END IF;
-  SELECT state, btrim(document_sha256) AS sha INTO latest
-    FROM einvoice_issuance_event
-   WHERE seller_id = t.seller_id AND mode = t.mode AND legal_number = t.legal_number
-   ORDER BY seq DESC LIMIT 1;
-  IF NOT FOUND OR latest.state <> 'ISSUED' OR latest.sha <> t.sha THEN
+  EXECUTE format(
+    'SELECT state, btrim(document_sha256) AS sha FROM %I.einvoice_issuance_event'
+    || ' WHERE seller_id = $1 AND mode = $2 AND legal_number = $3 ORDER BY seq DESC LIMIT 1',
+    TG_TABLE_SCHEMA)
+    INTO latest USING t.seller_id, t.mode, t.legal_number;
+  IF latest.state IS NULL OR latest.state <> 'ISSUED' OR latest.sha <> t.sha THEN
     RAISE EXCEPTION USING
       ERRCODE = 'EIT01',
       MESSAGE = 'einvoice_issuance: the corrected invoice''s stored hash does not match its chained'
@@ -626,7 +648,8 @@ END $$;
 -- einvoice.seller.tax-zone before it runs this script; an owner who runs it by hand sets it first
 -- (SET einvoice.tax_zone = 'Europe/Paris'). When a backfill is needed and no zone is set, the
 -- upgrade refuses by name and changes nothing (SQLSTATE EIU02, DEI-134). Guessing a zone would
--- record a date the documents do not carry.
+-- record a date the documents do not carry. The zone must be a region id listed in
+-- pg_timezone_names: an offset id is read by PostgreSQL with the opposite sign (D-A1-C05).
 --
 -- The series guard refuses any UPDATE that does not advance the counter, so the backfill runs
 -- with that one trigger disabled, inside this transaction, as the schema owner. The date comes
@@ -649,9 +672,19 @@ BEGIN
         ERRCODE = 'EIU02',
         MESSAGE = 'schema upgrade refused: series with numbered rows need their latest issue date,'
           || ' and that date depends on the seller''s tax zone. Set einvoice.tax_zone for this'
-          || ' session (the starter does it from einvoice.seller.tax-zone); nothing was changed.';
+          || ' session (the starter does it from einvoice.seller.tax-zone). If run as documented,'
+          || ' nothing was changed.';
     END IF;
-    PERFORM now() AT TIME ZONE zone;  -- an unknown zone fails here, before any write
+    -- Region ids only. PostgreSQL reads an offset id such as +02:00 or UTC+02:00 as a POSIX zone
+    -- with the sign reversed, and accepts invented names such as Nowhere+5; neither is in this
+    -- list. Etc/GMT-2 is listed and means the same in Java and in PostgreSQL.
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names n WHERE n.name = zone) THEN
+      RAISE EXCEPTION USING
+        ERRCODE = 'EIU02',
+        MESSAGE = 'schema upgrade refused: einvoice.tax_zone must be a region id such as'
+          || ' Europe/Paris, known to PostgreSQL; an offset id (+02:00, UTC+02:00) or an unknown'
+          || ' name is not accepted. If run as documented, nothing was changed.';
+    END IF;
     ALTER TABLE einvoice_series DISABLE TRIGGER einvoice_series_guard;
     UPDATE einvoice_series s
        SET last_issue_date = (
@@ -667,12 +700,131 @@ BEGIN
   END IF;
 END $$;
 
--- Last statement: the version this script brings the schema to. Raised only, never lowered (the
--- guard above refuses a lower one anyway).
-INSERT INTO einvoice_schema (id, format_version, min_compatible_version, updated_at)
-VALUES (1, 2, 2, now())
-ON CONFLICT (id) DO UPDATE
-  SET format_version = EXCLUDED.format_version,
-      min_compatible_version = EXCLUDED.min_compatible_version,
-      updated_at = EXCLUDED.updated_at
-  WHERE einvoice_schema.format_version < EXCLUDED.format_version;
+-- Last statement: the version stamp, in ONE block that first checks every format-2 condition and
+-- raises EIU03 (mapped to DEI-134) naming the first one missing. The stamp is inside the same block,
+-- so a refusal can never be followed by the stamp, whatever runs the script: a runner that goes on
+-- after an error (psql without ON_ERROR_STOP) still cannot mark an unfinished upgrade as format 2
+-- (D-A1-C01). Raised only, never lowered (the guard above refuses a lower one anyway).
+DO $$
+DECLARE
+  missing text;
+  rel     regclass;
+  pk_cols text[];
+  c       record;
+BEGIN
+  -- the new columns exist, and the three document_type columns have no default
+  FOR c IN
+    SELECT * FROM (VALUES
+      ('einvoice_series', 'document_type', true), ('einvoice_issuance', 'document_type', true),
+      ('einvoice_issuance_event', 'document_type', true), ('einvoice_series', 'last_issue_date', false),
+      ('einvoice_issuance', 'corrects_issuance_id', false),
+      ('einvoice_issuance_event', 'corrects_issuance_id', false),
+      ('einvoice_issuance_event', 'corrects_seller_id', false),
+      ('einvoice_issuance_event', 'corrects_mode', false),
+      ('einvoice_issuance_event', 'corrects_series', false),
+      ('einvoice_issuance_event', 'corrects_fiscal_year', false),
+      ('einvoice_issuance_event', 'corrects_legal_number', false)
+    ) AS t(tbl, col, no_default)
+  LOOP
+    IF missing IS NULL AND NOT EXISTS (
+        SELECT 1 FROM pg_attribute a
+         WHERE a.attrelid = to_regclass(quote_ident(current_schema()) || '.' || c.tbl)
+           AND a.attname = c.col AND NOT a.attisdropped
+           AND (NOT c.no_default OR NOT a.atthasdef)) THEN
+      missing := format('column %s.%s is missing or still has a default', c.tbl, c.col);
+    END IF;
+  END LOOP;
+
+  -- the series primary key carries the document type
+  IF missing IS NULL THEN
+    rel := to_regclass(quote_ident(current_schema()) || '.einvoice_series');
+    SELECT array_agg(att.attname::text ORDER BY k.ord) INTO pk_cols
+      FROM pg_constraint con
+      CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+      JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.attnum
+     WHERE con.contype = 'p' AND con.conrelid = rel;
+    IF pk_cols IS DISTINCT FROM ARRAY['seller_id', 'document_type', 'series', 'fiscal_year', 'mode'] THEN
+      missing := 'the einvoice_series primary key on (seller_id, document_type, series, fiscal_year, mode)';
+    END IF;
+  END IF;
+
+  -- the five CHECK constraints
+  IF missing IS NULL THEN
+    FOR c IN
+      SELECT * FROM (VALUES
+        ('einvoice_series_document_type', 'einvoice_series'),
+        ('einvoice_issuance_document_type', 'einvoice_issuance'),
+        ('einvoice_issuance_event_document_type', 'einvoice_issuance_event'),
+        ('einvoice_issuance_correction_shape', 'einvoice_issuance'),
+        ('einvoice_issuance_event_correction_shape', 'einvoice_issuance_event')
+      ) AS t(name, tbl)
+    LOOP
+      IF missing IS NULL AND NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+           WHERE conname = c.name AND contype = 'c' AND convalidated
+             AND conrelid = to_regclass(quote_ident(current_schema()) || '.' || c.tbl)) THEN
+        missing := format('the constraint %s', c.name);
+      END IF;
+    END LOOP;
+  END IF;
+
+  -- the unique indexes
+  IF missing IS NULL THEN
+    FOR c IN
+      SELECT * FROM (VALUES
+        ('einvoice_issuance_number_unique'), ('einvoice_series_name_binding')) AS t(name)
+    LOOP
+      IF missing IS NULL AND NOT EXISTS (
+          SELECT 1 FROM pg_index x
+           WHERE x.indexrelid = to_regclass(quote_ident(current_schema()) || '.' || c.name)
+             AND x.indisunique AND x.indisvalid) THEN
+        missing := format('the unique index %s', c.name);
+      END IF;
+    END LOOP;
+  END IF;
+
+  -- the three triggers that are new in format 2
+  IF missing IS NULL THEN
+    FOR c IN
+      SELECT * FROM (VALUES
+        ('einvoice_series_insert_guard', 'einvoice_series'),
+        ('einvoice_issuance_insert_guard', 'einvoice_issuance'),
+        ('einvoice_schema_guard', 'einvoice_schema')
+      ) AS t(name, tbl)
+    LOOP
+      IF missing IS NULL AND NOT EXISTS (
+          SELECT 1 FROM pg_trigger
+           WHERE tgname = c.name AND NOT tgisinternal
+             AND tgrelid = to_regclass(quote_ident(current_schema()) || '.' || c.tbl)) THEN
+        missing := format('the trigger %s', c.name);
+      END IF;
+    END LOOP;
+  END IF;
+
+  -- no series that numbered rows may still lack its latest issue date (zone missing or refused)
+  IF missing IS NULL AND EXISTS (
+      SELECT 1 FROM einvoice_series s
+       WHERE s.last_issue_date IS NULL
+         AND EXISTS (
+           SELECT 1 FROM einvoice_issuance i
+            WHERE i.seller_id = s.seller_id AND i.mode = s.mode AND i.series = s.series
+              AND i.fiscal_year = s.fiscal_year AND i.document_type = s.document_type)) THEN
+    missing := 'the latest issue date of every series that numbered rows (the tax zone was missing'
+      || ' or refused)';
+  END IF;
+
+  IF missing IS NOT NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = 'EIU03',
+      MESSAGE = 'schema upgrade refused: format 2 is not complete, missing: ' || missing
+        || '. The version was not stamped. Fix the cause and run the script again.';
+  END IF;
+
+  INSERT INTO einvoice_schema (id, format_version, min_compatible_version, updated_at)
+  VALUES (1, 2, 2, now())
+  ON CONFLICT (id) DO UPDATE
+    SET format_version = EXCLUDED.format_version,
+        min_compatible_version = EXCLUDED.min_compatible_version,
+        updated_at = EXCLUDED.updated_at
+    WHERE einvoice_schema.format_version < EXCLUDED.format_version;
+END $$;

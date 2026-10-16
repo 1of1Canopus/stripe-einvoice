@@ -4,8 +4,10 @@ import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.Identifiers;
 import com.housedevinci.einvoice.domain.SeriesKey;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 
 /**
  * What the allocator is asked for: one number, for one Stripe invoice, in one series.
@@ -45,8 +47,29 @@ public record AllocationRequest(
           ErrorCodes.INVALID,
           "an allocation needs BT-2 as a date in the seller's tax zone, never one derived here");
     }
+    requireDateReachableFrom(issuedAt, issueDate);
     stripeAccountId = stripeAccountId == null ? "" : stripeAccountId;
     stripeNumber = stripeNumber == null ? "" : stripeNumber;
     rulePackVersion = rulePackVersion == null ? "" : rulePackVersion;
+  }
+
+  /**
+   * D-A1-C04. The series keeps the latest issue date it numbered and nothing lowers it, so one
+   * date no tax zone could derive from {@code issuedAt} would move it for good. The record does
+   * not know the zone, but every real zone lies between the two extreme offsets.
+   */
+  private static void requireDateReachableFrom(Instant issuedAt, LocalDate issueDate) {
+    try {
+      LocalDate earliest = LocalDate.ofInstant(issuedAt, ZoneOffset.MIN);
+      LocalDate latest = LocalDate.ofInstant(issuedAt, ZoneOffset.MAX);
+      if (issueDate.isBefore(earliest) || issueDate.isAfter(latest)) {
+        throw new EInvoiceException(
+            ErrorCodes.INVALID,
+            "the issue date is not a date any time zone derives from the invoice instant");
+      }
+    } catch (DateTimeException e) {
+      throw new EInvoiceException(
+          ErrorCodes.INVALID, "the invoice instant is outside the supported date range", e);
+    }
   }
 }

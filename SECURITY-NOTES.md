@@ -167,6 +167,20 @@ module is where that is set out.
 - **Rows written before the upgrade hash no document type.** The verifier treats every such row as
   an invoice and checks that its series row still says invoice, so flipping an old series to
   credit notes reads as BROKEN.
+- **The by-hand upgrade is all or nothing, and the version stamp is checked.** Run the script with
+  `psql -X -v ON_ERROR_STOP=1 --single-transaction` (the exact command is in `docs/index.md`). A
+  runner that goes on after an error cannot mark an unfinished upgrade as format 2: the stamp sits
+  in one final block that first checks every format-2 condition and refuses with `EIU03`
+  (`DEI-134`) otherwise.
+- **The two insert guards read tables through the trigger's own schema.** A temporary table of the
+  same name, which the runtime role may create, cannot stand in for the real one. Any later guard
+  that reads a table must qualify it with `TG_TABLE_SCHEMA`.
+- **The backfill zone must be a region id.** An offset id such as `+02:00` is read by PostgreSQL
+  with the opposite sign, so the upgrade refuses it and asks for a region id.
+- **The issue date given to the allocator must be a date some time zone derives from the invoice
+  instant.** A far date is refused, because it would move the series date for good.
+- **The six `corrects_*` columns of a chained event are empty together or filled together.** The
+  table refuses a half-filled identity, and the reader treats one as a broken row.
 
 - **A configured intake with a missing renderer or validator fails startup, by name (D2-02).** The
   unit of work, the worker, the sweeper, the webhook controller and the health indicator are all

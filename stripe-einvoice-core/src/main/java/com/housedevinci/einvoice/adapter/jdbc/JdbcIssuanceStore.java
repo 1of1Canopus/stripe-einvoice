@@ -1434,6 +1434,19 @@ public final class JdbcIssuanceStore
     return value == null ? "" : value.strip();
   }
 
+  private static boolean plantedIdentity(ResultSet rs) throws SQLException {
+    for (String column :
+        new String[] {
+          "corrects_seller_id", "corrects_mode", "corrects_series", "corrects_legal_number"
+        }) {
+      if (rs.getString(column) != null) {
+        return true;
+      }
+    }
+    rs.getInt("corrects_fiscal_year");
+    return !rs.wasNull();
+  }
+
   private static IssuanceEvent readEvent(ResultSet rs) throws SQLException {
     SeriesKey key =
         new SeriesKey(
@@ -1443,8 +1456,17 @@ public final class JdbcIssuanceStore
             Mode.of(rs.getString("mode")),
             DocumentTypeCode.of(rs.getString("document_type")));
     long targetId = rs.getLong("corrects_issuance_id");
+    boolean noTarget = rs.wasNull();
+    if (noTarget && plantedIdentity(rs)) {
+      // D-A1-C06: an identity without its id is never hashed and never read; the table refuses
+      // it, so a row that has it was written around the table, and the verifier reports BROKEN.
+      throw new EInvoiceException(
+          ErrorCodes.INVALID,
+          "chained event " + rs.getLong("seq") + " carries a corrected-invoice identity without"
+              + " its row id");
+    }
     Optional<CorrectionTarget> target =
-        rs.wasNull()
+        noTarget
             ? Optional.empty()
             : Optional.of(
                 new CorrectionTarget(

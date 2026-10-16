@@ -43,6 +43,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Security review of the typed number series (D-A1-C01, C02, C04, C05, C06, C07).** The version
+  stamp of the schema script is now one final block that checks every format-2 condition and
+  refuses with `EIU03` (`DEI-134`); the documented by-hand command is
+  `psql -X -v ON_ERROR_STOP=1 --single-transaction`. The two new insert guards qualify every table
+  they read with the trigger's schema, so a temporary table cannot shadow it. `AllocationRequest`
+  refuses an issue date no time zone derives from the invoice instant. The backfill refuses a tax
+  zone that is not a PostgreSQL region id. A chained event's six `corrects_*` columns are empty
+  together or filled together, and a half-filled row is a decode error. A probe now guards the
+  pre-seam clause of the chain verifier.
 - Build: the reference guard (`tools/check-private-references.sh`) now also refuses the first names of the studio's agents in the tree, the main jar and the sources jar, so public text keeps to roles. Case-sensitive and whole-word; the script's header lists each name left out and why. The jar scan reads class files as text, so a string length byte cannot read as a name on GNU grep.
 - After the security review of that change: a tab, form feed, vertical tab or carriage return
   before a name no longer hides it; only the JDK cipher class may follow a dot or a slash; the
