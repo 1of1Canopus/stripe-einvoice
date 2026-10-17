@@ -43,6 +43,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- The reference guard (`tools/check-private-references.sh`) now reads file names as well as
+  file content, with the same pattern: every tracked path in the tree, every member name and
+  the file name of each built jar. One shape is admitted by name only, a security review
+  document at the root of `docs/`; its text is still scanned. The tree listing is read
+  NUL-separated, and a control byte in a path, a symlink and a submodule entry are refused. In
+  a jar, a member name holding a control byte, a `..` segment or a leading `/`, two members
+  with one name (also after case folding), an empty jar and a listing that does not match the
+  jar's entry count are refused before extraction. The guard runs in the C locale, so a byte
+  that is not valid UTF-8 no longer hides a name, and a refused name is printed with every
+  non-printable byte escaped.
+- The jar side of the reference guard checks that extraction was one to one: no symlink in the
+  extracted folder, and the number of regular files and their total bytes equal what the jar's
+  central directory lists. Before, a member at `./a.txt` next to `a.txt`, the data of a
+  directory entry, or a symlink member's stored target could carry text the content scan never
+  read. Member names with an empty or `.` segment are refused by name. Content hits are printed
+  with control bytes escaped, so a carriage return in a hit cannot start a workflow command.
 - **Security review of the typed number series (D-A1-C01, C02, C04, C05, C06, C07).** The version
   stamp of the schema script is now one final block that checks every format-2 condition and
   refuses with `EIU03` (`DEI-134`); the documented by-hand command is
