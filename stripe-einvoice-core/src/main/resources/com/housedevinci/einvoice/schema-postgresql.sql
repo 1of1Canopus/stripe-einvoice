@@ -789,39 +789,46 @@ BEGIN
     END LOOP;
   END IF;
 
-  -- the three triggers that are new in format 2
+  -- every guard trigger exists, is on, and calls a function that pins its search path (D-A1-C01,
+  -- D-A1-C08, D-A1-C12). Read from pg_trigger and pg_proc, never from names or source text:
+  -- tgfoid is the function the trigger really calls, tgenabled 'O' (origin) or 'A' (always) fires
+  -- in a normal session ('D' disabled and 'R' replica-only do not).
   IF missing IS NULL THEN
     FOR c IN
       SELECT * FROM (VALUES
-        ('einvoice_series_insert_guard', 'einvoice_series'),
-        ('einvoice_issuance_insert_guard', 'einvoice_issuance'),
-        ('einvoice_schema_guard', 'einvoice_schema')
-      ) AS t(name, tbl)
+        ('einvoice_series_guard', 'einvoice_series', 'einvoice_series_guard'),
+        ('einvoice_series_no_truncate', 'einvoice_series', 'einvoice_append_only'),
+        ('einvoice_series_insert_guard', 'einvoice_series', 'einvoice_series_insert_guard'),
+        ('einvoice_issuance_insert_guard', 'einvoice_issuance', 'einvoice_issuance_insert_guard'),
+        ('einvoice_schema_guard', 'einvoice_schema', 'einvoice_schema_guard'),
+        ('einvoice_schema_no_truncate', 'einvoice_schema', 'einvoice_append_only'),
+        ('einvoice_issuance_guard', 'einvoice_issuance', 'einvoice_issuance_guard'),
+        ('einvoice_issuance_no_truncate', 'einvoice_issuance', 'einvoice_append_only'),
+        ('einvoice_issuance_event_append_only', 'einvoice_issuance_event', 'einvoice_append_only'),
+        ('einvoice_issuance_event_no_truncate', 'einvoice_issuance_event', 'einvoice_append_only'),
+        ('einvoice_issuance_anchor_monotonic', 'einvoice_issuance_anchor', 'einvoice_anchor_monotonic'),
+        ('einvoice_issuance_anchor_no_delete', 'einvoice_issuance_anchor', 'einvoice_append_only'),
+        ('einvoice_issuance_anchor_no_truncate', 'einvoice_issuance_anchor', 'einvoice_append_only'),
+        ('einvoice_reprocess_append_only', 'einvoice_reprocess_request', 'einvoice_append_only'),
+        ('einvoice_reprocess_no_truncate', 'einvoice_reprocess_request', 'einvoice_append_only')
+      ) AS t(name, tbl, fn)
     LOOP
       IF missing IS NULL AND NOT EXISTS (
-          SELECT 1 FROM pg_trigger
-           WHERE tgname = c.name AND NOT tgisinternal
-             AND tgrelid = to_regclass(quote_ident(current_schema()) || '.' || c.tbl)) THEN
-        missing := format('the trigger %s', c.name);
-      END IF;
-    END LOOP;
-  END IF;
-
-  -- every guard function pins its search path (D-A1-C08): read proconfig, never the source text
-  IF missing IS NULL THEN
-    FOR c IN
-      SELECT * FROM (VALUES
-        ('einvoice_series_guard'), ('einvoice_issuance_guard'), ('einvoice_series_insert_guard'),
-        ('einvoice_issuance_insert_guard'), ('einvoice_schema_guard'), ('einvoice_append_only'),
-        ('einvoice_anchor_monotonic')) AS t(name)
-    LOOP
-      IF missing IS NULL AND NOT EXISTS (
-          SELECT 1 FROM pg_proc p
-           WHERE p.proname = c.name
-             AND p.pronamespace = to_regnamespace(quote_ident(current_schema()))
+          SELECT 1 FROM pg_trigger g
+           WHERE g.tgname = c.name AND NOT g.tgisinternal
+             AND g.tgrelid = to_regclass(quote_ident(current_schema()) || '.' || c.tbl)
+             AND g.tgenabled IN ('O', 'A')
+             AND g.tgfoid = to_regprocedure(quote_ident(current_schema()) || '.' || c.fn || '()')) THEN
+        missing := format('the trigger %s (missing, disabled, or not bound to %s in this schema)',
+          c.name, c.fn);
+      ELSIF missing IS NULL AND NOT EXISTS (
+          SELECT 1 FROM pg_trigger g
+            JOIN pg_proc p ON p.oid = g.tgfoid
+           WHERE g.tgname = c.name AND NOT g.tgisinternal
+             AND g.tgrelid = to_regclass(quote_ident(current_schema()) || '.' || c.tbl)
              AND p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp']::text[]) THEN
         missing := format('the pinned search path (SET search_path = pg_catalog, pg_temp) of the'
-          || ' function %s', c.name);
+          || ' function %s called by the trigger %s', c.fn, c.name);
       END IF;
     END LOOP;
   END IF;

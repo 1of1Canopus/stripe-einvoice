@@ -78,6 +78,10 @@ All notable changes to this project are documented here. The format follows
   a zone name with a slash, because legacy names such as `CET` are read differently by PostgreSQL
   and the JVM (D-A1-C09).
 
+- **The final block checks the real trigger, not its name (D-A1-C12).** For each of the 15 guard
+  triggers it reads which function the trigger calls and whether it is on. It refuses with `EIU03`
+  (`DEI-134`) when a trigger is disabled, is bound to another function, or its function lacks the
+  pinned search path.
 - **`tools.jackson.core:jackson-databind` pinned to 3.1.7 (GHSA-q4xh-88c3-wmh7, HIGH, CVSS 7.5,
   denial of service; GHSA-cxp5-3px4-pw24, HIGH, quadratic-time forward-reference completion;
   GHSA-wv8q-qhhj-9h54, HIGH, retains every unknown raw type ID).** The Spring Boot 4.1.1
