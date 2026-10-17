@@ -261,3 +261,196 @@ design), as ruled in the spec review.
   describe no shared schema between sellers. Not a supported deployment.
 - **DST.** Covered under D-A1-C05: region ids agree.
 - **`min_compatible_version`.** Startup refuses any version but 2, which is the strict reading.
+
+## Pass 2 (2026-10-17)
+
+Head reviewed: `fc56dcf`. Fix commits `290a990`, `1caf7a7`; probe move `fc56dcf`.
+
+**Verdict: MERGE WITH FIXES.** The six pass-1 fixes hold: each probe goes red when its fix is
+broken and green when restored. Pass 2 found four new findings: one MEDIUM, one LOW, two INFO. Two
+of them need a code correction (D-A1-C08, D-A1-C09), so the fixes are not text-only. No HIGH.
+
+### Numbers
+
+Real PostgreSQL 16 in Testcontainers, Docker up, one Maven job at a time.
+
+| | |
+|---|---|
+| `./mvnw -B verify` on `fc56dcf` | exit 0. 631 tests (core 491, starter 132, sample 8), 0 failures, 0 errors, 0 skipped. Coverage gates met (3 of 3) |
+| CI on the PR | all 7 checks green |
+| Pass-1 probe class | 9 tests, all green |
+| Fix-pass mutations re-run | 6 findings, 8 runs, all red as expected (table below) |
+| Pass-2 probes | 3 tests, all red on `fc56dcf` (internal probe folder, `CipherProbePr33Pass2Test`) |
+
+Process note: the first verify started while another Maven process (not this review's) was
+running. My pre-check reported it but did not stop the command. I reran verify after the other
+process had ended. The numbers above come from that clean run. Both runs gave the same result.
+
+### The probe move (`fc56dcf`)
+
+Confirmed. It removes exactly one method,
+`probe_one_series_name_never_binds_two_types_under_concurrent_inserts`, and its two imports
+(`CompletableFuture`, `TimeUnit`). Neither import is used anywhere else in the file. A two-line
+comment takes the method's place, and nothing else changed. The earlier formatter change
+(`1caf7a7`) is whitespace only: the file's text before and after is equal once whitespace and
+Javadoc `*` markers are removed. Method text matches the internal copy.
+
+### Pass-1 findings: mutation, red, restore
+
+Each mutation was applied alone, its probe run, and the tree restored with `git checkout`. Green
+after restore is shown by the clean full verify.
+
+| Id | Mutation applied by the reviewer | Probe result |
+|---|---|---|
+| D-A1-C01 | final version block never raises (`IF false`) | both by-hand probes red (2 of 2) |
+| D-A1-C02 | `%I.` qualifier removed from the three table reads | both temp-table probes red (2 of 2) |
+| D-A1-C04 | `requireDateReachableFrom` call removed | red |
+| D-A1-C05 | zone list check removed (`IF false`) | both cases red |
+| D-A1-C06 | CHECK reverted and decode error removed | red |
+| D-A1-C06 | CHECK reverted only | green: the decode error alone reports BROKEN |
+| D-A1-C06 | decode error removed only | green: the CHECK alone refuses the planted row |
+| D-A1-C07 | pre-seam clause of `IssuanceChain.verify` removed | red |
+
+So C06 has two independent controls, as prescribed. **C01, C02, C04, C05, C06, C07: closed.**
+D-A1-C03 stays open as a design stop with its own PR.
+
+### Surfaces the fixes opened, checked
+
+- **C06 CHECK against the upgrade of existing rows.** Old event rows get `document_type = '380'`
+  and six NULL `corrects_*` columns, so the new CHECK passes on them. The upgrade probes over a real
+  0.1.0 database are green in the full verify. A database that ran an earlier format 2 of this
+  branch is not supported (the branch is unreleased).
+- **The documented by-hand command, on a real psql.** A 0.1.0 database with one numbered row, run
+  with the documented flags:
+  - Without a zone: the script refuses (`EIU02`) and `einvoice_schema` does not exist afterwards,
+    so nothing was changed.
+  - With `PGOPTIONS='-c einvoice.tax_zone=Europe/Paris'`: exit 0, format 2, and the right date
+    (an invoice at 22:30 UTC on 14 July is dated 15 July).
+- **C04 window against every zone the allocator accepts.** Java offsets are bounded by
+  `ZoneOffset.MIN..MAX` (minus 18 h to plus 18 h), so every `ZoneId` the starter accepts falls
+  inside the window. No finding today. The interaction with the date-order design is D-A1-C10.
+- **C05 zone list against the zones the allocator accepts.** I compared all 599 names in
+  `pg_timezone_names` (pinned image, tzdata 2026b) with the JVM (21.0.10, tzdb 2025b), hour by
+  hour from 2000 to 2030. 585 agree. 6 are refused by Java (`EST`, `HST`, `MST`, `ROC`, `Factory`,
+  `posixrules`), so the starter cannot send them. 8 disagree: `CET`, `EET`, `MET`, `WET`,
+  `America/Vancouver`, `Canada/Pacific`, `Europe/Chisinau`, `Europe/Tiraspol`. See D-A1-C09.
+- **C02, other trigger functions.** No other guard function reads a table. But every guard
+  compares values with operators that resolve through the writer's session. See D-A1-C08.
+
+### New findings
+
+#### D-A1-C08 · MEDIUM · a runtime role that can create in `public` disarms the guards with a look-alike operator
+
+**What goes wrong.** The C02 fix qualified the table names but did not pin the guard functions'
+`search_path`, which NR-1 asks for. The guards compare `varchar` columns with `<>`. PostgreSQL's
+own catalog (`pg_catalog`) has no `<>(varchar, varchar)`; the built-in one takes `text`. So an
+exact-match operator `public.<>(varchar, varchar)` wins, even with `pg_catalog` first on the
+search path. If the runtime role can create objects in `public`, it can make every such comparison
+say "no difference". That is the default on PostgreSQL 14 and older, and PostgreSQL 14 is still
+supported. The module's docs state no minimum version and no `REVOKE`.
+
+Example: as a role with exactly `docs/schema-grants.sql`, on PostgreSQL 14.24, with default
+privileges:
+1. Insert series `OPX`/2027 as type 381 when `OPX`/2026 is 380. Refused (`EIS01`).
+2. `CREATE OPERATOR public.<>` (varchar, varchar) that always returns false.
+3. The same insert. Accepted: one series name now numbers two types.
+
+The same look-alike lets the role rewrite the legal number of a numbered invoice. That guard
+(`einvoice_issuance_guard`) already shipped in 0.1.x. The chain verifier still reports that rewrite
+as BROKEN, but prevention is gone. In a manual run on PostgreSQL 14, a few more look-alikes also
+let the role pass the D-CNS-S12 target bound (a credit note against a number that was never
+issued). That case is documented from the manual run and is not a suite probe. On the pinned
+PostgreSQL 16 image with default privileges, the role gets `permission denied for schema public`.
+
+**Why MEDIUM, not HIGH.** NR-1 rates HIGH "when a less trusted role can create objects on the
+path". Here that needs PostgreSQL 14 or older, or a CREATE grant the documented setup does not
+give on 15 or newer. The rewrites that matter most (legal number, target) stay visible to the
+verifier. The new guard this PR adds (S-09) protects a property whose race was graded LOW
+(D-A1-C03).
+
+**Probes** (internal probe folder, `CipherProbePr33Pass2Test`; each grants CREATE on `public`, to
+model the PostgreSQL 14 default): `probe_a_runtime_role_operator_cannot_disarm_the_series_name_binding`,
+`probe_a_runtime_role_operator_cannot_rewrite_a_legal_number`. Both red on `fc56dcf`.
+
+**Fix (fix pass, correction).**
+1. `schema-postgresql.sql`: every trigger function the script creates gets
+   `SET search_path = pg_catalog, pg_temp` in its `CREATE OR REPLACE FUNCTION`. That covers the
+   series, issuance, event, anchor, schema and both insert guards. Table reads stay qualified with
+   `TG_TABLE_SCHEMA`. With `pg_temp` listed last, it is never searched for operators or functions.
+2. The final version block (C01) also refuses (`EIU03`) when any of those functions lacks that
+   setting in `pg_proc.proconfig`.
+3. `SECURITY-NOTES.md`: one entry. Every guard function pins its search path. On 0.1.x on
+   PostgreSQL 14 or older, run `REVOKE CREATE ON SCHEMA public FROM PUBLIC` until you upgrade.
+   Update the "Triggers" sentence in the script to say "pin the search path" as well.
+4. Add the two probes before the change. Mutation for the PR body: drop the `SET` clause from the
+   series insert guard, and the first probe goes red.
+
+#### D-A1-C09 · LOW · the backfill accepts legacy zone names that PostgreSQL and the JVM read differently
+
+**What goes wrong.** The C05 fix accepts any name in `pg_timezone_names`. Its comment and its
+error message say "region ids only". But the list also holds legacy names that are not region ids:
+`CET`, `EET`, `MET`, `WET`, `EST5EDT`, `GMT0` and others. The starter accepts `CET`. On the pinned
+PostgreSQL image, `CET` has no summer time; in the JVM it has summer time.
+
+Example: zone `CET`, a 0.1.0 invoice at 2026-07-14T22:30Z. The document (Java) says 15 July. The
+backfilled `last_issue_date` says 14 July.
+
+The fix I prescribed in pass 1 was too wide. The fix pass applied it exactly as written.
+
+For real region ids, the two time-zone databases also disagree when they ship different versions.
+Example: `America/Vancouver`, 2026-11-05T07:30Z. Java says 4 November; PostgreSQL says 5 November,
+because tzdata 2026b keeps summer time all year. Ruling 36 (f) accepted this risk for region ids.
+But the risk is written only in a script comment. An owner reading the docs cannot see it.
+
+**Probe.** `probe_a_legacy_zone_name_is_refused_or_backfills_the_date_the_starter_derives` (`CET`):
+red on `fc56dcf`.
+
+**Fix (fix pass, correction).**
+1. In the backfill block, refuse (`EIU02`) unless `zone = 'UTC'` or the zone contains a `/`, on top
+   of the `pg_timezone_names` check. The message already asks for a region id.
+2. `SECURITY-NOTES.md` and `docs/index.md` step 2 add one paragraph each. PostgreSQL and the JVM
+   ship separate time-zone data. If the seller's zone changed its rules between the two versions,
+   a series' backfilled date can be one day off for an invoice near midnight. Give the Vancouver
+   example. Say how to compare: `SELECT (max(issued_at) AT TIME ZONE '<zone>')::date` against the
+   date on the series' last document.
+
+#### D-A1-C10 · INFO · the C04 window must leave with the caller's issue date in the date-order PR
+
+**What goes wrong (later).** The date-order design makes BT-2 the numbering day, read from the
+database clock under the series lock. `finalized_at` moves to BT-72. Today the C04 window ties the
+caller's `issueDate` to `issuedAt` (`finalized_at`). If the date-order PR keeps both record fields,
+the window refuses the reorder paths the design must allow (retry, park, reprocess, sweep, late
+webhook).
+
+Example: an invoice finalised 2026-03-10T10:00Z, parked, then numbered on 12 March. The latest
+date the window allows is 11 March, so the allocation is refused `INVALID`. No code is wrong
+today.
+
+**Fix (text, internal design page `invoice-date-order-design.md`).** Add one line under section
+5.1. `AllocationRequest.issueDate` is removed, because the issue day comes only from the clock
+under the lock. The D-A1-C04 window goes with it. The D-A1-C04 probe is rewritten against the
+D-PS1-42 rule ("a future `last_issue_date` refuses with its own code").
+
+#### D-A1-C11 · INFO · the PR body says a probe and a red check that no longer exist
+
+**What goes wrong.** The "Security review, pass 1: fixes" part of the PR body still says the C03
+probe "is in the suite unchanged and is RED", and that "Build & test is red on this branch". Since
+`fc56dcf` both statements are false: the probe left the branch and every check is green. The PR
+body becomes the merge commit's body, so the false text would stay in `main`'s history.
+
+**Fix (text).** Edit the PR body: the C03 probe left this PR with `fc56dcf` and ships with the C03
+PR. Build & test is green. Also add the two C06 single-control mutations (both green), and the
+C08 and C09 mutations once they exist.
+
+### Fix list for this pass
+
+| Id | Sev | Kind | Who |
+|---|---|---|---|
+| D-A1-C08 | MEDIUM | code (SQL function attribute, final-block check) + one note | fix pass |
+| D-A1-C09 | LOW | code (one SQL condition) + two doc paragraphs | fix pass |
+| D-A1-C10 | INFO | text, internal design page | builder of the date-order PR |
+| D-A1-C11 | INFO | text, PR body | fix pass |
+
+Re-verification: the three pass-2 probes turn green, the two C08/C09 mutations go red, and a full
+verify passes. A design is not needed: C08 applies the NR-1 rule as written, and C09 narrows one
+existing check.
