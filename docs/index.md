@@ -6,7 +6,7 @@ customer, holed by drafts, failed finalisations and voids, and its format is Str
 
 ## The property, and the word that is not used
 
-For one `(seller, series, fiscal year, mode)`:
+For one `(seller, document type, series, fiscal year, mode)`:
 
 - no two issued documents share a number;
 - **every allocated number has a recorded, chained disposition** - issued, or voided with a reason;
@@ -29,10 +29,12 @@ One transaction, in this order:
 2. `INSERT INTO einvoice_series ... ON CONFLICT DO NOTHING`, which opens a new fiscal year's row if
    this is the first invoice of the year. The start value is 1 and is not a free parameter, so
    concurrent creators agree by construction.
-3. `UPDATE einvoice_series SET next_number = next_number + 1 ... AND next_number <= <max for the
-   width> RETURNING next_number - 1`. The `UPDATE` takes a row lock held until commit, so a second
-   transaction blocks and then reads the committed value.
-4. `INSERT INTO einvoice_issuance`, state `NUMBERED`. The unique constraint is the backstop when two
+3. `SELECT last_issue_date ... FOR UPDATE` on the series row: the row lock, held until commit, so a
+   second transaction blocks here and then reads the committed value.
+4. `UPDATE einvoice_series SET next_number = next_number + 1, last_issue_date =
+   GREATEST(last_issue_date, <BT-2>) ... AND next_number <= <max for the width> RETURNING
+   next_number - 1`.
+5. `INSERT INTO einvoice_issuance`, state `NUMBERED`. The unique constraint is the backstop when two
    callers missed step 1 together: the loser's counter increment rolls back with its insert, so
    there is no gap, and it re-reads the winner's number.
 
@@ -52,6 +54,38 @@ from the new year already exist. That is correct and unavoidable, and on a date-
 looks like tampering. The series report shows both the invoice date and the allocation timestamp on
 every line for that reason. Whether to refuse a late invoice from a closed year after a cut-off is
 the seller's accounting policy, not this module's.
+
+## Document types: one series per type
+
+Every numbered row belongs to exactly one **typed** series: the document type (BT-3, `380` for an
+invoice, `381` for a credit note) is part of the series key, bound when the series row is created,
+and immutable after that. One series name serves one type for a seller and mode, in every fiscal
+year, and a legal number is unique per seller and mode across all series.
+
+This edition issues invoices only. The allocator refuses any other type with `DEI-123`, before it
+locks anything, because a credit-note number with no credit note behind it would be a hole in a
+legal series. The format is ready for credit notes so that adding them later changes no schema.
+
+Credit notes are numbered in their own series, each series continuous in itself. The VAT rules of
+France, Germany and Belgium all allow numbering in one or more series (Directive 2006/112/EC art.
+226(2); CGI annexe II art. 242 nonies A, 7°; UStG § 14(4) Nr. 4; AR n° 1 art. 5, § 1er, 2°). We
+separate by document type because it is what auditors and accounting packages expect, not because
+a text requires it.
+
+A credit-note row must name the invoice it corrects (`corrects_issuance_id`), and an invoice row
+names none: a `CHECK` constraint says so. The database refuses a target that is not an invoice of
+the same seller and mode that this module issued, or whose stored document hash no longer matches
+its chained issue event (`DEI-128` on the allocator's own path). The link cannot change after the
+row is written, and the chained event of a credit note records the corrected invoice's seller,
+mode, series, fiscal year and legal number, not only its row id.
+
+### The latest issue date of a series
+
+Each series row records the latest BT-2 it numbered (`last_issue_date`). It moves only in the
+statement that moves the counter, and never backwards. A credit note dated before it is refused
+(`DEI-127`). An invoice dated before it is still numbered - a sale must get its invoice - and an
+open finding `DEI-127` names the number. Invoices can reach the allocator out of date order (a late
+webhook, a retry, a reprocess, the reconciliation sweep); the finding makes each case visible.
 
 ## The series report
 
@@ -143,7 +177,58 @@ behaviour or the chain.
 
 Four tables: `einvoice_series` (the counter), `einvoice_issuance` (the mapping row, append plus a
 state column), `einvoice_issuance_event` (the append-only chained disposition log) and
-`einvoice_issuance_anchor`.
+`einvoice_issuance_anchor`. A fifth, `einvoice_schema`, holds one row: the schema format version.
+The starter reads it at every boot. Only "the table does not exist" means the schema is absent;
+any other error stops startup with `DEI-133`, and a newer format stops it with `DEI-135`. The
+runtime role gets `SELECT` on it and nothing else.
+
+### Upgrading a 0.1.x database to format 2
+
+0.2.0 brings format 2: the document type, the corrected-invoice link, the latest issue date, the
+version row and the new constraints. The bundled `schema-postgresql.sql` upgrades a 0.1.x schema
+in place. It rewrites no number, no hash and no archived byte.
+
+1. **Stop every instance of 0.1.x.** Mixed versions are not supported. A 0.1.x binary cannot write
+   a number against format 2 (its inserts fail on the new `NOT NULL` column, inside the allocation
+   transaction, so its counter rolls back). Its chain verifier would report BROKEN on rows written
+   in the new form. That verdict is meaningless; never act on it. Findings and inbound purges of a
+   0.1.x binary are not refused, because those tables gain no column.
+2. **Run the script once as the schema owner**, either by starting 0.2.0 with
+   `einvoice.initialize-schema=true` and an owner-capable role, or by hand with this one command:
+
+   ```
+   PGOPTIONS='-c einvoice.tax_zone=Europe/Paris' psql -X -v ON_ERROR_STOP=1 --single-transaction \
+     -f schema-postgresql.sql
+   ```
+
+   Put your own region id in place of `Europe/Paris`. It must be `UTC` or a region id with a slash
+   that PostgreSQL lists (`Europe/Paris`, `America/New_York`). An offset such as `+02:00` is
+   refused, because PostgreSQL reads its sign the other way round. A legacy name such as `CET` is
+   refused too, because PostgreSQL and the JVM read it differently. The upgrade records each series' latest issue date as a date
+   in that zone, and it refuses (`DEI-134`) rather than guess when the zone is missing. The starter
+   sets it from `einvoice.seller.tax-zone`. Why each flag: `-X` skips your `~/.psqlrc`, which could
+   change the session. `ON_ERROR_STOP=1` stops at the first error; without it psql prints the error
+   and carries on. `--single-transaction` makes the run all or nothing, so a refusal changes nothing.
+   The last step of the script also checks every format-2 condition before it stamps the version and
+   raises `DEI-134` if one is missing, so a run that went wrong in some other way is still not
+   accepted as format 2.
+
+   PostgreSQL and the JVM ship separate time-zone data. If your zone changed its rules between the
+   two versions, a series' backfilled date can be one day off for an invoice near midnight.
+   Example: `America/Vancouver`, an invoice at 2026-11-05T07:30Z. A JVM with tzdb 2025b says
+   4 November. PostgreSQL with tzdata 2026b keeps summer time all year and says 5 November. To
+   check, compare `SELECT (max(issued_at) AT TIME ZONE 'America/Vancouver')::date FROM
+   einvoice_issuance WHERE series = '<series>'` with the date on that series' last document.
+3. **Expect a short stop.** The upgrade adds columns, rebuilds the series primary key and builds
+   unique indexes in one transaction. Every issuance waits until it commits. It runs under the
+   module's advisory lock, so two instances starting together run it one after the other, and an
+   interrupted run leaves the 0.1.x schema unchanged.
+4. **Then start 0.2.0 as the runtime role** with the grants in `docs/schema-grants.sql` (it now
+   includes `SELECT` on `einvoice_schema`). With `einvoice.initialize-schema=false`, a schema that
+   was not upgraded stops startup with `DEI-136`.
+
+The upgrade refuses, by name and with no change, when existing rows break a format-2 rule: two rows
+of one seller and mode with the same legal number (`DEI-134`, with a count and no identifiers).
 
 Run the application as a role that does **not** own them - `docs/schema-grants.sql` has the grants.
 The triggers refuse the runtime role; nothing refuses a table owner, who can disable them, so the

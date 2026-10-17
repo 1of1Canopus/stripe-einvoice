@@ -36,6 +36,19 @@ public final class TestPostgres {
     return dataSource;
   }
 
+  /** A new, empty database in the same container; the caller closes it. */
+  public static HikariDataSource emptyDatabase(String name) {
+    dataSource();
+    execute("CREATE DATABASE " + name);
+    HikariConfig config = new HikariConfig();
+    config.setJdbcUrl(CONTAINER.getJdbcUrl().replaceFirst("/[^/?]+(\\?|$)", "/" + name + "$1"));
+    config.setUsername(CONTAINER.getUsername());
+    config.setPassword(CONTAINER.getPassword());
+    config.setMaximumPoolSize(4);
+    config.setMinimumIdle(0);
+    return new HikariDataSource(config);
+  }
+
   public static long count(String sql) {
     try (Connection c = dataSource().getConnection();
         Statement st = c.createStatement();

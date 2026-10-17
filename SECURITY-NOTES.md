@@ -148,6 +148,55 @@ module is where that is set out.
 
 ## Residual risks on the issuance path
 
+- **Invoice dates can run backwards inside a series, in 0.1.x and in this version.** An invoice is
+  dated by Stripe's finalisation time, and it is numbered when its work reaches the allocator. A
+  late webhook, a retry, a reprocess or the reconciliation sweep can number an older invoice after
+  a newer one. 0.1.x did this silently. This version numbers it anyway and records an open finding
+  `DEI-127` that names the number, so every case is visible. It does not yet prevent it; a separate
+  change addresses the order of dates. Nothing in this module claims that numbering is
+  chronological.
+- **Mixed versions during the upgrade to format 2.** A 0.1.x instance left running against an
+  upgraded database cannot number anything (its inserts fail and roll back), but its verifier
+  reports BROKEN on rows written in the new form. That verdict is meaningless. Stop every 0.1.x
+  instance before the upgrade, and never act on a 0.1.x verdict afterwards.
+- **What the typed chain form does not buy on an unkeyed log.** The new form hashes the document
+  type and the corrected invoice's identity, so a type flip or a swapped link is BROKEN. On an
+  unkeyed log, a role that can bypass the triggers can rewrite rows and re-chain the whole log,
+  because the anchor's own guard is a trigger too. On a keyed log it cannot without the secret.
+  Witness the anchor head outside the database if the log is unkeyed.
+- **Rows written before the upgrade hash no document type.** The verifier treats every such row as
+  an invoice and checks that its series row still says invoice, so flipping an old series to
+  credit notes reads as BROKEN.
+- **The by-hand upgrade is all or nothing, and the version stamp is checked.** Run the script with
+  `psql -X -v ON_ERROR_STOP=1 --single-transaction` (the exact command is in `docs/index.md`). A
+  runner that goes on after an error cannot mark an unfinished upgrade as format 2: the stamp sits
+  in one final block that first checks every format-2 condition and refuses with `EIU03`
+  (`DEI-134`) otherwise.
+- **The two insert guards read tables through the trigger's own schema.** A temporary table of the
+  same name, which the runtime role may create, cannot stand in for the real one. Any later guard
+  that reads a table must qualify it with `TG_TABLE_SCHEMA`.
+- **The backfill zone must be `UTC` or a region id with a slash.** An offset id such as `+02:00`
+  is read by PostgreSQL with the opposite sign. A legacy name such as `CET` or `EST5EDT` is read
+  differently by PostgreSQL and by the JVM (example: `CET` has no summer time in the pinned
+  PostgreSQL image). The upgrade refuses all of them and asks for a region id.
+- **PostgreSQL and the JVM ship separate time-zone data.** If the seller's zone changed its rules
+  between the two versions, a series' backfilled date can be one day off for an invoice near
+  midnight. Example: `America/Vancouver`, invoice at 2026-11-05T07:30Z. A JVM with tzdb 2025b says
+  4 November. PostgreSQL with tzdata 2026b keeps summer time all year and says 5 November. After
+  the upgrade, compare `SELECT (max(issued_at) AT TIME ZONE '<zone>')::date FROM einvoice_issuance
+  WHERE series = '<series>'` with the date on that series' last document.
+- **Every guard function pins its search path.** Each trigger function of the script is created
+  with `SET search_path = pg_catalog, pg_temp`, so a role that can create objects in a schema on
+  its own path (the default for `public` on PostgreSQL 14 and older) cannot plant a look-alike
+  operator that makes a guard see "no difference". The final block of the script checks the pin on
+  every guard function and refuses with `EIU03` (`DEI-134`) otherwise. On 0.1.x, the guards that
+  shipped then do not pin it. On PostgreSQL 14 or older, run
+  `REVOKE CREATE ON SCHEMA public FROM PUBLIC` until you upgrade to this version.
+- **The issue date given to the allocator must be a date some time zone derives from the invoice
+  instant.** A far date is refused, because it would move the series date for good.
+- **The six `corrects_*` columns of a chained event are empty together or filled together.** The
+  table refuses a half-filled identity, and the reader treats one as a broken row.
+
 - **A configured intake with a missing renderer or validator fails startup, by name (D2-02).** The
   unit of work, the worker, the sweeper, the webhook controller and the health indicator are all
   conditional, transitively, on a `DocumentRenderer` and a `DocumentValidator` bean. Silently not

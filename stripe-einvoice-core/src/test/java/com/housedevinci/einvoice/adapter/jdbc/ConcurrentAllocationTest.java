@@ -95,6 +95,8 @@ class ConcurrentAllocationTest {
                             "",
                             "STRIPE",
                             newYear ? firstOfYear : lastOfYear,
+                            java.time.LocalDate.ofInstant(
+                                newYear ? firstOfYear : lastOfYear, java.time.ZoneOffset.UTC),
                             "fr"));
                 allocated.add(key.fiscalYear() + ":" + issuance.legalNumber().counter());
               } catch (InterruptedException e) {

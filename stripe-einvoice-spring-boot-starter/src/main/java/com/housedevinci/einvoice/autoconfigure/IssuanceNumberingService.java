@@ -10,6 +10,7 @@ import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.SeriesKey;
 import com.housedevinci.einvoice.domain.SeriesReport;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.Optional;
 
@@ -55,7 +56,13 @@ public class IssuanceNumberingService {
     }
     return allocator.allocate(
         new AllocationRequest(
-            seriesKeyFor(issuedAt), stripeInvoiceId, stripeAccountId, stripeNumber, issuedAt, ""));
+            seriesKeyFor(issuedAt),
+            stripeInvoiceId,
+            stripeAccountId,
+            stripeNumber,
+            issuedAt,
+            LocalDate.ofInstant(issuedAt, taxZone),
+            ""));
   }
 
   public Optional<Issuance> find(String stripeInvoiceId) {

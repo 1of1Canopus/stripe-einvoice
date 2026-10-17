@@ -29,6 +29,13 @@ public final class EInvoiceTables {
    */
   public static final String REPROCESS_REQUEST = "einvoice_reprocess_request";
 
+  /**
+   * The schema version row (format 2). The runtime role holds {@code SELECT} only; a host entity
+   * mapped over it is refused like every other table here, so nothing in the host can rewrite the
+   * gate that decides which version of this module may start.
+   */
+  public static final String SCHEMA = "einvoice_schema";
+
   public static final List<String> ALL =
       List.of(
           SERIES,
@@ -37,7 +44,8 @@ public final class EInvoiceTables {
           ISSUANCE_ANCHOR,
           INBOUND_EVENT,
           FINDING,
-          REPROCESS_REQUEST);
+          REPROCESS_REQUEST,
+          SCHEMA);
 
   private EInvoiceTables() {}
 

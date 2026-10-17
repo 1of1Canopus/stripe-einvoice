@@ -100,9 +100,51 @@ public final class PostgresSupport {
     config.setUsername(CONTAINER.getUsername());
     config.setPassword(CONTAINER.getPassword());
     config.setMaximumPoolSize(4);
+    config.setMinimumIdle(0);
+    config.setIdleTimeout(10_000);
     HikariDataSource fresh = new HikariDataSource(config);
     JdbcSupport.initializeSchema(fresh);
     return fresh;
+  }
+
+  /**
+   * A brand new database with <b>no</b> schema at all, for the upgrade probes: they install the
+   * released 0.1.0 script first and then upgrade it, which a database that already ran this
+   * version's script cannot show.
+   */
+  public static HikariDataSource emptyDatabase(String hint) {
+    dataSource();
+    String name =
+        ("einvoice_" + hint + "_" + SELLER_SEQUENCE.incrementAndGet())
+            .toLowerCase(java.util.Locale.ROOT);
+    execute("CREATE DATABASE " + name);
+    HikariConfig config = new HikariConfig();
+    config.setJdbcUrl(CONTAINER.getJdbcUrl().replaceFirst("/[^/?]+(\\?|$)", "/" + name + "$1"));
+    config.setUsername(CONTAINER.getUsername());
+    config.setPassword(CONTAINER.getPassword());
+    config.setMaximumPoolSize(4);
+    config.setMinimumIdle(0);
+    config.setIdleTimeout(10_000);
+    return new HikariDataSource(config);
+  }
+
+  /** A DataSource on the same database as {@code ds}, with connections opened as {@code role}. */
+  public static DataSource asRole(DataSource ds, String role, String password) {
+    HikariConfig config = new HikariConfig();
+    config.setJdbcUrl(((HikariDataSource) ds).getJdbcUrl());
+    config.setUsername(role);
+    config.setPassword(password);
+    config.setMaximumPoolSize(2);
+    config.setMinimumIdle(0);
+    config.setIdleTimeout(10_000);
+    return new HikariDataSource(config);
+  }
+
+  /** Closes a pool a probe opened, so a suite of fresh databases cannot exhaust the server. */
+  public static void close(DataSource ds) {
+    if (ds instanceof HikariDataSource hikari) {
+      hikari.close();
+    }
   }
 
   /** Runs a statement on a DataSource other than the shared one. */
