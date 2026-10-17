@@ -454,3 +454,128 @@ C08 and C09 mutations once they exist.
 Re-verification: the three pass-2 probes turn green, the two C08/C09 mutations go red, and a full
 verify passes. A design is not needed: C08 applies the NR-1 rule as written, and C09 narrows one
 existing check.
+
+## Pass 3 (2026-10-17), C08 and C09 only
+
+Head reviewed: `33ab5ad` (probes `45e0731`, fixes `33ab5ad`). Scope: D-A1-C08 and D-A1-C09, plus
+the PR body text of D-A1-C11. The other findings were not re-reviewed.
+
+**Verdict: MERGE WITH FIXES.** C08, C09 and C11 are closed. The pin works and its check reads the
+exact setting. One new LOW finding (D-A1-C12): the check looks up guard functions by name, not the
+function each trigger calls, and does not see a disabled trigger. No HIGH.
+
+### Numbers
+
+Docker up. Real PostgreSQL in Testcontainers. Targeted test runs only (no full verify in this
+pass), one Maven job at a time.
+
+| | |
+|---|---|
+| Pass-2 probes (3) + `SchemaSearchPathPinTest` (2), pinned image (PostgreSQL 16) | 5 of 5 green |
+| Same 5, `postgres:14` (14.24), image switched by hand in `PostgresSupport`, restored | 5 of 5 green |
+| Pass-3 probes (7), pinned image | 5 green, 2 red (D-A1-C12) |
+| Same 7, `postgres:14` | 5 green, 2 red (D-A1-C12) |
+| PR-body mutations re-run | 4 of 4 behave as the PR body states |
+
+Process note: my first targeted run started while a Maven job from another module was running. My
+wait loop gave up after two minutes instead of waiting. A second wait loop matched its own command
+line and never ran. Every result above comes from later runs that waited for the other job to end.
+The first run's results were the same.
+
+### C08 and C09: mutations from the PR body, re-run
+
+Each mutation alone, then restored with `git checkout`.
+
+| Mutation | Result |
+|---|---|
+| pin removed from the series insert guard, and the proconfig condition removed | `probe_a_runtime_role_operator_cannot_disarm_the_series_name_binding` red |
+| pin removed alone | the script refuses at install with `EIU03`, naming `einvoice_series_insert_guard`; both pin tests error at install |
+| proconfig condition removed alone (`AND true`) | `a_guard_function_without_the_pin_makes_the_final_block_refuse_with_eiu03` red |
+| slash-or-UTC condition removed | `probe_a_legacy_zone_name_is_refused_or_backfills_the_date_the_starter_derives` red |
+
+### C08: the questions asked
+
+- **A pin to another path does not satisfy the check.** The check needs the array element
+  `search_path=pg_catalog, pg_temp` exactly. With `SET search_path = public, pg_catalog` on one
+  guard, the script refuses with `EIU03`
+  (`probe_a_guard_pinned_to_public_first_still_fails_the_pin_check`, green). PostgreSQL keeps one
+  `search_path` entry per function, so a second entry cannot sit next to a good one.
+- **Every function the triggers call is in the list.** The trigger block binds 15 triggers to
+  exactly seven functions, and those seven are the ones checked. No guard calls a helper function:
+  the bodies call only built-ins (`format`, `btrim`, `quote_ident`) and run table reads through
+  `%I` with `TG_TABLE_SCHEMA`. But the check finds the functions by name in the module schema. It
+  does not ask which function each trigger calls. See D-A1-C12.
+- **A schema other than `public`.** The script installed into schema `acct`. Then a session with
+  `search_path = public` inserted into `acct.einvoice_series`. The series insert guard found its
+  table and refused a second type (`EIS01`). No module table was created in `public`
+  (`probe_the_pinned_guards_hold_when_the_module_schema_is_not_public`, green).
+- **An operator planted in `pg_temp`.** The documented runtime role created
+  `pg_temp.<>(varchar, varchar)` that always returns false, set `search_path = pg_temp, public`,
+  and inserted a second type. Refused with `EIS01`
+  (`probe_an_operator_planted_in_pg_temp_cannot_disarm_the_series_name_binding`, green on 16 and
+  14). I also moved `pg_temp` first in the pin (with the check off): the probe stayed green. So in
+  this case PostgreSQL itself does not let the temporary operator win, and the order is a second
+  layer. The probe proves the property, but it does not detect a change of order. That is not a
+  finding; it is the limit of this probe.
+
+### C09: the zone refusal
+
+Each case is a 0.1.0 database with one numbered row, upgraded with `einvoice.tax_zone` set.
+
+- Accepted: `Etc/UTC`, `Europe/Paris`, `UTC`, `Etc/GMT-2`
+  (`probe_region_ids_and_utc_are_accepted_by_the_backfill`, green).
+- Refused with `EIU02`: `CET`, `EST5EDT`, `GMT+1`, `GMT0`, `Europe/../CET`, `Nowhere/Else`,
+  `+02:00` (`probe_legacy_and_posix_zone_names_are_refused_by_the_backfill`, green).
+- On `postgres:14`, all 483 names that are `UTC` or contain a slash are valid JVM zone ids. So the
+  slash rule does not let through a name the starter could not send (such as `posix/...`).
+
+### Text checked
+
+`SECURITY-NOTES.md`, `docs/index.md`, `CHANGELOG.md`: no "cannot be bypassed" or similar. The
+sentence "a role that can create objects in a schema on its own path ... cannot plant a
+look-alike operator" is backed by the probes. The 0.1.x `REVOKE` advice is there. The Vancouver
+example and the check query use columns that exist (`issued_at`, `series`). D-A1-C11: the PR body
+no longer says the C03 probe is in the suite or that Build & test is red; the mutations are listed.
+**C08, C09, C11: closed.**
+
+### New finding
+
+#### D-A1-C12 · LOW · the final block checks guard functions by name, not what the triggers call
+
+**What goes wrong.** The C08 check reads `proconfig` of seven functions found by name in the
+module schema. The trigger check above it (C01) reads only that a trigger with the right name
+exists. Neither asks which function the trigger calls, or whether the trigger is on. So the script
+can finish as format 2 while a guard does nothing.
+
+Example: the owner runs `ALTER TABLE einvoice_series DISABLE TRIGGER einvoice_series_insert_guard`
+(for instance during a manual data fix) and forgets to turn it back on. Re-running the upgrade
+script gives no error. The same holds when the trigger is re-created on a function in another
+schema with no pin and no check in it.
+
+**Why LOW.** Only the table owner can disable or rebind a trigger, and the owner can remove any
+guard. So this is drift, not an attack. But the final block exists to refuse a schema that lacks a
+control (C01), and a disabled guard is a missing control.
+
+**Probes** (internal probe folder, `CipherProbePr33Pass3Test`):
+`probe_a_guard_trigger_bound_to_an_unpinned_function_fails_the_final_block`,
+`probe_a_disabled_guard_trigger_fails_the_final_block`. Both red on `33ab5ad`, on the pinned image
+and on `postgres:14`.
+
+**Fix (fix pass, correction).** In `schema-postgresql.sql`, final version block: replace the name
+loop of the pin check, and the three-trigger loop, with one loop over the same 15
+(trigger, table, function) rows the trigger block creates. Each row needs a `pg_trigger` row with
+the name, `tgrelid` = the module table, `NOT tgisinternal`, `tgenabled IN ('O','A')`, and
+`tgfoid = to_regprocedure(quote_ident(current_schema()) || '.' || fn || '()')`. The `pg_proc` row
+of that `tgfoid` must hold the pin. Otherwise `EIU03`, naming the trigger. (`'R'` is refused too:
+a replica-only trigger does not fire in a normal session.) Keep `SchemaSearchPathPinTest`. Add the
+seven pass-3 probes to the suite before the change. Mutation for the PR body: drop the `tgenabled`
+condition, and the disabled-trigger probe goes red.
+
+### Fix list for this pass
+
+| Id | Sev | Kind | Who |
+|---|---|---|---|
+| D-A1-C12 | LOW | code (final-block query) | fix pass |
+
+Re-verification: both C12 probes turn green, the mutation above goes red, and a full verify passes.
+No design page is needed: this widens an existing check.
