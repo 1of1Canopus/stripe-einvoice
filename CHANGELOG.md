@@ -6,6 +6,41 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Number series per document type (schema format 2).** The document type (BT-3) is part of the
+  series key: invoices (`380`) and credit notes (`381`) count in separate series, a series name
+  serves one type, and a legal number is unique per seller and mode across series. This edition
+  still issues invoices only: the allocator refuses any other type with `DEI-123` before it locks
+  anything.
+- **The corrected-invoice link.** `einvoice_issuance.corrects_issuance_id`, required for a credit
+  note and forbidden for an invoice by a `CHECK`, immutable, and bounded by the database: the target
+  must be an invoice of the same seller and mode that this module issued, whose stored hash still
+  matches its chained issue event (`DEI-128`). The chained event of a credit note records the
+  corrected invoice's full identity.
+- **The latest issue date of a series** (`einvoice_series.last_issue_date`). It moves only with
+  the counter and never backwards. A credit note dated before it is refused (`DEI-127`); an
+  invoice dated before it is numbered and recorded as an open finding `DEI-127`.
+- **Chain forms `ei3` and `ei4h`.** New events hash the document type and the corrected invoice.
+  The verifier still reads `ei1` and `ei2h`, reports how many rows it checked in each form, and
+  reports BROKEN when a series row's type disagrees with its events.
+- **Schema version gate.** A one-row `einvoice_schema` table, read at every boot. Codes `DEI-133`
+  (version row unreadable), `DEI-134` (upgrade refused, data unchanged), `DEI-135` (schema newer
+  than this version), `DEI-136` (schema not upgraded and `initialize-schema=false`).
+
+### Changed
+
+- **Upgrade from 0.1.x.** The bundled schema script upgrades a 0.1.x database in place, as the
+  schema owner, in one transaction, rewriting no number, hash or archived byte. Stop every 0.1.x
+  instance first; see "Upgrading a 0.1.x database to format 2" in `docs/index.md`. The runtime role
+  needs the new `SELECT` grant on `einvoice_schema` (`docs/schema-grants.sql`).
+- **`AllocationRequest` takes the issue date** (BT-2 as a date in the seller's tax zone) as a new
+  required component. Code that calls `NumberAllocator.allocate` directly must pass it;
+  `IssuanceNumberingService` is unchanged.
+- `SeriesKey`, `Issuance`, `IssuanceEvent`, `IssuanceEventReader.DisposedIssuance` and
+  `IssuanceChainVerifier.Report` carry the new fields. The earlier constructors of the first four
+  remain and mean an invoice.
+
 ### Fixed
 
 - The reference guard (`tools/check-private-references.sh`) now reads file names as well as
@@ -24,6 +59,15 @@ All notable changes to this project are documented here. The format follows
   directory entry, or a symlink member's stored target could carry text the content scan never
   read. Member names with an empty or `.` segment are refused by name. Content hits are printed
   with control bytes escaped, so a carriage return in a hit cannot start a workflow command.
+- **Security review of the typed number series (D-A1-C01, C02, C04, C05, C06, C07).** The version
+  stamp of the schema script is now one final block that checks every format-2 condition and
+  refuses with `EIU03` (`DEI-134`); the documented by-hand command is
+  `psql -X -v ON_ERROR_STOP=1 --single-transaction`. The two new insert guards qualify every table
+  they read with the trigger's schema, so a temporary table cannot shadow it. `AllocationRequest`
+  refuses an issue date no time zone derives from the invoice instant. The backfill refuses a tax
+  zone that is not a PostgreSQL region id. A chained event's six `corrects_*` columns are empty
+  together or filled together, and a half-filled row is a decode error. A probe now guards the
+  pre-seam clause of the chain verifier.
 - Build: the reference guard (`tools/check-private-references.sh`) now also refuses the first names of the studio's agents in the tree, the main jar and the sources jar, so public text keeps to roles. Case-sensitive and whole-word; the script's header lists each name left out and why. The jar scan reads class files as text, so a string length byte cannot read as a name on GNU grep.
 - After the security review of that change: a tab, form feed, vertical tab or carriage return
   before a name no longer hides it; only the JDK cipher class may follow a dot or a slash; the
@@ -42,6 +86,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- **Every guard function pins its search path (D-A1-C08).** Each trigger function the schema
+  script creates now carries `SET search_path = pg_catalog, pg_temp`, so a role that can create
+  objects in `public` (the default on PostgreSQL 14 and older) cannot plant a look-alike `<>`
+  operator that disarms a guard. The last block of the script checks the setting on every guard
+  function and refuses with `EIU03` (`DEI-134`) otherwise. The backfill now accepts only `UTC` or
+  a zone name with a slash, because legacy names such as `CET` are read differently by PostgreSQL
+  and the JVM (D-A1-C09).
+
+- **The final block checks the real trigger, not its name (D-A1-C12).** For each of the 15 guard
+  triggers it reads which function the trigger calls and whether it is on. It refuses with `EIU03`
+  (`DEI-134`) when a trigger is disabled, is bound to another function, or its function lacks the
+  pinned search path.
 - **`tools.jackson.core:jackson-databind` pinned to 3.1.7 (GHSA-q4xh-88c3-wmh7, HIGH, CVSS 7.5,
   denial of service; GHSA-cxp5-3px4-pw24, HIGH, quadratic-time forward-reference completion;
   GHSA-wv8q-qhhj-9h54, HIGH, retains every unknown raw type ID).** The Spring Boot 4.1.1

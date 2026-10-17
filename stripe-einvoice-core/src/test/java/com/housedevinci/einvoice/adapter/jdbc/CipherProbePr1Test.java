@@ -33,7 +33,14 @@ class CipherProbePr1Test {
   }
 
   private static AllocationRequest requestIn(SeriesKey k, String invoiceId, Instant issuedAt) {
-    return new AllocationRequest(k, invoiceId, "", "STRIPE-X", issuedAt, "fr-2026.1");
+    return new AllocationRequest(
+        k,
+        invoiceId,
+        "",
+        "STRIPE-X",
+        issuedAt,
+        java.time.LocalDate.ofInstant(issuedAt, java.time.ZoneOffset.UTC),
+        "fr-2026.1");
   }
 
   private static JdbcIssuanceStore storeFor(String seller, SeriesDefinition def) {
@@ -77,14 +84,20 @@ class CipherProbePr1Test {
     store.voidUnused(new VoidRequest(seller, Mode.LIVE, "in_a", "probe disposition", ""));
     // An out-of-band row, inserted by a host's own JdbcTemplate, already disposed, carrying the
     // same legal number in the next fiscal year. No chained event exists for it.
-    PostgresSupport.executeOn(
-        ds,
+    String forged =
         "INSERT INTO einvoice_issuance (seller_id, mode, stripe_invoice_id, series, fiscal_year,"
             + " legal_number, counter, issued_at, allocated_at, rule_pack_version, state,"
-            + " void_reason) VALUES ('"
+            + " void_reason, document_type) VALUES ('"
             + seller
             + "','live','in_forged','DEFAULT',2027,'INV-2026-000001',1, now(), now(), 'x',"
-            + " 'VOID_UNUSED','forged')");
+            + " 'VOID_UNUSED','forged','380')";
+    // Format 2 refuses this row outright: a legal number is unique per seller and mode. The
+    // cross-check below is the second line, for a role that can also drop the index, so the index
+    // is dropped on this probe's own database to keep that second line under test.
+    assertThatThrownBy(() -> PostgresSupport.executeOn(ds, forged))
+        .hasMessageContaining("einvoice_issuance_number_unique");
+    PostgresSupport.executeOn(ds, "DROP INDEX einvoice_issuance_number_unique");
+    PostgresSupport.executeOn(ds, forged);
     IssuanceChainVerifier verifier =
         new IssuanceChainVerifier(
             store, store, Map.of("k1", "0123456789abcdef0123456789abcdef".getBytes()));

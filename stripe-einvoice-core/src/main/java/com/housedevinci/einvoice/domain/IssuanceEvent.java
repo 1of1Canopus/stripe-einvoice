@@ -1,6 +1,7 @@
 package com.housedevinci.einvoice.domain;
 
 import java.time.Instant;
+import java.util.Optional;
 
 /**
  * One chained row in the issuance log: a number reached a disposition, and this is the proof that
@@ -31,7 +32,81 @@ public record IssuanceEvent(
     String chainVersion,
     String keyId,
     String prevHash,
-    String hash) {
+    String hash,
+    Optional<CorrectionTarget> corrects) {
+
+  public IssuanceEvent {
+    corrects = corrects == null ? Optional.empty() : corrects;
+  }
+
+  /** An invoice event, which corrects nothing: the shape of every 0.1.0 row. */
+  public IssuanceEvent(
+      long sequence,
+      Instant timestamp,
+      SeriesKey seriesKey,
+      String stripeInvoiceId,
+      String stripeAccountId,
+      String stripeNumber,
+      LegalNumber legalNumber,
+      IssuanceState state,
+      Instant issuedAt,
+      String documentSha256,
+      String archiveKey,
+      String rulePackVersion,
+      String voidReason,
+      String voidRuleId,
+      String chainVersion,
+      String keyId,
+      String prevHash,
+      String hash) {
+    this(
+        sequence,
+        timestamp,
+        seriesKey,
+        stripeInvoiceId,
+        stripeAccountId,
+        stripeNumber,
+        legalNumber,
+        state,
+        issuedAt,
+        documentSha256,
+        archiveKey,
+        rulePackVersion,
+        voidReason,
+        voidRuleId,
+        chainVersion,
+        keyId,
+        prevHash,
+        hash,
+        Optional.empty());
+  }
+
+  /**
+   * The same event, carrying the full identity of the invoice it corrects (D-PS1-37). The store
+   * reads that identity from the target row when it appends the event, never from the caller.
+   */
+  public IssuanceEvent withCorrection(CorrectionTarget target) {
+    return new IssuanceEvent(
+        sequence,
+        timestamp,
+        seriesKey,
+        stripeInvoiceId,
+        stripeAccountId,
+        stripeNumber,
+        legalNumber,
+        state,
+        issuedAt,
+        documentSha256,
+        archiveKey,
+        rulePackVersion,
+        voidReason,
+        voidRuleId,
+        chainVersion,
+        keyId,
+        prevHash,
+        hash,
+        Optional.of(target));
+  }
 
   public IssuanceEvent withChain(String prevHash, String chainVersion, String keyId, String hash) {
     return new IssuanceEvent(
@@ -52,7 +127,8 @@ public record IssuanceEvent(
         chainVersion,
         keyId,
         prevHash,
-        hash);
+        hash,
+        corrects);
   }
 
   public IssuanceEvent withSequence(long sequence) {
@@ -74,7 +150,8 @@ public record IssuanceEvent(
         chainVersion,
         keyId,
         prevHash,
-        hash);
+        hash,
+        corrects);
   }
 
   /**
@@ -107,7 +184,8 @@ public record IssuanceEvent(
         base.chainVersion(),
         base.keyId(),
         base.prevHash(),
-        base.hash());
+        base.hash(),
+        base.corrects());
   }
 
   /** The disposition event for a number that will never carry a document. */

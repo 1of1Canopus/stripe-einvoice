@@ -310,6 +310,7 @@ public final class IssuanceUnitOfWork {
                   invoice.accountId(),
                   invoice.number(),
                   invoice.finalizedAt(),
+                  mapping.issueDate(),
                   configuration.rulePackVersion()));
     } catch (EInvoiceException e) {
       if (ErrorCodes.ISSUANCE_ALREADY_CLAIMED.equals(e.code())) {

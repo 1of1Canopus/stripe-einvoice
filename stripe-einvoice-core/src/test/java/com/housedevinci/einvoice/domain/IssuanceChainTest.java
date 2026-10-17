@@ -59,7 +59,7 @@ class IssuanceChainTest {
   void a_keyed_row_is_not_recomputable_by_an_unkeyed_verifier() {
     IssuanceEvent keyed =
         IssuanceChain.keyed(SECRET, "k1").link(event("r", ""), IssuanceChain.GENESIS);
-    assertThat(keyed.chainVersion()).isEqualTo(IssuanceChain.KEYED_VERSION);
+    assertThat(keyed.chainVersion()).isEqualTo(IssuanceChain.TYPED_KEYED_VERSION);
     assertThat(IssuanceChain.unkeyed().verify(keyed, IssuanceChain.GENESIS)).isFalse();
   }
 
@@ -89,7 +89,7 @@ class IssuanceChainTest {
   void an_unkeyed_chain_reports_its_own_version_and_key_id() {
     IssuanceChain unkeyed = IssuanceChain.unkeyed();
     assertThat(unkeyed.isKeyed()).isFalse();
-    assertThat(unkeyed.version()).isEqualTo(IssuanceChain.CANONICAL_VERSION);
+    assertThat(unkeyed.version()).isEqualTo(IssuanceChain.TYPED_VERSION);
     assertThat(unkeyed.keyId()).isEqualTo(IssuanceChain.UNKEYED_KEY_ID);
   }
 }
