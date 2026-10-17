@@ -1462,7 +1462,9 @@ public final class JdbcIssuanceStore
       // it, so a row that has it was written around the table, and the verifier reports BROKEN.
       throw new EInvoiceException(
           ErrorCodes.INVALID,
-          "chained event " + rs.getLong("seq") + " carries a corrected-invoice identity without"
+          "chained event "
+              + rs.getLong("seq")
+              + " carries a corrected-invoice identity without"
               + " its row id");
     }
     Optional<CorrectionTarget> target =

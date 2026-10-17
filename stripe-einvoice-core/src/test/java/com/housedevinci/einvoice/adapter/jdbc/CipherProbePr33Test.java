@@ -32,8 +32,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
- * Security review of the typed number series (format 2), pass 1. Each probe failed on the branch
- * as reviewed; each states the property, not the fix, so any correct fix turns it green.
+ * Security review of the typed number series (format 2), pass 1. Each probe failed on the branch as
+ * reviewed; each states the property, not the fix, so any correct fix turns it green.
  */
 class CipherProbePr33Test {
 
@@ -97,7 +97,11 @@ class CipherProbePr33Test {
     boolean quote = false;
     for (int i = 0; i < script.length(); i++) {
       char ch = script.charAt(i);
-      if (!dollar && !quote && ch == '-' && i + 1 < script.length() && script.charAt(i + 1) == '-') {
+      if (!dollar
+          && !quote
+          && ch == '-'
+          && i + 1 < script.length()
+          && script.charAt(i + 1) == '-') {
         int nl = script.indexOf('\n', i);
         i = nl < 0 ? script.length() : nl;
         cur.append('\n');
@@ -135,7 +139,12 @@ class CipherProbePr33Test {
       c.setAutoCommit(false);
       for (int i = 0; i < seriesAndIds.length; i += 2) {
         Format1.number(
-            c, SELLER, seriesAndIds[i], 2026, seriesAndIds[i + 1], Instant.parse("2026-01-20T23:00:00Z"));
+            c,
+            SELLER,
+            seriesAndIds[i],
+            2026,
+            seriesAndIds[i + 1],
+            Instant.parse("2026-01-20T23:00:00Z"));
       }
       c.commit();
     } catch (SQLException e) {
@@ -162,10 +171,10 @@ class CipherProbePr33Test {
   // ------------------------------------------------------------------ F-1 (MEDIUM)
 
   /**
-   * The upgrade note says to run the script "by hand with psql" and to set the zone first. An
-   * owner who forgets the zone gets the script's own refusal ("nothing was changed"), and psql
-   * runs on: the version row is stamped 2 while the series with rows has no latest date. The
-   * version gate then vouches for a schema the upgrade never finished.
+   * The upgrade note says to run the script "by hand with psql" and to set the zone first. An owner
+   * who forgets the zone gets the script's own refusal ("nothing was changed"), and psql runs on:
+   * the version row is stamped 2 while the series with rows has no latest date. The version gate
+   * then vouches for a schema the upgrade never finished.
    */
   @Test
   void probe_a_by_hand_upgrade_refused_for_the_zone_is_never_accepted_as_format_2() {
@@ -200,7 +209,9 @@ class CipherProbePr33Test {
     assertThat(startup)
         .as("a schema without the legal-number uniqueness must not pass the format-2 gate")
         .isInstanceOf(EInvoiceException.class);
-    Throwable init = catchThrowable(() -> JdbcSupport.initializeSchema(ds, Optional.of(ZoneId.of("Europe/Paris"))));
+    Throwable init =
+        catchThrowable(
+            () -> JdbcSupport.initializeSchema(ds, Optional.of(ZoneId.of("Europe/Paris"))));
     assertThat(init)
         .as("the starter's own path must not return early on it either")
         .isInstanceOf(EInvoiceException.class);
@@ -209,10 +220,10 @@ class CipherProbePr33Test {
   // ------------------------------------------------------------------ F-2 (LOW)
 
   /**
-   * S-09: one series name serves one document type for a seller and mode, in every fiscal year.
-   * The insert guard checks with a plain EXISTS, which cannot see another transaction's uncommitted
-   * row, and no index covers "same name, other year, other type". Two writers seeding the name
-   * for two years at once both commit.
+   * S-09: one series name serves one document type for a seller and mode, in every fiscal year. The
+   * insert guard checks with a plain EXISTS, which cannot see another transaction's uncommitted
+   * row, and no index covers "same name, other year, other type". Two writers seeding the name for
+   * two years at once both commit.
    */
   @Test
   void probe_one_series_name_never_binds_two_types_under_concurrent_inserts() throws Exception {
@@ -253,11 +264,11 @@ class CipherProbePr33Test {
   // ------------------------------------------------------------------ F-3 (LOW)
 
   /**
-   * The series' latest date only moves forward and nothing lowers it. The allocator takes BT-2 as
-   * a date from the caller and never checks it against the instant it was derived from, so one
-   * direct call with a far date moves {@code last_issue_date} to it for good: every later invoice
-   * of the series is then an open DEI-127, and every later credit note of a credit series is
-   * refused. No time zone puts 2026-03-10T10:00Z on 1 January 2099.
+   * The series' latest date only moves forward and nothing lowers it. The allocator takes BT-2 as a
+   * date from the caller and never checks it against the instant it was derived from, so one direct
+   * call with a far date moves {@code last_issue_date} to it for good: every later invoice of the
+   * series is then an open DEI-127, and every later credit note of a credit series is refused. No
+   * time zone puts 2026-03-10T10:00Z on 1 January 2099.
    */
   @Test
   void probe_an_issue_date_no_zone_can_derive_from_issued_at_never_moves_the_series_date() {
@@ -300,9 +311,11 @@ class CipherProbePr33Test {
   @ValueSource(strings = {"+02:00", "UTC+02:00"})
   void probe_the_backfilled_date_is_the_date_the_starter_derives_in_the_same_zone(String zone) {
     DataSource ds = released("pr33zone", "DEFAULT", "in_1");
-    LocalDate javaDate = LocalDate.ofInstant(Instant.parse("2026-01-20T23:00:00Z"), ZoneId.of(zone));
+    LocalDate javaDate =
+        LocalDate.ofInstant(Instant.parse("2026-01-20T23:00:00Z"), ZoneId.of(zone));
 
-    Throwable upgrade = catchThrowable(() -> JdbcSupport.initializeSchema(ds, Optional.of(ZoneId.of(zone))));
+    Throwable upgrade =
+        catchThrowable(() -> JdbcSupport.initializeSchema(ds, Optional.of(ZoneId.of(zone))));
 
     if (upgrade == null) {
       assertThat(lastIssueDate(ds, "DEFAULT")).contains(javaDate);
@@ -323,16 +336,20 @@ class CipherProbePr33Test {
   @Test
   void probe_a_correction_identity_planted_on_an_invoice_event_is_refused_or_broken() {
     DataSource ds = opened(PostgresSupport.freshDatabase("pr33plant"));
-    DocumentSeriesFixture f = new DocumentSeriesFixture(ds, PostgresSupport.freshSeller("pr33plant"));
+    DocumentSeriesFixture f =
+        new DocumentSeriesFixture(ds, PostgresSupport.freshSeller("pr33plant"));
     f.issuedInvoice("in_a", MARCH_10);
     IssuanceChainVerifier verifier =
         new IssuanceChainVerifier(
-            f.store, f.store, Map.of(Format1.KEY_ID, Format1.SECRET.getBytes(StandardCharsets.UTF_8)));
+            f.store,
+            f.store,
+            Map.of(Format1.KEY_ID, Format1.SECRET.getBytes(StandardCharsets.UTF_8)));
     assertThat(verifier.verify().status()).isEqualTo(Status.INTACT);
 
     boolean refused = false;
     PostgresSupport.executeOn(
-        ds, "ALTER TABLE einvoice_issuance_event DISABLE TRIGGER einvoice_issuance_event_append_only");
+        ds,
+        "ALTER TABLE einvoice_issuance_event DISABLE TRIGGER einvoice_issuance_event_append_only");
     try {
       PostgresSupport.executeOn(
           ds,
@@ -343,7 +360,8 @@ class CipherProbePr33Test {
       refused = true;
     } finally {
       PostgresSupport.executeOn(
-          ds, "ALTER TABLE einvoice_issuance_event ENABLE TRIGGER einvoice_issuance_event_append_only");
+          ds,
+          "ALTER TABLE einvoice_issuance_event ENABLE TRIGGER einvoice_issuance_event_append_only");
     }
 
     if (!refused) {
@@ -359,15 +377,16 @@ class CipherProbePr33Test {
    * The runtime role holds TEMPORARY on the database by default. Two temporary tables that say
    * "ISSUED" make the database accept a credit note against a number that was never issued: the
    * bound of D-CNS-S12, "for every writer", does not hold for the role the triggers exist to bind.
-   * By hand: CREATE TEMP TABLE einvoice_issuance AS SELECT * FROM public.einvoice_issuance WHERE
-   * id = :target; UPDATE it to ISSUED with a hash; CREATE TEMP TABLE einvoice_issuance_event with
-   * one ISSUED row of that number and hash; INSERT INTO public.einvoice_issuance ... '381', :target.
+   * By hand: CREATE TEMP TABLE einvoice_issuance AS SELECT * FROM public.einvoice_issuance WHERE id
+   * = :target; UPDATE it to ISSUED with a hash; CREATE TEMP TABLE einvoice_issuance_event with one
+   * ISSUED row of that number and hash; INSERT INTO public.einvoice_issuance ... '381', :target.
    */
   @Test
   void probe_the_runtime_role_cannot_shadow_the_target_bound_with_temporary_tables()
       throws SQLException {
     DataSource ds = opened(PostgresSupport.freshDatabase("pr33shadow"));
-    DocumentSeriesFixture f = new DocumentSeriesFixture(ds, PostgresSupport.freshSeller("pr33shadow"));
+    DocumentSeriesFixture f =
+        new DocumentSeriesFixture(ds, PostgresSupport.freshSeller("pr33shadow"));
     Issuance numbered = f.invoice("in_never_issued", MARCH_10);
     DataSource runtime =
         opened(SchemaGrants.roleWithDocumentedGrants(ds, "einvoice_pr33shadow", "probe"));
@@ -377,7 +396,8 @@ class CipherProbePr33Test {
       st.execute(
           "CREATE TEMP TABLE einvoice_issuance AS SELECT * FROM public.einvoice_issuance WHERE id = "
               + numbered.id());
-      st.execute("UPDATE einvoice_issuance SET state = 'ISSUED', document_sha256 = repeat('f', 64)");
+      st.execute(
+          "UPDATE einvoice_issuance SET state = 'ISSUED', document_sha256 = repeat('f', 64)");
       st.execute(
           "CREATE TEMP TABLE einvoice_issuance_event (seq bigint, seller_id text, mode text,"
               + " legal_number text, state text, document_sha256 text)");
@@ -468,10 +488,38 @@ class CipherProbePr33Test {
       String n2 = Format1.number(c, SELLER, "DEFAULT", 2026, "in_two", jan15);
       String sha = DocumentSeriesFixture.sha("one");
       String h1 =
-          Format1.dispose(c, SELLER, "DEFAULT", 2026, "in_one", n1, 1, "ISSUED", sha,
-              "live/" + n1 + "-" + sha + ".xml", "", jan15, jan15, IssuanceChain.GENESIS, 1);
-      Format1.dispose(c, SELLER, "DEFAULT", 2026, "in_two", n2, 2, "VOID_UNUSED", "", "",
-          "never sent", jan15, jan15, h1, 2);
+          Format1.dispose(
+              c,
+              SELLER,
+              "DEFAULT",
+              2026,
+              "in_one",
+              n1,
+              1,
+              "ISSUED",
+              sha,
+              "live/" + n1 + "-" + sha + ".xml",
+              "",
+              jan15,
+              jan15,
+              IssuanceChain.GENESIS,
+              1);
+      Format1.dispose(
+          c,
+          SELLER,
+          "DEFAULT",
+          2026,
+          "in_two",
+          n2,
+          2,
+          "VOID_UNUSED",
+          "",
+          "",
+          "never sent",
+          jan15,
+          jan15,
+          h1,
+          2);
       c.commit();
     }
     JdbcSupport.initializeSchema(ds, Optional.of(ZoneId.of("Europe/Paris")));
@@ -491,15 +539,18 @@ class CipherProbePr33Test {
     long target =
         PostgresSupport.scalarOn(
             ds, "SELECT id FROM einvoice_issuance WHERE stripe_invoice_id = 'in_one'");
-    PostgresSupport.executeOn(ds, "ALTER TABLE einvoice_issuance DISABLE TRIGGER einvoice_issuance_guard");
+    PostgresSupport.executeOn(
+        ds, "ALTER TABLE einvoice_issuance DISABLE TRIGGER einvoice_issuance_guard");
     PostgresSupport.executeOn(
         ds,
         "UPDATE einvoice_issuance SET document_type = '381', corrects_issuance_id = "
             + target
             + " WHERE stripe_invoice_id = 'in_two'");
-    PostgresSupport.executeOn(ds, "ALTER TABLE einvoice_issuance ENABLE TRIGGER einvoice_issuance_guard");
     PostgresSupport.executeOn(
-        ds, "ALTER TABLE einvoice_issuance_event DISABLE TRIGGER einvoice_issuance_event_append_only");
+        ds, "ALTER TABLE einvoice_issuance ENABLE TRIGGER einvoice_issuance_guard");
+    PostgresSupport.executeOn(
+        ds,
+        "ALTER TABLE einvoice_issuance_event DISABLE TRIGGER einvoice_issuance_event_append_only");
     PostgresSupport.executeOn(
         ds,
         "UPDATE einvoice_issuance_event SET document_type = '381', corrects_issuance_id = "
@@ -511,7 +562,8 @@ class CipherProbePr33Test {
             + n1
             + "' WHERE stripe_invoice_id = 'in_two'");
     PostgresSupport.executeOn(
-        ds, "ALTER TABLE einvoice_issuance_event ENABLE TRIGGER einvoice_issuance_event_append_only");
+        ds,
+        "ALTER TABLE einvoice_issuance_event ENABLE TRIGGER einvoice_issuance_event_append_only");
 
     assertThat(verifier.verify().status()).isEqualTo(Status.BROKEN);
   }

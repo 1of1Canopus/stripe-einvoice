@@ -54,9 +54,9 @@ public record AllocationRequest(
   }
 
   /**
-   * D-A1-C04. The series keeps the latest issue date it numbered and nothing lowers it, so one
-   * date no tax zone could derive from {@code issuedAt} would move it for good. The record does
-   * not know the zone, but every real zone lies between the two extreme offsets.
+   * D-A1-C04. The series keeps the latest issue date it numbered and nothing lowers it, so one date
+   * no tax zone could derive from {@code issuedAt} would move it for good. The record does not know
+   * the zone, but every real zone lies between the two extreme offsets.
    */
   private static void requireDateReachableFrom(Instant issuedAt, LocalDate issueDate) {
     try {

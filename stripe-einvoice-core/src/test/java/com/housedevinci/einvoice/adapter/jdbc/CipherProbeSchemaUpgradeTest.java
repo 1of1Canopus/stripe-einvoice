@@ -323,9 +323,12 @@ class CipherProbeSchemaUpgradeTest {
         "ALTER TABLE einvoice_issuance_event DISABLE TRIGGER einvoice_issuance_event_append_only");
     PostgresSupport.executeOn(
         ds,
-        "UPDATE einvoice_issuance_event SET document_type = '381', corrects_issuance_id = "
+        "UPDATE einvoice_issuance_event e SET document_type = '381', corrects_issuance_id = t.id,"
+            + " corrects_seller_id = t.seller_id, corrects_mode = t.mode,"
+            + " corrects_series = t.series, corrects_fiscal_year = t.fiscal_year,"
+            + " corrects_legal_number = t.legal_number FROM einvoice_issuance t WHERE t.id = "
             + one
-            + " WHERE stripe_invoice_id = 'in_two'");
+            + " AND e.stripe_invoice_id = 'in_two'");
     assertThat(verifier(store(ds)).verify().status()).isEqualTo(Status.BROKEN);
   }
 

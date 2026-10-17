@@ -139,15 +139,18 @@ class CipherProbeTypedChainTest {
   @Test
   void probe_flipping_the_type_of_a_post_seam_event_is_broken() {
     Trail t = trail("flipevent");
-    // document_type and corrects_issuance_id together, so the row's own CHECK holds: the hash is
-    // what refuses it.
+    // document_type and the six corrects_* columns together, so the row's own CHECK holds: the
+    // hash is what refuses it.
     asOwner(
         t.f().dataSource,
         "einvoice_issuance_event",
         "einvoice_issuance_event_append_only",
-        "UPDATE einvoice_issuance_event SET document_type = '381', corrects_issuance_id = "
+        "UPDATE einvoice_issuance_event e SET document_type = '381', corrects_issuance_id = t.id,"
+            + " corrects_seller_id = t.seller_id, corrects_mode = t.mode,"
+            + " corrects_series = t.series, corrects_fiscal_year = t.fiscal_year,"
+            + " corrects_legal_number = t.legal_number FROM einvoice_issuance t WHERE t.id = "
             + t.a().id()
-            + " WHERE stripe_invoice_id = 'in_b'");
+            + " AND e.stripe_invoice_id = 'in_b'");
 
     assertThat(verifier(t.f().store).verify().status()).isEqualTo(Status.BROKEN);
   }
