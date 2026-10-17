@@ -81,6 +81,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Security review of the invoice date order (D-PR36-1 to 5).** Lateness (`DEI-137`, the cause)
+  is counted from the day Stripe finalised the invoice, also when an invoicing period is written.
+  The chain verifier compares each disposed row's dates with its chained event, and a void event
+  now carries the dates. `DEI-130` tells the operator to check both clocks against NTP before
+  touching the series. The module's validator refuses a document whose BT-2, BT-72 or BG-14
+  differs from the allocation (rule `EINVOICE-DATES`). A test reads the production issue clock
+  against the real time in three session zones.
 - **Security review of the typed number series (D-A1-C01, C02, C04, C05, C06, C07).** The version
   stamp of the schema script is now one final block that checks every format-2 condition and
   refuses with `EIU03` (`DEI-134`); the documented by-hand command is
