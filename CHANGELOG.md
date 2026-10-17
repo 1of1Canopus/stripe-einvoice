@@ -70,9 +70,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- **The planted-operator exposure is stated for upgraded databases (D-ADV-1).** The exposure is
+  any database where the application role may `CREATE` in schema `public`: the default on
+  PostgreSQL 14 and older, and kept on 15 and newer after an upgrade or a dump restore. Only a
+  database created new on 15 or newer refuses by default. The `REVOKE CREATE ON SCHEMA public
+  FROM PUBLIC` workaround stays. An operator planted before the `REVOKE` keeps working, so
+  SECURITY-NOTES now also gives the queries that list the operators and functions the role owns.
 - **Every guard function pins its search path (D-A1-C08).** Each trigger function the schema
   script creates now carries `SET search_path = pg_catalog, pg_temp`, so a role that can create
-  objects in `public` (the default on PostgreSQL 14 and older) cannot plant a look-alike `<>`
+  objects in `public` (the default on PostgreSQL 14 and older, and kept on 15 and newer after an
+  upgrade or a dump restore) cannot plant a look-alike `<>`
   operator that disarms a guard. The last block of the script checks the setting on every guard
   function and refuses with `EIU03` (`DEI-134`) otherwise. The backfill now accepts only `UTC` or
   a zone name with a slash, because legacy names such as `CET` are read differently by PostgreSQL
