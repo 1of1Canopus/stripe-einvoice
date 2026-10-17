@@ -148,13 +148,31 @@ module is where that is set out.
 
 ## Residual risks on the issuance path
 
-- **Invoice dates can run backwards inside a series, in 0.1.x and in this version.** An invoice is
-  dated by Stripe's finalisation time, and it is numbered when its work reaches the allocator. A
-  late webhook, a retry, a reprocess or the reconciliation sweep can number an older invoice after
-  a newer one. 0.1.x did this silently. This version numbers it anyway and records an open finding
-  `DEI-127` that names the number, so every case is visible. It does not yet prevent it; a separate
-  change addresses the order of dates. Nothing in this module claims that numbering is
-  chronological.
+- **Invoice dates ran backwards inside a series in 0.1.x.** Up to 0.1.x an invoice was dated by
+  Stripe's finalisation time and numbered when its work reached the allocator, so a late webhook,
+  a retry, a park, a reprocess or the reconciliation sweep could give an older date to a later
+  number. From 0.2.0 the issue date is the day the number is given, read from the database clock
+  under the series lock, and the day of the sale travels as the supply date (BT-72) or the
+  invoicing period (BG-14). The documents 0.1.x already issued keep their dates; nothing rewrites a
+  number, a hash or an archived byte. To find them, read the series report: a line from before the
+  upgrade carries no dating, and `dateOutOfOrder()` is true on each such line whose date is earlier
+  than a date of a lower number. Nothing in this module claims that numbering is chronological.
+- **The issue date trusts the database clock, checked against a second clock.** Several instances
+  share one series row, so the date comes from one clock, the database's, never from an instance.
+  A database clock that is wrong is refused, not believed: behind the series or behind Stripe's own
+  finalisation time, or more than `einvoice.numbering.max-clock-regression` apart from the
+  application clock (`DEI-132`), or with a series dated more than a day ahead (`DEI-130`). What
+  remains: both clocks wrong by the same amount, in the same direction, by less than a day. Run NTP
+  on the database host and on the application hosts.
+- **The supply date is a proxy.** BT-72 is the day Stripe finalised the invoice, which is not
+  always the day of the sale. BG-14 is written only when every line names the same Stripe service
+  period. The legal reading of which date a document must carry when it is issued late is a
+  question for counsel, asked before 0.2.0 is released.
+- **The tests move the database clock from Java, not from the database.** The production statement
+  is `SELECT pg_catalog.clock_timestamp()`, schema-qualified, with no wrapper function, so a role
+  that may create a function on the search path cannot redefine an invoice's date; a probe holds
+  that. The tests use a package-private seam that runs the same statement on the same connection
+  and then shifts the answer. The public constructors of the store always use the database clock.
 - **Mixed versions during the upgrade to format 2.** A 0.1.x instance left running against an
   upgraded database cannot number anything (its inserts fail and roll back), but its verifier
   reports BROKEN on rows written in the new form. That verdict is meaningless. Stop every 0.1.x

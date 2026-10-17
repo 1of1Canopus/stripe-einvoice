@@ -66,12 +66,10 @@ a report of rules that did not match is not a report that they passed.
 `fatal`, `error` and `warning` make a document invalid. `information` does not; the finding is
 recorded and reported, never filtered.
 
-One informational finding is expected today and is not silenced:
-
-> **BR-DE-TMP-32** - an invoice should state a delivery date (BT-72), an invoicing period (BG-14) or
-> a per-line period (BG-26). This edition carries none of the three, because the authoritative
-> invoice it reads does not yet carry a line period. The rule's own flag is `information`, so the
-> document is valid; a test asserts that this finding, and only this finding, appears.
+No informational finding is expected. Up to 0.1.x one was: **BR-DE-TMP-32** - an invoice should
+state a delivery date (BT-72), an invoicing period (BG-14) or a per-line period (BG-26). Since the
+issue date became the numbering day, every invoice carries BT-72 or BG-14, and a test asserts that
+an XRechnung invoice now raises no finding at all.
 
 ### The XSLT processor
 
@@ -137,7 +135,9 @@ naming the Stripe field, never a blank element.
 | BT | UBL | Source | Notes |
 |---|---|---|---|
 | BT-1 | `cbc:ID` | **this module's legal number** | Never Stripe's. Decision 2: we allocate, Stripe's own number is a reference |
-| BT-2 | `cbc:IssueDate` | `status_transitions.finalized_at`, converted in `einvoice.seller.tax-zone` | Required property, no default. A 23:30 UTC invoice lands in the day its tax authority would put it in |
+| BT-2 | `cbc:IssueDate` | **the day the number is given**: the database clock read after the series lock, converted in `einvoice.seller.tax-zone` | Required property, no default. From 0.2.0; up to 0.1.x it was the day of `finalized_at`. See "The issue date is the numbering day" in `index.md` |
+| BT-72 | `cac:Delivery/cbc:ActualDeliveryDate` | the day of `status_transitions.finalized_at`, in the tax zone | A proxy for the supply date: the day Stripe finalised the invoice. Written when the lines share no service period |
+| BG-14 (BT-73, BT-74) | `cac:InvoicePeriod/cbc:StartDate`, `cbc:EndDate` | the lines' `period.start` and `period.end`, only when every line names the same period | `end` is exclusive at Stripe, so BT-74 is the day before it. Invoice-level `period_start`/`period_end` are not used: they describe the invoice's own window. Written instead of BT-72 |
 | BT-3 | `cbc:InvoiceTypeCode` / `cbc:CreditNoteTypeCode` | 380, or 381 on a credit note | 384 exists and is written only when a caller asks |
 | BT-5 | `cbc:DocumentCurrencyCode` | `currency`, upper-cased | Refused if the exponent table does not list it |
 | BT-9 | `cbc:DueDate` | not mapped in 0.1.0 | Omitted rather than guessed |
