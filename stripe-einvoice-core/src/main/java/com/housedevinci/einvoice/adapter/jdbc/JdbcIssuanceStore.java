@@ -520,9 +520,11 @@ public final class JdbcIssuanceStore
             locked.previousNumber(),
             Optional.ofNullable(locked.lastIssueDate()),
             Optional.empty());
+    // D-PR36-1: lateness is measured from the day Stripe finalised the invoice, for a delivery
+    // date and an invoicing period alike. One value feeds the cause and the finding.
+    long daysLate = draft.daysAfter(supplyDay);
     DateGapCause cause =
-        JdbcDateGapCauses.derive(
-            c, scope, request.stripeInvoiceId(), draft.daysAfterSupply(), supplyDay, taxZone);
+        JdbcDateGapCauses.derive(c, scope, request.stripeInvoiceId(), daysLate, supplyDay, taxZone);
     IssueDating dating =
         new IssueDating(
             draft.issueDate(),
@@ -532,7 +534,7 @@ public final class JdbcIssuanceStore
             draft.previousNumber(),
             draft.previousIssueDate(),
             Optional.of(cause));
-    if (dating.daysAfterSupply() > 1) {
+    if (daysLate > 1) {
       // Not a refusal: the number and a true issue date are given. The delay is not silent: an
       // open finding names the number, in the same transaction as the number itself.
       recordFinding(c, scope, ErrorCodes.ISSUED_LATE, number.value());
@@ -541,7 +543,7 @@ public final class JdbcIssuanceStore
               + " recorded as finding {}",
           number.value(),
           key.series(),
-          dating.daysAfterSupply(),
+          daysLate,
           cause.wire(),
           ErrorCodes.ISSUED_LATE);
     }
@@ -590,8 +592,11 @@ public final class JdbcIssuanceStore
       throw new EInvoiceException(
           ErrorCodes.SERIES_DATE_IN_FUTURE,
           "this series' latest issue date is more than one day after today on the database clock."
-              + " Nothing was numbered. Find who moved the series row in the issuance chain, then"
-              + " correct last_issue_date as the schema owner with a recorded reason.");
+              + " Nothing was numbered. First check the database and application clocks against"
+              + " an external time source (NTP): if both stepped back together, fix them and"
+              + " retry, and do not touch the series. Only if both clocks are right, look in the"
+              + " issuance chain for who moved the series row, then correct last_issue_date as"
+              + " the schema owner with a recorded reason.");
     }
     // 5.2: the issue day is earlier than a date this series already gave. Only a clock that
     // stepped back does that; waiting fixes it, so a small regression retries.
@@ -1228,8 +1233,11 @@ public final class JdbcIssuanceStore
               + " numbering series carry a latest issue date more than one day after today on the"
               + " database clock (findings "
               + ErrorCodes.SERIES_DATE_IN_FUTURE
-              + " name them). Find who moved each row in the issuance chain, then correct"
-              + " last_issue_date as the schema owner with a recorded reason.");
+              + " name them). First check the database and application clocks against an"
+              + " external time source (NTP): if both stepped back together, fix them and"
+              + " restart, and do not touch the series. Only if both clocks are right, look in"
+              + " the issuance chain for who moved each row, then correct last_issue_date as the"
+              + " schema owner with a recorded reason.");
     }
   }
 
@@ -1323,7 +1331,10 @@ public final class JdbcIssuanceStore
                   IssuanceState.VOID_UNUSED,
                   request.reason(),
                   request.ruleId(),
-                  issuance.correctsIssuanceId());
+                  issuance.correctsIssuanceId(),
+                  // The void event carries the dates the number was given with, like every other
+                  // event of the number; the verifier compares them with the row (D-PR36-2).
+                  issuance.dating());
           appendEvent(unit, voided, IssuanceEvent.voided(voided, clock.instant()));
           return voided;
         });
@@ -1794,7 +1805,9 @@ public final class JdbcIssuanceStore
                       "SELECT i.seller_id, i.mode, i.series, i.fiscal_year, i.stripe_invoice_id,"
                           + " i.legal_number, i.state, i.void_reason, i.void_rule_id,"
                           + " i.document_type, t.id, t.seller_id, t.mode, t.series,"
-                          + " t.fiscal_year, t.legal_number"
+                          + " t.fiscal_year, t.legal_number, i.allocated_at, i.issue_date,"
+                          + " i.supply_date, i.supply_period_start, i.supply_period_end,"
+                          + " i.prev_legal_number, i.prev_issue_date, i.date_gap_cause"
                           + " FROM einvoice_issuance i"
                           + " LEFT JOIN einvoice_issuance t ON t.id = i.corrects_issuance_id"
                           + " WHERE i.state IN ("
@@ -1814,7 +1827,10 @@ public final class JdbcIssuanceStore
                       rs.getString(8),
                       rs.getString(9),
                       rs.getString(10),
-                      targetIdentity(rs, 11)));
+                      targetIdentity(rs, 11),
+                      IssueDating.identity(
+                          readDating(
+                              rs, instant(rs.getObject("allocated_at", OffsetDateTime.class))))));
             }
           }
           return disposed;

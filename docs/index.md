@@ -72,7 +72,10 @@ and its issue date, and a cause for any day between supply and issue - `NONE`, `
 `SWEEP`, `PARK`, `RETRY`, `LATE_WEBHOOK`, or `UNRECORDED` when no stored history explains it (a
 worker queue past midnight, or a host that allocated directly). The cause is derived from stored
 history only; no caller can pass one. More than one day between supply and issue raises the
-finding `DEI-137`, which names the number; it is not a refusal.
+finding `DEI-137`, which names the number; it is not a refusal. Lateness is counted from the day
+Stripe finalised the invoice, also when an invoicing period is written: Stripe bills a
+subscription at the start of its period, so an invoice for 1 January to 1 February finalised on
+1 January and numbered on 20 January is 19 days late.
 
 ### When the clock cannot be trusted
 
@@ -83,14 +86,20 @@ The only refusals left are about the clock. None gives a number, and none can be
   (default 5 minutes, at most 1 hour) apart from the application clock. Two independent clocks must
   agree before a legal date is written. A small gap is retried with the normal backoff; a gap of
   more than `max-clock-regression` raises a finding that names the series; a gap of more than one
-  day stops the event in `FAILED_ISSUANCE` with no retry. Remedy: fix the clock (or the tax zone),
+  day from the application clock, or from Stripe's `finalized_at`, stops the event in
+  `FAILED_ISSUANCE` with no retry. More than one day behind the series is `DEI-130`, below. Remedy: fix the clock (or the tax zone),
   then run the event again through `IssuanceReprocess`, which accepts this one `FAILED_ISSUANCE`
   code for that purpose. The re-run goes through the same checks.
 - `DEI-130`: a series' latest issue date is more than one day after today on the database clock,
-  in the tax zone. A hand edit or a forward jump of the clock put it there. Refused at startup and
-  before every allocation, with a finding that names the series. Remedy: find who moved the series
-  row in the issuance chain, then correct `last_issue_date` as the schema owner with a recorded
-  reason. The runtime role cannot do it; the series guard refuses a backward move.
+  in the tax zone. Two causes put it there: both clocks stepped back together (one wrong time
+  source for the database and application hosts, which the cross-check cannot see), or a hand edit
+  or a forward jump of the clock. Refused at startup and before every allocation, with a finding
+  that names the series. Remedy, in this order: first check the database and application clocks
+  against an external time source (NTP); if they are wrong, fix them and retry, and do not touch
+  the series - lowering its date while the clocks are wrong would date new invoices before ones
+  already issued. Only if both clocks are right, look in the issuance chain for who moved the
+  series row, then correct `last_issue_date` as the schema owner with a recorded reason. The
+  runtime role cannot do it; the series guard refuses a backward move.
 - `DEI-131`: the fiscal year changed between the read that picked the series and the read under its
   lock (a few seconds once a year). The worker retries in a new transaction, which picks the new
   year's series. A host that allocates inside its own transaction gets `DEI-131` as a typed

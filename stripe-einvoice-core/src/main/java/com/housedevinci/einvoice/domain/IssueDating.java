@@ -72,11 +72,35 @@ public record IssueDating(
   }
 
   /**
-   * Whole days between the supply and the issue. Measured from the delivery date, or from the end
-   * of a period (a subscription billed after its month is not late).
+   * Whole days from {@code day} to the issue date, never below zero. The allocator measures
+   * lateness from the day Stripe finalised the invoice, never from a period's end: Stripe bills a
+   * subscription at the start of its period, so the end can lie in the future (D-PR36-1).
    */
-  public long daysAfterSupply() {
-    Optional<LocalDate> reference = supplyDate.or(() -> supplyPeriod.map(SupplyPeriod::end));
-    return reference.map(d -> Math.max(0, ChronoUnit.DAYS.between(d, issueDate))).orElse(0L);
+  public long daysAfter(LocalDate day) {
+    return Math.max(0, ChronoUnit.DAYS.between(day, issueDate));
+  }
+
+  /**
+   * The dating as one comparable string, for the verifier's cross-check of a row against its
+   * chained event (D-PR36-2). Empty for a row or event written before 0.2.0.
+   */
+  public static String identity(Optional<IssueDating> dating) {
+    return dating
+        .map(
+            d ->
+                d.allocatedAt()
+                    + "/"
+                    + d.issueDate()
+                    + "/"
+                    + d.supplyDate().map(Object::toString).orElse("")
+                    + "/"
+                    + d.supplyPeriod().map(p -> p.start() + ".." + p.end()).orElse("")
+                    + "/"
+                    + d.previousNumber().orElse("")
+                    + "/"
+                    + d.previousIssueDate().map(Object::toString).orElse("")
+                    + "/"
+                    + d.cause().map(DateGapCause::wire).orElse(""))
+        .orElse("");
   }
 }

@@ -572,8 +572,9 @@ class InvoiceDateOrderStoreTest {
         .isEqualTo(LocalDate.parse("2026-02-01"));
     assertThat(issued.dating().orElseThrow().supplyPeriod().orElseThrow().end())
         .isEqualTo(LocalDate.parse("2026-02-28"));
-    // A month billed the day after it ended is not late: the gap is measured from the period end.
-    assertThat(issued.dating().orElseThrow().cause()).contains(DateGapCause.UNRECORDED);
+    // Finalised and numbered on 1 March: no gap. Lateness is counted from the finalisation day,
+    // never from the period's end (D-PR36-1).
+    assertThat(issued.dating().orElseThrow().cause()).contains(DateGapCause.NONE);
     assertThat(f.findings(ErrorCodes.ISSUED_LATE)).isZero();
   }
 
