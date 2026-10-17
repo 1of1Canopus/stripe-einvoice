@@ -392,7 +392,10 @@ CREATE INDEX IF NOT EXISTS einvoice_issuance_corrects
 -- does not. Every guard resolves tgrelid against quote_ident(current_schema()) rather than matching
 -- on the trigger name alone: pg_trigger is database-wide and trigger names are per-table, so a bare
 -- tgname check is satisfied by the same-named trigger on another schema's copy of this table and
--- would leave this schema unguarded (the sibling module's CIPHER-05).
+-- would leave this schema unguarded (the sibling module's CIPHER-05). Every guard function also
+-- pins its search path (SET search_path = pg_catalog, pg_temp): the comparisons inside it use
+-- operators, and a role that may create objects in a schema on the caller's path could plant a
+-- look-alike operator that always says "equal" (D-A1-C08, NR-1). The final block checks the pin.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION einvoice_series_guard() RETURNS trigger AS $$
@@ -428,7 +431,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE OR REPLACE FUNCTION einvoice_issuance_guard() RETURNS trigger AS $$
 BEGIN
@@ -486,7 +489,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- S-09 and the seed rule. A series name binds to one document type for a (seller, mode) across
 -- every fiscal year, so "the type of a number is readable from its series" holds beyond one year.
@@ -515,7 +518,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- D-CNS-S12, enforced where the row is written, for every writer: a credit note may correct only
 -- an invoice ('380') this module issued, of the same seller and mode, whose stored document hash
@@ -560,7 +563,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- S-05 (c): the version row cannot be deleted, truncated or lowered, by any role the trigger binds.
 CREATE OR REPLACE FUNCTION einvoice_schema_guard() RETURNS trigger AS $$
@@ -576,13 +579,13 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE OR REPLACE FUNCTION einvoice_append_only() RETURNS trigger AS $$
 BEGIN
   RAISE EXCEPTION '% is append-only (attempted %)', TG_TABLE_NAME, TG_OP;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE OR REPLACE FUNCTION einvoice_anchor_monotonic() RETURNS trigger AS $$
 BEGIN
@@ -598,7 +601,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 DO $$
 DECLARE
@@ -677,13 +680,16 @@ BEGIN
     END IF;
     -- Region ids only. PostgreSQL reads an offset id such as +02:00 or UTC+02:00 as a POSIX zone
     -- with the sign reversed, and accepts invented names such as Nowhere+5; neither is in this
-    -- list. Etc/GMT-2 is listed and means the same in Java and in PostgreSQL.
-    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names n WHERE n.name = zone) THEN
+    -- list. Etc/GMT-2 is listed and means the same in Java and in PostgreSQL. The list also holds
+    -- legacy names without a slash (CET, EET, EST5EDT, ...): PostgreSQL and the JVM read some of
+    -- them differently, so only UTC or a name with a slash is accepted (D-A1-C09).
+    IF NOT (zone = 'UTC' OR position('/' in zone) > 0)
+       OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names n WHERE n.name = zone) THEN
       RAISE EXCEPTION USING
         ERRCODE = 'EIU02',
         MESSAGE = 'schema upgrade refused: einvoice.tax_zone must be a region id such as'
-          || ' Europe/Paris, known to PostgreSQL; an offset id (+02:00, UTC+02:00) or an unknown'
-          || ' name is not accepted. If run as documented, nothing was changed.';
+          || ' Europe/Paris, known to PostgreSQL; an offset id (+02:00, UTC+02:00), a legacy name'
+          || ' such as CET, or an unknown name is not accepted. If run as documented, nothing was changed.';
     END IF;
     ALTER TABLE einvoice_series DISABLE TRIGGER einvoice_series_guard;
     UPDATE einvoice_series s
@@ -797,6 +803,25 @@ BEGIN
            WHERE tgname = c.name AND NOT tgisinternal
              AND tgrelid = to_regclass(quote_ident(current_schema()) || '.' || c.tbl)) THEN
         missing := format('the trigger %s', c.name);
+      END IF;
+    END LOOP;
+  END IF;
+
+  -- every guard function pins its search path (D-A1-C08): read proconfig, never the source text
+  IF missing IS NULL THEN
+    FOR c IN
+      SELECT * FROM (VALUES
+        ('einvoice_series_guard'), ('einvoice_issuance_guard'), ('einvoice_series_insert_guard'),
+        ('einvoice_issuance_insert_guard'), ('einvoice_schema_guard'), ('einvoice_append_only'),
+        ('einvoice_anchor_monotonic')) AS t(name)
+    LOOP
+      IF missing IS NULL AND NOT EXISTS (
+          SELECT 1 FROM pg_proc p
+           WHERE p.proname = c.name
+             AND p.pronamespace = to_regnamespace(quote_ident(current_schema()))
+             AND p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp']::text[]) THEN
+        missing := format('the pinned search path (SET search_path = pg_catalog, pg_temp) of the'
+          || ' function %s', c.name);
       END IF;
     END LOOP;
   END IF;

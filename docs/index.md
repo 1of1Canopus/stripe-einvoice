@@ -201,9 +201,10 @@ in place. It rewrites no number, no hash and no archived byte.
      -f schema-postgresql.sql
    ```
 
-   Put your own region id in place of `Europe/Paris`. It must be a region id that PostgreSQL lists
-   (`Europe/Paris`, `America/New_York`); an offset such as `+02:00` is refused, because PostgreSQL
-   reads its sign the other way round. The upgrade records each series' latest issue date as a date
+   Put your own region id in place of `Europe/Paris`. It must be `UTC` or a region id with a slash
+   that PostgreSQL lists (`Europe/Paris`, `America/New_York`). An offset such as `+02:00` is
+   refused, because PostgreSQL reads its sign the other way round. A legacy name such as `CET` is
+   refused too, because PostgreSQL and the JVM read it differently. The upgrade records each series' latest issue date as a date
    in that zone, and it refuses (`DEI-134`) rather than guess when the zone is missing. The starter
    sets it from `einvoice.seller.tax-zone`. Why each flag: `-X` skips your `~/.psqlrc`, which could
    change the session. `ON_ERROR_STOP=1` stops at the first error; without it psql prints the error
@@ -211,6 +212,13 @@ in place. It rewrites no number, no hash and no archived byte.
    The last step of the script also checks every format-2 condition before it stamps the version and
    raises `DEI-134` if one is missing, so a run that went wrong in some other way is still not
    accepted as format 2.
+
+   PostgreSQL and the JVM ship separate time-zone data. If your zone changed its rules between the
+   two versions, a series' backfilled date can be one day off for an invoice near midnight.
+   Example: `America/Vancouver`, an invoice at 2026-11-05T07:30Z. A JVM with tzdb 2025b says
+   4 November. PostgreSQL with tzdata 2026b keeps summer time all year and says 5 November. To
+   check, compare `SELECT (max(issued_at) AT TIME ZONE 'America/Vancouver')::date FROM
+   einvoice_issuance WHERE series = '<series>'` with the date on that series' last document.
 3. **Expect a short stop.** The upgrade adds columns, rebuilds the series primary key and builds
    unique indexes in one transaction. Every issuance waits until it commits. It runs under the
    module's advisory lock, so two instances starting together run it one after the other, and an

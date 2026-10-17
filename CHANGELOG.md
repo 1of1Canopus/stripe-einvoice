@@ -70,6 +70,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- **Every guard function pins its search path (D-A1-C08).** Each trigger function the schema
+  script creates now carries `SET search_path = pg_catalog, pg_temp`, so a role that can create
+  objects in `public` (the default on PostgreSQL 14 and older) cannot plant a look-alike `<>`
+  operator that disarms a guard. The last block of the script checks the setting on every guard
+  function and refuses with `EIU03` (`DEI-134`) otherwise. The backfill now accepts only `UTC` or
+  a zone name with a slash, because legacy names such as `CET` are read differently by PostgreSQL
+  and the JVM (D-A1-C09).
+
 - **`tools.jackson.core:jackson-databind` pinned to 3.1.7 (GHSA-q4xh-88c3-wmh7, HIGH, CVSS 7.5,
   denial of service; GHSA-cxp5-3px4-pw24, HIGH, quadratic-time forward-reference completion;
   GHSA-wv8q-qhhj-9h54, HIGH, retains every unknown raw type ID).** The Spring Boot 4.1.1

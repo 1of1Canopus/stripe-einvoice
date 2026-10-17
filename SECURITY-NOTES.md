@@ -175,8 +175,23 @@ module is where that is set out.
 - **The two insert guards read tables through the trigger's own schema.** A temporary table of the
   same name, which the runtime role may create, cannot stand in for the real one. Any later guard
   that reads a table must qualify it with `TG_TABLE_SCHEMA`.
-- **The backfill zone must be a region id.** An offset id such as `+02:00` is read by PostgreSQL
-  with the opposite sign, so the upgrade refuses it and asks for a region id.
+- **The backfill zone must be `UTC` or a region id with a slash.** An offset id such as `+02:00`
+  is read by PostgreSQL with the opposite sign. A legacy name such as `CET` or `EST5EDT` is read
+  differently by PostgreSQL and by the JVM (example: `CET` has no summer time in the pinned
+  PostgreSQL image). The upgrade refuses all of them and asks for a region id.
+- **PostgreSQL and the JVM ship separate time-zone data.** If the seller's zone changed its rules
+  between the two versions, a series' backfilled date can be one day off for an invoice near
+  midnight. Example: `America/Vancouver`, invoice at 2026-11-05T07:30Z. A JVM with tzdb 2025b says
+  4 November. PostgreSQL with tzdata 2026b keeps summer time all year and says 5 November. After
+  the upgrade, compare `SELECT (max(issued_at) AT TIME ZONE '<zone>')::date FROM einvoice_issuance
+  WHERE series = '<series>'` with the date on that series' last document.
+- **Every guard function pins its search path.** Each trigger function of the script is created
+  with `SET search_path = pg_catalog, pg_temp`, so a role that can create objects in a schema on
+  its own path (the default for `public` on PostgreSQL 14 and older) cannot plant a look-alike
+  operator that makes a guard see "no difference". The final block of the script checks the pin on
+  every guard function and refuses with `EIU03` (`DEI-134`) otherwise. On 0.1.x, the guards that
+  shipped then do not pin it. On PostgreSQL 14 or older, run
+  `REVOKE CREATE ON SCHEMA public FROM PUBLIC` until you upgrade to this version.
 - **The issue date given to the allocator must be a date some time zone derives from the invoice
   instant.** A far date is refused, because it would move the series date for good.
 - **The six `corrects_*` columns of a chained event are empty together or filled together.** The
