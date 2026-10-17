@@ -67,6 +67,9 @@ public class EInvoiceStartupCheck implements InitializingBean {
     }
     DatabaseViewGuard.refuseViewsOverOurTables(dataSource);
     int fiscalYear = seedSeries(zone);
+    // D-PS1-42, design 5.8: a series dated in the future, or one with numbers and no date, is
+    // refused here by name instead of on the first invoice of the day.
+    store.checkSeriesDates();
     warnAboutWeakerModes();
     probeMaximumWidthNumber(fiscalYear);
   }

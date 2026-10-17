@@ -41,7 +41,7 @@ class CipherProbeFailureChainTest {
     String seller = PostgresSupport.freshSeller(hint);
     SeriesDefinition definition = SIX;
     JdbcIssuanceStore store =
-        new JdbcIssuanceStore(
+        TestStores.store(
             ds,
             CHAIN,
             Map.of(new JdbcIssuanceStore.SeriesId(seller, "DEFAULT", Mode.LIVE), definition),

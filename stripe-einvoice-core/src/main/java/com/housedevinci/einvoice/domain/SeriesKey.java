@@ -52,6 +52,11 @@ public record SeriesKey(
     this(sellerId, series, fiscalYear, mode, DocumentTypeCode.COMMERCIAL_INVOICE);
   }
 
+  /** This series without its fiscal year. */
+  public SeriesScope scope() {
+    return new SeriesScope(sellerId, series, mode, documentType);
+  }
+
   public boolean continuous() {
     return fiscalYear == CONTINUOUS;
   }

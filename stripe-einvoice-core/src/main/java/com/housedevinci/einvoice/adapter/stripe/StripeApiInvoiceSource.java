@@ -244,7 +244,9 @@ public final class StripeApiInvoiceSource implements StripeInvoiceSource {
               rateId,
               quantityOf(line),
               taxable,
-              taxable + tax));
+              taxable + tax,
+              periodInstant(line, true),
+              periodInstant(line, false)));
     }
 
     Address address = invoice.getCustomerAddress();
@@ -344,6 +346,20 @@ public final class StripeApiInvoiceSource implements StripeInvoiceSource {
     }
     // The tax ids frozen onto the invoice, never the live customer's current ones (I-02).
     return invoice.getCustomerTaxIds().get(0).getValue();
+  }
+
+  /**
+   * One end of the line's service period (stripe fields {@code lines.data.period.start} and {@code
+   * .end}, epoch seconds), or null when Stripe reports none. The supply date of the document is
+   * read from these (D-PS1-44).
+   */
+  private static Instant periodInstant(InvoiceLineItem line, boolean start) {
+    InvoiceLineItem.Period period = line.getPeriod();
+    if (period == null) {
+      return null;
+    }
+    Long seconds = start ? period.getStart() : period.getEnd();
+    return seconds == null ? null : Instant.ofEpochSecond(seconds);
   }
 
   private static Instant finalizedAt(Invoice invoice) {

@@ -11,23 +11,25 @@ import java.time.LocalDate;
  *
  * <p>This is what {@link DocumentRenderer#preflight(MappingInput)} is given, and it is the same
  * object the render is given a moment later inside a {@link DocumentInput}. One construction, two
- * consumers, on purpose: the issue date is derived once, in the seller's tax zone, and handed to
- * both. A second derivation would be a second date rule, and two date rules drift - the preflight
- * could pass an invoice whose render then lands in another fiscal year, with nothing in either
- * screen list having changed.
+ * consumers, on purpose.
+ *
+ * <p>It carries no issue date. BT-2 is the day the number is given, read under the series lock
+ * (D-PS1-27), so it does not exist yet; {@link DocumentInput} adds it from the allocation.
  *
  * @param invoice the authoritative invoice, re-fetched and read to exhaustion
- * @param seriesKey the series this document would be numbered in
- * @param issueDate BT-2, already derived in the seller's declared tax zone, never from a clock
+ * @param seriesKey the series this document would be numbered in if it were numbered on its supply
+ *     day; provisional, because the allocator picks the fiscal year from the numbering day
+ * @param supplyDate the day of {@code finalized_at} in the seller's tax zone (the source of BT-72),
+ *     never BT-2
  * @param rulePackVersion the rule pack in force for this run, recorded in the hashed material
  */
 public record MappingInput(
-    SourceInvoice invoice, SeriesKey seriesKey, LocalDate issueDate, String rulePackVersion) {
+    SourceInvoice invoice, SeriesKey seriesKey, LocalDate supplyDate, String rulePackVersion) {
 
   public MappingInput {
-    if (invoice == null || seriesKey == null || issueDate == null) {
+    if (invoice == null || seriesKey == null || supplyDate == null) {
       throw new EInvoiceException(
-          ErrorCodes.INVALID, "a mapping needs an invoice, a series and an issue date");
+          ErrorCodes.INVALID, "a mapping needs an invoice, a series and a supply date");
     }
     rulePackVersion = rulePackVersion == null ? "" : rulePackVersion;
   }

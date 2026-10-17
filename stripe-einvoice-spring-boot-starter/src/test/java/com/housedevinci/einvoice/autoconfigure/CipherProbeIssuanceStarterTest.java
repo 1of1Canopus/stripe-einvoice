@@ -364,9 +364,10 @@ class CipherProbeIssuanceStarterTest {
 
     @Bean
     DocumentRenderer renderer() {
-      return input ->
-          new DocumentRenderer.RenderedDocument(
-              "<Invoice/>".getBytes(StandardCharsets.UTF_8), "xml", "test");
+      return TestRenderers.supplying(
+          input ->
+              new DocumentRenderer.RenderedDocument(
+                  "<Invoice/>".getBytes(StandardCharsets.UTF_8), "xml", "test"));
     }
 
     @Bean

@@ -431,6 +431,26 @@ class IssuanceWiringTest {
                     .hasStackTraceContaining("can never validate anything"));
   }
 
+  // D-PS1-44
+  @Test
+  void a_renderer_that_cannot_carry_the_supply_date_fails_startup_when_intake_is_configured() {
+    new ApplicationContextRunner()
+        .withConfiguration(
+            AutoConfigurations.of(
+                EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
+        .withUserConfiguration(PortsWithRendererWithoutSupplyDate.class)
+        .withPropertyValues(base())
+        .run(
+            context ->
+                assertThat(context.getStartupFailure())
+                    .describedAs(
+                        "every invoice would be refused with DEI-280; the application is told at"
+                            + " startup, by name")
+                    .isNotNull()
+                    .hasStackTraceContaining("carriesSupplyDate()")
+                    .hasStackTraceContaining("DEI-280"));
+  }
+
   @Test
   void an_explicitly_disabled_issuance_with_no_secret_and_no_renderer_only_warns() {
     new ApplicationContextRunner()
@@ -628,9 +648,10 @@ class IssuanceWiringTest {
 
     @Bean
     DocumentRenderer renderer() {
-      return input ->
-          new DocumentRenderer.RenderedDocument(
-              "<Invoice/>".getBytes(java.nio.charset.StandardCharsets.UTF_8), "xml", "test");
+      return TestRenderers.supplying(
+          input ->
+              new DocumentRenderer.RenderedDocument(
+                  "<Invoice/>".getBytes(java.nio.charset.StandardCharsets.UTF_8), "xml", "test"));
     }
 
     @Bean
@@ -677,9 +698,10 @@ class IssuanceWiringTest {
 
     @Bean
     DocumentRenderer renderer() {
-      return input ->
-          new DocumentRenderer.RenderedDocument(
-              "<Invoice/>".getBytes(java.nio.charset.StandardCharsets.UTF_8), "xml", "test");
+      return TestRenderers.supplying(
+          input ->
+              new DocumentRenderer.RenderedDocument(
+                  "<Invoice/>".getBytes(java.nio.charset.StandardCharsets.UTF_8), "xml", "test"));
     }
 
     @Bean
@@ -742,6 +764,19 @@ class IssuanceWiringTest {
         public boolean canValidate() {
           return false;
         }
+      };
+    }
+  }
+
+  @Configuration
+  static class PortsWithRendererWithoutSupplyDate extends Ports {
+
+    /** A renderer written before 0.2.0: it does not declare the supply date (D-PS1-44). */
+    @Bean
+    @Override
+    DocumentRenderer renderer() {
+      return input -> {
+        throw new UnsupportedOperationException("never reached: startup must refuse first");
       };
     }
   }

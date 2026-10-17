@@ -119,7 +119,7 @@ class CipherProbeSchemaUpgradeTest {
 
     DocumentSeriesFixtureOnDefault(DataSource ds) {
       this.store =
-          new JdbcIssuanceStore(
+          TestStores.store(
               ds,
               DocumentSeriesFixture.CHAIN,
               Map.of(
@@ -257,7 +257,8 @@ class CipherProbeSchemaUpgradeTest {
                     com.housedevinci.einvoice.domain.en16931.DocumentTypeCode.CREDIT_NOTE),
                 "cn_one",
                 Instant.parse("2026-02-01T10:00:00Z")),
-            Optional.of(one));
+            Optional.of(one),
+            Optional.of(java.time.LocalDate.parse("2026-02-01")));
     assertThat(credit.legalNumber().value()).isEqualTo("CN-2026-000001");
     f.issue(credit, Mode.LIVE);
 

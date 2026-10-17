@@ -1009,6 +1009,15 @@ public class EInvoiceProperties {
     @NotNull private Duration allocationTimeout = Duration.ofSeconds(5);
 
     /**
+     * How far the database clock may run behind a series' latest issue date, or apart from the
+     * application clock, before a refused allocation raises a finding (design 5.2, D-PS1-46). Above
+     * zero and at most one hour; startup is refused outside that bound. Every invoice's issue date
+     * is the database clock's day when its number is given, so two clocks that disagree by more
+     * than this are not trusted to date one.
+     */
+    @NotNull private Duration maxClockRegression = Duration.ofMinutes(5);
+
+    /**
      * How long after a fiscal year ends a late invoice from that year may still be numbered.
      *
      * <p>Unset by default, and that is a deliberate accounting decision rather than a weak one: a
@@ -1052,6 +1061,14 @@ public class EInvoiceProperties {
 
     public Duration getAllocationTimeout() {
       return allocationTimeout;
+    }
+
+    public Duration getMaxClockRegression() {
+      return maxClockRegression;
+    }
+
+    public void setMaxClockRegression(Duration maxClockRegression) {
+      this.maxClockRegression = maxClockRegression;
     }
 
     public Duration getClosedYearCutoff() {

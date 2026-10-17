@@ -10,18 +10,17 @@ import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.SeriesKey;
 import com.housedevinci.einvoice.domain.SeriesReport;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.Optional;
 
 /**
  * What a host application calls: give this Stripe invoice its legal number.
  *
- * <p>The only thing this adds to the allocator is the decision the allocator must not make on its
- * own - which fiscal year a given invoice date belongs to. That is {@code finalized_at} converted
- * in the seller profile's declared tax zone, never {@code LocalDate.now()} and never {@code
- * ZoneId.systemDefault()}: an invoice finalised at 23:30 UTC on 31 December belongs to the year its
- * tax authority says it does, not to the one the container's clock suggests (D-15).
+ * <p>The allocator dates the number itself: the issue date is the day the number is given, on the
+ * database clock, in the seller profile's declared tax zone, and a resetting series takes that
+ * day's fiscal year (D-PS1-27, D-PS1-41). This adds the seller, the series and the mode, and passes
+ * {@code finalized_at} as the supply date. A host that calls the allocator inside its own
+ * transaction retries {@code DEI-131} and a retryable {@code DEI-132} in a new transaction.
  *
  * <p>The webhook path and a host's direct call go through this same object. The webhook is not a
  * privileged path.
@@ -44,24 +43,26 @@ public class IssuanceNumberingService {
   }
 
   /**
-   * @param issuedAt BT-2: Stripe's own {@code status_transitions.finalized_at}, not a clock reading
+   * @param issuedAt Stripe's own {@code status_transitions.finalized_at}: the supply date (BT-72).
+   *     The issue date (BT-2) is the day the number is given, never this value
    */
   public Issuance allocate(
       String stripeInvoiceId, String stripeAccountId, String stripeNumber, Instant issuedAt) {
     if (issuedAt == null) {
       throw new EInvoiceException(
           ErrorCodes.INVALID,
-          "the invoice date (BT-2) comes from the finalisation timestamp of the invoice itself,"
-              + " never from the current time");
+          "the supply date comes from the finalisation timestamp of the invoice itself, never"
+              + " from the current time");
     }
+    // The issue date is the day the number is given and the fiscal year is that day's: the
+    // allocator fixes both under the series lock (D-PS1-27, D-PS1-41). issuedAt is the supply date.
     return allocator.allocate(
         new AllocationRequest(
-            seriesKeyFor(issuedAt),
+            seriesKeyFor(issuedAt).scope(),
             stripeInvoiceId,
             stripeAccountId,
             stripeNumber,
             issuedAt,
-            LocalDate.ofInstant(issuedAt, taxZone),
             ""));
   }
 

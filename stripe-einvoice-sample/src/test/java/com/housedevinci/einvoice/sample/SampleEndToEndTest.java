@@ -87,14 +87,14 @@ class SampleEndToEndTest {
   void a_stripe_invoice_gets_a_number_a_void_is_recorded_and_the_report_explains_the_series()
       throws Exception {
     allocate("in_sample_1", "ABCD-0001")
-        .andExpect(jsonPath("$.legalNumber").value("INV-2026-000001"));
+        .andExpect(jsonPath("$.legalNumber").value("INV-" + issueYear() + "-000001"));
 
     // The same Stripe invoice, twice: one sale, one number, for all time.
     allocate("in_sample_1", "ABCD-0001")
-        .andExpect(jsonPath("$.legalNumber").value("INV-2026-000001"));
+        .andExpect(jsonPath("$.legalNumber").value("INV-" + issueYear() + "-000001"));
 
     allocate("in_sample_2", "ABCD-0002")
-        .andExpect(jsonPath("$.legalNumber").value("INV-2026-000002"));
+        .andExpect(jsonPath("$.legalNumber").value("INV-" + issueYear() + "-000002"));
 
     // Voiding has no endpoint in the module and none in this sample: it is a service call, and a
     // host that wants to expose it writes that endpoint behind its own authorization.
@@ -190,7 +190,17 @@ class SampleEndToEndTest {
                     "acme-fr", "DEFAULT", 2026, com.housedevinci.einvoice.domain.Mode.LIVE),
                 java.time.LocalDate.of(2026, 2, 1),
                 "sample"),
-            new com.housedevinci.einvoice.domain.LegalNumber("INV-2026-000900", 900L));
+            new com.housedevinci.einvoice.domain.LegalNumber("INV-2026-000900", 900L),
+            new com.housedevinci.einvoice.domain.SeriesKey(
+                "acme-fr", "DEFAULT", 2026, com.housedevinci.einvoice.domain.Mode.LIVE),
+            new com.housedevinci.einvoice.domain.IssueDating(
+                java.time.LocalDate.of(2026, 2, 1),
+                java.time.Instant.parse(FINALIZED_AT),
+                java.util.Optional.of(java.time.LocalDate.of(2026, 2, 1)),
+                java.util.Optional.empty(),
+                java.util.Optional.empty(),
+                java.util.Optional.empty(),
+                java.util.Optional.empty()));
 
     com.housedevinci.einvoice.adapter.xml.UblProfile profile =
         com.housedevinci.einvoice.adapter.xml.UblProfile.XRECHNUNG_UBL;
@@ -316,6 +326,14 @@ class SampleEndToEndTest {
   void every_endpoint_of_the_sample_requires_authentication() throws Exception {
     mvc.perform(get("/series/{on}", FINALIZED_AT)).andExpect(status().isUnauthorized());
     mvc.perform(post("/invoices/{id}/number", "in_anonymous")).andExpect(status().isUnauthorized());
+  }
+
+  /**
+   * The fiscal year the sample's numbers are given in: the year of the numbering day in the
+   * sample's tax zone (D-PS1-41), which a test cannot fix in advance.
+   */
+  private static int issueYear() {
+    return java.time.Year.now(java.time.ZoneId.of("Europe/Paris")).getValue();
   }
 
   private org.springframework.test.web.servlet.ResultActions allocate(String id, String number)

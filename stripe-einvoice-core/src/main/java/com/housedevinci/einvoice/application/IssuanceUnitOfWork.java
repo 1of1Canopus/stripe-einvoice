@@ -8,6 +8,7 @@ import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
 import com.housedevinci.einvoice.domain.Issuance;
 import com.housedevinci.einvoice.domain.IssuanceState;
+import com.housedevinci.einvoice.domain.IssueClockException;
 import com.housedevinci.einvoice.domain.LegalNumber;
 import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.SeriesKey;
@@ -223,10 +224,13 @@ public final class IssuanceUnitOfWork {
       return decided.get();
     }
 
-    LocalDate issueDate = issueDate(invoice);
+    // The supply day: finalized_at in the tax zone. Since the issue date is the numbering day, this
+    // is the date of the sale, never BT-2 (D-PS1-27). The closed-year cut-off is a rule about when
+    // the sale happened, so it runs on this day (design 5.3).
+    LocalDate supplyDay = supplyDay(invoice);
     try {
       Totals.reconcile(invoice.totals());
-      refuseIfFiscalYearIsClosed(issueDate);
+      refuseIfFiscalYearIsClosed(supplyDay);
     } catch (TotalsMismatchException mismatch) {
       // The values are on the exception and go no further than a debug line that is off by
       // default; the state, the code and the field name are what the operator sees.
@@ -247,13 +251,19 @@ public final class IssuanceUnitOfWork {
       // processor or change the configuration, and a sweep does not do that.
       return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.XSLT_PROCESSOR_MISSING, null);
     }
+    if (!renderer.carriesSupplyDate()) {
+      // D-PS1-44: the issue date is the numbering day, so a document without its supply date would
+      // hide when the sale happened. Refused before a number exists, like the preflight's own
+      // refusals; terminal, because the renderer will not learn the field by running again.
+      return fail(event, InboundState.FAILED_MAPPING, ErrorCodes.SUPPLY_DATE_NOT_CARRIED, null);
+    }
 
     // The preflight (D3-01). Every screen the render will apply, applied now, with no number in
     // existence: a buyer-controlled field this module cannot put on a document is refused here and
     // costs nothing. One MappingInput, constructed once and handed to both passes, so the two
     // cannot disagree about the invoice, the series or the issue date.
     MappingInput mapping =
-        new MappingInput(invoice, seriesKey(issueDate), issueDate, configuration.rulePackVersion());
+        new MappingInput(invoice, seriesKey(supplyDay), supplyDay, configuration.rulePackVersion());
     PreflightReport report = preflight(mapping);
     if (report.refused()) {
       // FAILED_MAPPING, with the mapper's own code, and no NUMBERED row, chain entry or archive
@@ -305,12 +315,12 @@ public final class IssuanceUnitOfWork {
       issuance =
           allocator.allocate(
               new AllocationRequest(
-                  mapping.seriesKey(),
+                  mapping.seriesKey().scope(),
                   invoice.id(),
                   invoice.accountId(),
                   invoice.number(),
                   invoice.finalizedAt(),
-                  mapping.issueDate(),
+                  invoice.commonServicePeriod(),
                   configuration.rulePackVersion()));
     } catch (EInvoiceException e) {
       if (ErrorCodes.ISSUANCE_ALREADY_CLAIMED.equals(e.code())) {
@@ -337,13 +347,14 @@ public final class IssuanceUnitOfWork {
       // A backoff for the codes that can improve with time; none for the codes that cannot,
       // because a series that is not configured or has run out of numbers stays that way until an
       // operator acts, and reattempting it every sweep is the unbounded loop this fix removes.
-      Duration retryIn = retryableAllocationFailure(e.code()) ? backoffFor(event) : null;
+      Duration retryIn = retryableAllocationFailure(e) ? backoffFor(event) : null;
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
     }
 
-    // The same MappingInput the preflight approved, plus the number. Not a re-derivation: a second
-    // derivation of the issue date is a second date rule, and two date rules drift.
-    DocumentInput input = new DocumentInput(mapping, issuance.legalNumber());
+    // The same MappingInput the preflight approved, plus what the allocator fixed under the series
+    // lock: the number, its series, and its dates. BT-2 comes from the allocation and nowhere else,
+    // so a resumed run renders the same date the first run was given (D-PS1-27).
+    DocumentInput input = DocumentInput.numbered(mapping, issuance, configuration.taxZone());
 
     // P2: the exact bytes, and the validation of those exact bytes - never of a re-serialisation.
     // Both ports are always a host's own code in 0.1.0 - the writers are the next change - and a
@@ -571,13 +582,13 @@ public final class IssuanceUnitOfWork {
     }
   }
 
-  private LocalDate issueDate(SourceInvoice invoice) {
+  private LocalDate supplyDay(SourceInvoice invoice) {
     Instant finalizedAt = invoice.finalizedAt();
     if (finalizedAt == null) {
       throw new EInvoiceException(
           ErrorCodes.MAPPING_INCOMPLETE,
-          "the invoice carries no finalisation timestamp, so BT-2 cannot be derived (stripe field:"
-              + " status_transitions.finalized_at)");
+          "the invoice carries no finalisation timestamp, so its supply date cannot be derived"
+              + " (stripe field: status_transitions.finalized_at)");
     }
     return LocalDate.ofInstant(finalizedAt, configuration.taxZone());
   }
@@ -605,8 +616,12 @@ public final class IssuanceUnitOfWork {
     }
   }
 
-  private SeriesKey seriesKey(LocalDate issueDate) {
-    int fiscalYear = configuration.fiscalYearReset() ? issueDate.getYear() : SeriesKey.CONTINUOUS;
+  /**
+   * The series the preflight sees: provisional, from the supply day. The allocator picks the real
+   * fiscal year from the numbering day (D-PS1-41) and the render uses the allocated one.
+   */
+  private SeriesKey seriesKey(LocalDate supplyDay) {
+    int fiscalYear = configuration.fiscalYearReset() ? supplyDay.getYear() : SeriesKey.CONTINUOUS;
     return new SeriesKey(
         configuration.sellerId(), configuration.series(), fiscalYear, configuration.mode());
   }
@@ -628,6 +643,19 @@ public final class IssuanceUnitOfWork {
    */
   private static boolean retryableAllocationFailure(String code) {
     return ErrorCodes.STORE_UNAVAILABLE.equals(code) || ErrorCodes.ALLOCATION_TIMEOUT.equals(code);
+  }
+
+  /**
+   * The allocator's refusals that waiting can cure, beyond the store outages: a fiscal year that
+   * changed under the lock (DEI-131, retried in a new transaction, which picks the new year), and a
+   * clock regression small enough to be waited out (DEI-132). A regression beyond one day and a
+   * series dated in the future (DEI-130) stop here: an operator fixes the clock or the row first.
+   */
+  private static boolean retryableAllocationFailure(EInvoiceException e) {
+    if (e instanceof IssueClockException clock) {
+      return clock.retryable();
+    }
+    return retryableAllocationFailure(e.code()) || ErrorCodes.ISSUE_YEAR_CHANGED.equals(e.code());
   }
 
   /**

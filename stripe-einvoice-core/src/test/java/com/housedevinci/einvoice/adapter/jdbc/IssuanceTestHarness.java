@@ -52,6 +52,7 @@ public final class IssuanceTestHarness {
   private final DocumentValidator validator;
   private final Optional<Duration> closedYearCutoff;
   private final MovableClock clock = new MovableClock(DEFAULT_NOW);
+  private final TestIssueClock issueClock = TestIssueClock.following(clock);
   private String pinnedApiVersion = FakeStripeSource.PINNED;
 
   private IssuanceTestHarness(
@@ -61,14 +62,18 @@ public final class IssuanceTestHarness {
     this.taxZone = ZoneId.of(zone);
     this.sellerId = PostgresSupport.freshSeller("uow");
     this.store =
-        new JdbcIssuanceStore(
+        TestStores.store(
+            JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()),
             PostgresSupport.dataSource(),
             IssuanceChain.keyed(
                 "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8), "k1"),
             Map.of(
                 new JdbcIssuanceStore.SeriesId(sellerId, "DEFAULT", Mode.LIVE),
                 new SeriesDefinition("INV-{fiscalYear}-", 6, true)),
-            clock);
+            taxZone,
+            clock,
+            JdbcIssuanceStore.DEFAULT_ALLOCATION_TIMEOUT,
+            issueClock);
     this.inbound =
         new JdbcInboundEventStore(JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()));
   }
@@ -390,16 +395,36 @@ public final class IssuanceTestHarness {
 
   /** The bytes this fixture renders to, computed the way the unit of work computes them. */
   public byte[] renderFor(String invoiceId, String number) {
-    return renderer
-        .render(
-            new DocumentInput(
-                new com.housedevinci.einvoice.application.MappingInput(
-                    source.fetchInvoice(invoiceId),
-                    seriesKey(),
-                    LocalDate.ofInstant(source.fetchInvoice(invoiceId).finalizedAt(), taxZone),
-                    "fr-2026.1"),
-                legalNumber(number)))
-        .bytes();
+    return renderer.render(renderInput(invoiceId, number)).bytes();
+  }
+
+  /**
+   * The render input the unit of work builds: from the stored issuance when the number exists, or,
+   * before it does, with the dates the allocator will give it now - the numbering day on the
+   * harness clock and the finalisation day as the supply date (D-PS1-27).
+   */
+  private DocumentInput renderInput(String invoiceId, String number) {
+    var invoice = source.fetchInvoice(invoiceId);
+    LocalDate supplyDay = LocalDate.ofInstant(invoice.finalizedAt(), taxZone);
+    var mapping =
+        new com.housedevinci.einvoice.application.MappingInput(
+            invoice, seriesKey(), supplyDay, "fr-2026.1");
+    Optional<Issuance> stored = store.findBySource(sellerId, Mode.LIVE, invoiceId);
+    if (stored.isPresent()) {
+      return DocumentInput.numbered(mapping, stored.get(), taxZone);
+    }
+    return new DocumentInput(
+        mapping,
+        legalNumber(number),
+        seriesKey(),
+        new com.housedevinci.einvoice.domain.IssueDating(
+            LocalDate.ofInstant(clock.instant(), taxZone),
+            clock.instant(),
+            Optional.of(supplyDay),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty()));
   }
 
   /**
@@ -411,7 +436,7 @@ public final class IssuanceTestHarness {
     try (java.sql.Connection connection = PostgresSupport.dataSource().getConnection()) {
       connection.setAutoCommit(false);
       JdbcIssuanceStore killed =
-          new JdbcIssuanceStore(
+          TestStores.store(
               JdbcUnitOfWork.using(connection),
               PostgresSupport.dataSource(),
               IssuanceChain.keyed(
@@ -435,6 +460,16 @@ public final class IssuanceTestHarness {
   /** The harness clock's current instant, for a test that writes a record itself. */
   public Instant now() {
     return clock.instant();
+  }
+
+  /** Moves the database clock away from the application clock, as a wrong NTP step would. */
+  public void shiftDatabaseClock(Duration by) {
+    issueClock.shift(by);
+  }
+
+  /** The harness's tax zone, in which every date of its documents is derived. */
+  public ZoneId taxZone() {
+    return taxZone;
   }
 
   public void moveClockForward(Duration by) {

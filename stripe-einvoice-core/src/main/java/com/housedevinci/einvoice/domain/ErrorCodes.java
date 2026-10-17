@@ -100,10 +100,9 @@ public final class ErrorCodes {
   /**
    * The issue date (BT-2) is earlier than the latest issue date already numbered in the series.
    *
-   * <p>For a credit note it is a refusal, raised under the series row lock before the counter moves
-   * (T9). For an invoice it is not a refusal: a sale must get its invoice. The number is given and
-   * this code is recorded as an open finding that names it (D-PS1-27, D-PS1-38), until the
-   * date-order design is built.
+   * <p>A credit-note refusal, raised under the series row lock before the counter moves (T9). An
+   * invoice never reaches it: its issue date is the numbering day, so a later number cannot carry
+   * an earlier date (D-PS1-27). A clock that runs backwards is {@link #ISSUE_CLOCK_BEHIND_SERIES}.
    */
   public static final String ISSUE_DATE_OUT_OF_ORDER = "DEI-127";
 
@@ -113,6 +112,35 @@ public final class ErrorCodes {
    * event (D-CNS-S12). Refused before a number is consumed.
    */
   public static final String CREDIT_TARGET_INVALID = "DEI-128";
+
+  /**
+   * A series' latest issue date is more than one day after today on the database clock, in the tax
+   * zone (D-PS1-42). A hand edit or a forward jump of the clock put it there, and every later
+   * invoice would be refused until that day. Not retryable: find who moved the row in the chain,
+   * then correct {@code last_issue_date} as the schema owner with a recorded reason.
+   */
+  public static final String SERIES_DATE_IN_FUTURE = "DEI-130";
+
+  /**
+   * The fiscal year changed between the clock read that chose the series and the read under its
+   * lock (D-PS1-41). Nothing was numbered. Retry in a new transaction, which picks the new year's
+   * series; the worker does that on its own, a host that allocates in its own transaction must.
+   */
+  public static final String ISSUE_YEAR_CHANGED = "DEI-131";
+
+  /**
+   * The clock the issue date comes from is behind the series, or the database and application
+   * clocks disagree by more than {@code einvoice.numbering.max-clock-regression} (design 5.2,
+   * D-PS1-46). Nothing was numbered. Retryable while the gap is small; terminal beyond one day,
+   * where the remedy is to fix the clock and reprocess the event.
+   */
+  public static final String ISSUE_CLOCK_BEHIND_SERIES = "DEI-132";
+
+  /**
+   * An invoice was numbered more than one day after its supply date. Not a refusal: the number and
+   * the true issue date are given. A finding names the number so the delay is seen (design 5.6).
+   */
+  public static final String ISSUED_LATE = "DEI-137";
 
   /**
    * The schema version row could not be read for a reason other than "it does not exist" (S-05).
@@ -227,6 +255,13 @@ public final class ErrorCodes {
    * retryable, for the same reason {@link #ARCHIVE_FAILED} is.
    */
   public static final String VALIDATOR_FAILED = "DEI-252";
+
+  /**
+   * The document renderer cannot carry the supply date (BT-72) or the invoicing period (BG-14).
+   * Since the issue date is the numbering day, a document without the supply date would hide when
+   * the sale happened, so the invoice is refused before a number exists (D-PS1-44).
+   */
+  public static final String SUPPLY_DATE_NOT_CARRIED = "DEI-280";
 
   /** The issuance worker is at capacity. The event stays RECEIVED and the sweeper takes it. */
   public static final String WORKER_SATURATED = "DEI-260";

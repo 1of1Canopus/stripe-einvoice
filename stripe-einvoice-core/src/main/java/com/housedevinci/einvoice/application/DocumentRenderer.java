@@ -46,6 +46,20 @@ public interface DocumentRenderer {
     return PreflightReport.notSupported();
   }
 
+  /**
+   * Whether every document this renderer writes carries the supply date (EN 16931 BT-72) or the
+   * invoicing period (BG-14) from {@link DocumentInput#supplyDate()} and {@link
+   * DocumentInput#supplyPeriod()}.
+   *
+   * <p>The issue date (BT-2) is the day the number is given, which can be days after the sale
+   * (D-PS1-27). A document without its supply date would hide when the sale happened, so the unit
+   * of work refuses every invoice with {@code DEI-280} before a number exists unless this answers
+   * true (D-PS1-44). The default is false: fail closed. A renderer opts in by writing the fields.
+   */
+  default boolean carriesSupplyDate() {
+    return false;
+  }
+
   /** What a renderer produced. Bytes, never a stream: they are hashed, validated and stored. */
   record RenderedDocument(byte[] bytes, String extension, String profile) {
 
