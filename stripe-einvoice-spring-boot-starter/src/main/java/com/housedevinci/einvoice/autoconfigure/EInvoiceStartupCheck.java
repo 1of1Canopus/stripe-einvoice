@@ -138,6 +138,20 @@ public class EInvoiceStartupCheck implements InitializingBean {
               + " across fiscal years instead of restarting at 1 each year. That is legal on some"
               + " readings and wrong on others; confirm it with the seller's accountant.");
     }
+    if (properties
+            .getNumbering()
+            .getMaxClockRegression()
+            .compareTo(JdbcIssuanceStore.DEFAULT_MAX_CLOCK_REGRESSION)
+        > 0) {
+      log.warn(
+          "einvoice: einvoice.numbering.max-clock-regression is {}, above the default {}. Whoever"
+              + " controls only the database clock can move an issue date by up to this much, so"
+              + " an invoice numbered that close to midnight can carry the wrong day. Keep it at"
+              + " the default unless the clocks of the application and the database cannot agree"
+              + " closer.",
+          properties.getNumbering().getMaxClockRegression(),
+          JdbcIssuanceStore.DEFAULT_MAX_CLOCK_REGRESSION);
+    }
     for (String table : EInvoiceTables.ALL) {
       if (JdbcSupport.runtimeRoleOwnsTable(dataSource, table)) {
         log.warn(

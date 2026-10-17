@@ -234,7 +234,7 @@ cause. So the remedy is this explicit, privileged call, for one event at a time.
 | `einvoice.numbering.width` | `6` | 4..12; outside that the application refuses to start |
 | `einvoice.numbering.fiscal-year-reset` | `true` | `false` - WARNs at every startup |
 | `einvoice.numbering.allocation-timeout` | `5s` | applied as `SET LOCAL lock_timeout`; a blocked allocation past this bound is a typed `DEI-117` refusal |
-| `einvoice.numbering.max-clock-regression` | `5m` | above zero and at most `1h`, refused at startup outside; how far the database clock may run behind a series or apart from the application clock before a refused allocation raises a finding (`DEI-132`) |
+| `einvoice.numbering.max-clock-regression` | `5m` | above zero and at most `1h`, refused at startup outside; how far the database clock may run behind a series or apart from the application clock before a refused allocation raises a finding (`DEI-132`). A value above `5m` WARNs at every startup: whoever controls only the database clock can then move an issue date by up to that much |
 | `einvoice.chain.hmac-secret` / `.hmac-key-id` | required, env only, base64 of >= 32 bytes | none |
 | `einvoice.chain.hmac-keys.<id>` | empty | retired ids the verifier still needs during a rotation |
 | `einvoice.chain.unkeyed` | `false` | `true` - WARNs at every startup, verifier reports `INTACT_UNKEYED` |

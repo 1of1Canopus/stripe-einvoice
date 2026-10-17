@@ -88,6 +88,11 @@ All notable changes to this project are documented here. The format follows
   touching the series. The module's validator refuses a document whose BT-2, BT-72 or BG-14
   differs from the allocation (rule `EINVOICE-DATES`). A test reads the production issue clock
   against the real time in three session zones.
+- **Security review of the invoice date order, pass 2 (D-PR36-7, 8, 9).** A value of
+  `einvoice.numbering.max-clock-regression` above `5m` now logs a WARN at every startup. The module's
+  validator answers `NOT_EVALUATED` (rule `EINVOICE-DATES`) when it is given no allocation input,
+  so a skipped date check no longer reads `PASSED`. The rule also refuses a document-level
+  `cbc:TaxPointDate` (BT-7): it checks BT-2, BT-7, BT-72 and BG-14.
 - **Security review of the typed number series (D-A1-C01, C02, C04, C05, C06, C07).** The version
   stamp of the schema script is now one final block that checks every format-2 condition and
   refuses with `EIU03` (`DEI-134`); the documented by-hand command is

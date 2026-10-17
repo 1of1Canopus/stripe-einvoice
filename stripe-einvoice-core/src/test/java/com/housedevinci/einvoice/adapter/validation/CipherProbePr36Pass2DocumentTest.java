@@ -28,7 +28,10 @@ class CipherProbePr36Pass2DocumentTest {
   private static DocumentValidator.Report validate(String xml, DocumentInput input) {
     try (En16931DocumentValidator validator =
         new En16931DocumentValidator(
-            UblProfile.XRECHNUNG_UBL, SecureXml.DEFAULT_XSLT2_PROCESSOR, Duration.ofSeconds(60), 2)) {
+            UblProfile.XRECHNUNG_UBL,
+            SecureXml.DEFAULT_XSLT2_PROCESSOR,
+            Duration.ofSeconds(60),
+            2)) {
       return validator.validate(xml.getBytes(StandardCharsets.UTF_8), input);
     }
   }
@@ -48,7 +51,9 @@ class CipherProbePr36Pass2DocumentTest {
             + "</cbc:ActualDeliveryDate></cac:Delivery>";
     String doubled =
         xml.replaceFirst(
-            "(<cac:Delivery><cbc:ActualDeliveryDate>" + supply + "</cbc:ActualDeliveryDate></cac:Delivery>)",
+            "(<cac:Delivery><cbc:ActualDeliveryDate>"
+                + supply
+                + "</cbc:ActualDeliveryDate></cac:Delivery>)",
             "$1" + java.util.regex.Matcher.quoteReplacement(second));
     assertThat(doubled).contains(second);
 
@@ -79,7 +84,9 @@ class CipherProbePr36Pass2DocumentTest {
     String xml =
         rendered(input)
             .replace(
-                "<cac:Delivery><cbc:ActualDeliveryDate>" + supply + "</cbc:ActualDeliveryDate></cac:Delivery>",
+                "<cac:Delivery><cbc:ActualDeliveryDate>"
+                    + supply
+                    + "</cbc:ActualDeliveryDate></cac:Delivery>",
                 "<cac:Delivery><x:ActualDeliveryDate xmlns:x=\"urn:x\">"
                     + supply
                     + "</x:ActualDeliveryDate></cac:Delivery>");

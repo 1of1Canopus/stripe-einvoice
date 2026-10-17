@@ -28,11 +28,12 @@ class OfficialValidatorTest {
     return renderer.render(input).bytes();
   }
 
-  private static DocumentValidator.Report validate(byte[] bytes, UblProfile profile) {
+  private static DocumentValidator.Report validate(
+      byte[] bytes, DocumentInput input, UblProfile profile) {
     try (En16931DocumentValidator validator =
         new En16931DocumentValidator(
             profile, SecureXml.DEFAULT_XSLT2_PROCESSOR, Duration.ofSeconds(60), 2)) {
-      return validator.validate(bytes, null);
+      return validator.validate(bytes, input);
     }
   }
 
@@ -56,7 +57,8 @@ class OfficialValidatorTest {
         .as("%s findings on %s", profile.displayName(), input.invoice().id())
         .allMatch(finding -> !finding.fatal(), "informational only");
     assertThat(report.verdict()).isEqualTo(DocumentValidator.Verdict.PASSED);
-    assertThat(validate(bytes, profile).verdict()).isEqualTo(DocumentValidator.Verdict.PASSED);
+    assertThat(validate(bytes, input, profile).verdict())
+        .isEqualTo(DocumentValidator.Verdict.PASSED);
     assertThat(new String(bytes, StandardCharsets.UTF_8)).contains(profile.customizationId());
   }
 

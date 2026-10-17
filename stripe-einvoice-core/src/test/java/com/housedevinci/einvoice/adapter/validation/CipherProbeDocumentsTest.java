@@ -322,7 +322,7 @@ class CipherProbeDocumentsTest {
             SecureXml.DEFAULT_XSLT2_PROCESSOR,
             Duration.ofSeconds(60),
             2)) {
-      assertThat(validator.validate(bytes, null).verdict())
+      assertThat(validator.validateInDetail(bytes, false).verdict())
           .isEqualTo(DocumentValidator.Verdict.PASSED);
       DocumentValidator.Report report = validator.validate(changed, null);
       assertThat(report.verdict()).isEqualTo(DocumentValidator.Verdict.FAILED);

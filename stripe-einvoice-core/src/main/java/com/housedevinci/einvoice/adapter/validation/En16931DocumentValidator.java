@@ -72,8 +72,9 @@ public final class En16931DocumentValidator implements DocumentValidator, AutoCl
 
   /**
    * The module's own rule for the dates (D-PR36-4): the bytes carry the issue date the allocator
-   * gave (BT-2) and the supply date or invoicing period it recorded (BT-72, BG-14). A renderer's
-   * {@code carriesSupplyDate()} is a promise; this checks the document.
+   * gave (BT-2) and the supply date or invoicing period it recorded (BT-72, BG-14), and no VAT
+   * point date (BT-7), which no allocation gives. A renderer's {@code carriesSupplyDate()} is a
+   * promise; this checks the document.
    */
   public static final String DATES_DISAGREE_WITH_ALLOCATION = "EINVOICE-DATES";
 
@@ -90,7 +91,14 @@ public final class En16931DocumentValidator implements DocumentValidator, AutoCl
       // Identifier and severity only. The rule's own text can interpolate document content.
       identifiers.add(finding.ruleId() + " (" + finding.flag() + ")");
     }
-    if (detail.verdict() == Verdict.PASSED && input != null && !datesMatch(bytes, input)) {
+    if (detail.verdict() == Verdict.PASSED && input == null) {
+      // D-PR36-8: without the allocation the dates cannot be compared. A skipped control must not
+      // report PASSED, so the answer is NOT_EVALUATED and the unit of work refuses to archive.
+      identifiers.add(DATES_DISAGREE_WITH_ALLOCATION + " (fatal)");
+      return new Report(
+          Verdict.NOT_EVALUATED, DATES_DISAGREE_WITH_ALLOCATION, List.copyOf(identifiers));
+    }
+    if (detail.verdict() == Verdict.PASSED && !datesMatch(bytes, input)) {
       identifiers.add(DATES_DISAGREE_WITH_ALLOCATION + " (fatal)");
       return new Report(Verdict.FAILED, DATES_DISAGREE_WITH_ALLOCATION, List.copyOf(identifiers));
     }
@@ -98,9 +106,11 @@ public final class En16931DocumentValidator implements DocumentValidator, AutoCl
   }
 
   /**
-   * True when the document's BT-2 is the allocated issue date and its BT-72 or BG-14 is exactly the
-   * recorded supply date or period. A document with dates the allocation did not give, or without
-   * the supply date it recorded, is not archivable.
+   * True when the document's BT-2 is the allocated issue date, its BT-72 or BG-14 is exactly the
+   * recorded supply date or period, and it has no document-level BT-7 ({@code cbc:TaxPointDate}).
+   * The checked dates are BT-2, BT-7, BT-72 and BG-14 (BT-73, BT-74). A document with dates the
+   * allocation did not give, or without the supply date it recorded, is not archivable. Line
+   * periods (BG-26) are not compared; they are not allocated.
    */
   private static boolean datesMatch(byte[] bytes, DocumentInput input) {
     org.w3c.dom.Element root;
@@ -116,6 +126,9 @@ public final class En16931DocumentValidator implements DocumentValidator, AutoCl
       return false;
     }
     String issue = text(child(root, NS_CBC, "IssueDate"));
+    if (child(root, NS_CBC, "TaxPointDate") != null) {
+      return false;
+    }
     String delivery = text(child(child(root, NS_CAC, "Delivery"), NS_CBC, "ActualDeliveryDate"));
     org.w3c.dom.Element period = child(root, NS_CAC, "InvoicePeriod");
     String start = text(child(period, NS_CBC, "StartDate"));

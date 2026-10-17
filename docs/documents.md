@@ -71,6 +71,17 @@ state a delivery date (BT-72), an invoicing period (BG-14) or a per-line period 
 issue date became the numbering day, every invoice carries BT-72 or BG-14, and a test asserts that
 an XRechnung invoice now raises no finding at all.
 
+### The date rule (`EINVOICE-DATES`)
+
+After the schema and the schematron pass, the module's own rule compares the document with the
+allocation. It reads four dates, all direct children of the root: BT-2 (`cbc:IssueDate`), BT-7
+(`cbc:TaxPointDate`), BT-72 (`cac:Delivery/cbc:ActualDeliveryDate`) and BG-14
+(`cac:InvoicePeriod/cbc:StartDate` and `cbc:EndDate`). BT-2, BT-72 and BG-14 must equal the
+allocated day or period, as exact strings. BT-7 must be absent, because no allocation gives it.
+Example: BT-2 and BT-72 are right and BT-7 is 30 days before the supply day: the document is
+refused. Line periods (BG-26) are not compared; they are not allocated. Given no allocation input,
+the validator answers `NOT_EVALUATED` with this rule id, and the document is not archived.
+
 ### The XSLT processor
 
 The schematron is XSLT 2.0 and the JDK ships an XSLT 1.0 processor, so the core module carries

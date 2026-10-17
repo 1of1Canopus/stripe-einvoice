@@ -12,10 +12,9 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
- * Security review of the date-order change (D-PS1-27), pass 2. D-PR36-8: the two-clock tolerance
- * is a security bound (whoever controls only the database clock can move an issue date by at most
- * this much). Raising it from 5 minutes to 59 minutes is a weaker mode and must WARN at every
- * startup.
+ * Security review of the date-order change (D-PS1-27), pass 2. D-PR36-8: the two-clock tolerance is
+ * a security bound (whoever controls only the database clock can move an issue date by at most this
+ * much). Raising it from 5 minutes to 59 minutes is a weaker mode and must WARN at every startup.
  */
 class CipherProbePr36Pass2StarterTest {
 

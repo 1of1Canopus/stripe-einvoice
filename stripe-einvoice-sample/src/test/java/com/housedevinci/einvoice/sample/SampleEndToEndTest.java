@@ -166,7 +166,10 @@ class SampleEndToEndTest {
 
     // The bytes that were archived are the bytes the official rules accepted (checklist line 15),
     // re-checked here from the archive rather than from anything the renderer still held.
-    org.assertj.core.api.Assertions.assertThat(validator.validate(archived, null).verdict())
+    org.assertj.core.api.Assertions.assertThat(
+            ((com.housedevinci.einvoice.adapter.validation.En16931DocumentValidator) validator)
+                .validateInDetail(archived, false)
+                .verdict())
         .isEqualTo(com.housedevinci.einvoice.application.DocumentValidator.Verdict.PASSED);
   }
 
