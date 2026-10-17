@@ -187,3 +187,168 @@ adds them to `CipherProbePr36Test` (package `adapter.jdbc`) and `CipherProbePr36
 this branch, so the branch stays green.
 
 D-PS1-27 stays open until the pass-2 run shows these probes green.
+
+## Pass 2 (2026-10-18)
+
+Head reviewed: `e1a9853`. Probes of pass 1 in `8eefb5f`, fixes in `183355e`, changelog in
+`e1a9853`.
+
+**Verdict: MERGE WITH FIXES.** No HIGH. The five pass-1 findings are closed: each probe is green,
+and each fix's mutation turns its probe red again. This pass found two new LOW and two new INFO
+findings. One LOW (D-PR36-6) needs a new mechanism, so it is a design stop: the builder writes a
+one-page design, and this review reads it before any code.
+
+### Numbers
+
+| item | result |
+|---|---|
+| `./mvnw -B clean verify` on `e1a9853`, Docker up | BUILD SUCCESS, 695 tests (core 552, starter 135, sample 8), 0 failures, 0 skipped, JaCoCo gate met |
+| pass-1 probes (7 tests for D-PR36-1 to D-PR36-5) | 7 green |
+| the builder's six fix mutations, re-run here | 6 RED |
+| new probes of this pass | 4 fail on `e1a9853` (D-PR36-6 to D-PR36-9) |
+| extra checks of this pass | 6 pass |
+
+### Pass-1 findings: closed
+
+| id | probe now | mutation re-run here | result |
+|---|---|---|---|
+| D-PR36-1 | green | lateness measured from the period end again | RED |
+| D-PR36-2 | green | dating left out of both verifier keys (row and event) | RED |
+| D-PR36-2, builder row D-DO-B6 | green | void event built without the dates | RED, 3 of 4 in `IssuanceChainVerifierTest` |
+| D-PR36-3 | green | the old `DEI-130` message | RED |
+| D-PR36-4 | green (both) | date comparison skipped | RED (both) |
+| D-PR36-5 | green | `date_trunc('day', clock_timestamp())` in `IssueClock.STATEMENT` | RED |
+
+### Builder's row D-DO-B6: closed
+
+Every chained event now carries the dates. Only three kinds of issuance event are chained:
+`ISSUED` (`markIssued`), `FAILED_VALIDATION` (`markFailed`) and `VOID_UNUSED` (`void`). The first
+two re-read the row with `findBySource`, which reads the dating columns. The void step now copies
+`issuance.dating()` from the row it locked. No other main-code site builds an `Issuance` or an
+`IssuanceEvent`: the store has three `new Issuance(` (insert, row read, void copy) and three
+`appendEvent` calls. `NUMBERED` and `FAILED_ARCHIVE` are not chained, by design.
+
+* Reprocess: it re-runs the unit of work. A resumed allocation returns the stored row, so the
+  dates come from the row. The path tests with cause `REPROCESS` cover it.
+* Credit note (381): `allocateCreditNote` inserts with `IssueDating.ofCreditNote`; its events go
+  through the same three sites. The unit of work does not render 381 in this version.
+* "Placeholder": there is no 381 placeholder path. The word in the store is the year placeholder
+  of the series prefix.
+
+### What was attacked and held
+
+* **Which dates EINVOICE-DATES reads.** BT-2 `cbc:IssueDate`, BT-72
+  `cac:Delivery/cbc:ActualDeliveryDate`, BG-14 `cac:InvoicePeriod/cbc:StartDate` and
+  `cbc:EndDate`. All are direct children of the root, matched by namespace and local name. Each
+  is compared as an exact string, in both directions: a date the allocation does not have also
+  refuses. Line periods (BG-26) are not compared; they are not allocated.
+* **Right date, wrong place.** A delivery date in a foreign namespace is refused (XSD, before the
+  rule). A second document-level `cac:Delivery`, a week earlier than the first, is refused by
+  `UBL-SR-24` before the rule runs. Example: first delivery 2026-04-01, second 2026-03-25:
+  `FAILED`, `UBL-SR-24 (fatal)`.
+* **Right date, wrong format.** The comparison is string equality with the ISO day. The valid
+  `xsd:date` `2026-04-01+14:00` is refused. No other spelling can pass, whatever a parser on the
+  Stripe side accepts.
+* **True dates pass.** A true delivery date and a true period are both archivable (extra check).
+  An always-refuse mutant of the rule turns 2 sample end-to-end tests red, so the delivery case is
+  in the suite. The period case is only in this pass's extra check; the fixer adds it with the
+  probes.
+* **The stated limit.** Production callers of `DocumentValidator.validate`: one,
+  `IssuanceUnitOfWork.process`, which passes `DocumentInput.numbered(...)`, never null. Verified.
+  Two related gaps remain: a host validator (D-PR36-6) and the silent null branch (D-PR36-8).
+* **DEI-137 at a day boundary.** Stripe's `finalized_at` is a Unix instant; it has no zone. Both
+  ends become days in the seller's tax zone. Extra check with tax zone `Pacific/Kiritimati`
+  (UTC+14): finalised 23:59:59 local on 10 March, numbered 00:00:01 local on 12 March, gives two
+  days and a finding (in UTC it would read one day). Finalised 00:00:01 local on 11 March,
+  numbered 23:59:59 local on 12 March, gives one day and no finding. Counting calendar days is the
+  design.
+* **Rows from before this PR.** `v0.1.0` is released, so rows without dates exist. Row and event
+  both empty reads `INTACT`. That is right: both were written that way, and the event is under the
+  chain hash. A 0.2.0 row whose dates are cleared to the old shape reads `BROKEN` (extra check).
+  An old row given invented dates also differs from its event, so `BROKEN`. The pass-1 word
+  "unreleased" in ruling (i) is about schema format 2, not about 0.1.0.
+* **Two-clock tolerance.** Default 5 minutes, refused at zero, below zero and above 1 hour. Held.
+  But see D-PR36-7.
+
+### Findings
+
+#### D-PR36-6 (LOW, boundary validation): the date rule lives in a port the host may replace. DESIGN STOP
+
+The README says: "You may still supply your own `DocumentRenderer` or `DocumentValidator` bean
+and ours backs off". The starter's validator bean is `@ConditionalOnMissingBean`. EINVOICE-DATES
+exists only inside `En16931DocumentValidator`. With a host validator, nothing compares the
+document's dates with the allocation, and `DEI-280` is again a renderer's word. The pass-1 fix
+list put the check in that class; that prescription was too narrow.
+
+Example: an invoice is numbered on 10 January. A host renderer writes BT-2 as 3 January and says
+`carriesSupplyDate() == true`. The host validator passes. The event ends `COMPLETED` and the
+archive holds `<IssueDate>2026-01-03</IssueDate>`.
+
+Property that must hold: no document is archived whose BT-2, BT-72 or BG-14 differ from the
+allocation, whatever renderer and validator beans are wired. If a weaker state must exist, it is
+an explicit property that WARNs at every startup. Paths the design must cover: the module
+validator; a host validator bean; core wiring without the starter (the public
+`IssuanceUnitOfWork` constructor); the null-input branch (D-PR36-8); the credit-note slice once it
+renders 381. Owner: the builder, design page first. Probe:
+`probe_a_host_validator_archives_a_document_dated_other_than_its_numbering_day`.
+
+#### D-PR36-7 (LOW, boundary validation): a widened clock tolerance starts without a warning
+
+`einvoice.numbering.max-clock-regression` is a security bound. Pass 1 recorded the residual:
+whoever controls only the database clock can move an issue date by at most this much. Set to
+`59m`, the application starts with no WARN. Then any invoice numbered within 59 minutes of
+midnight can be dated on the other day.
+
+Example: tolerance 59m, database clock set 50 minutes ahead at 23:20 Paris. The cross-check
+accepts it, and the invoice is dated the next day.
+
+Fix (fix pass): `EInvoiceStartupCheck` WARNs at every startup when the value is above
+`JdbcIssuanceStore.DEFAULT_MAX_CLOCK_REGRESSION` (5 minutes). The line names the property, the
+value, and the residual in one sentence. No WARN at the default. The `docs/index.md` property row
+says "above `5m` WARNs at every startup". Probe:
+`probe_a_widened_clock_tolerance_starts_without_a_warning`.
+
+#### D-PR36-8 (INFO, false completion): a null allocation input skips the date rule silently
+
+`validate` runs the rule only when `input != null`. No production caller passes null today
+(verified above); eight test calls do. A skipped control still reports `PASSED`.
+
+Example: `validate(backdatedBytes, null).archivable()` is `true`.
+
+Fix (inside the D-PR36-6 design if the check moves; else fix pass):
+`En16931DocumentValidator.validate` returns `NOT_EVALUATED` with rule id `EINVOICE-DATES` for a
+null input. The tests that want schema and schematron only call `validateInDetail`. Probe:
+`probe_a_null_allocation_input_skips_the_date_rule`.
+
+#### D-PR36-9 (INFO, docs-vs-code): the rule's javadoc claims more than it checks
+
+The javadoc of `datesMatch` says "a document with dates the allocation did not give ... is not
+archivable". A document-level `cbc:TaxPointDate` (BT-7, the VAT point date) passes. No allocation
+gives BT-7, and the module's renderer never writes one.
+
+Example: BT-2 and BT-72 are right, and BT-7 is 30 days before the supply day. `PASSED`,
+archivable.
+
+Fix (inside the D-PR36-6 design if the check moves; else fix pass): EINVOICE-DATES also refuses a
+document-level `cbc:TaxPointDate`. The javadoc and `docs/documents.md` list the checked elements
+and this refusal. Probe: `probe_a_tax_point_date_the_allocation_did_not_give_is_archivable`.
+
+### Fix list
+
+| id | severity | who | probe |
+|---|---|---|---|
+| D-PR36-6 | LOW | builder, design page first | `probe_a_host_validator_archives_a_document_dated_other_than_its_numbering_day` |
+| D-PR36-7 | LOW | fix pass | `probe_a_widened_clock_tolerance_starts_without_a_warning` |
+| D-PR36-8 | INFO | with D-PR36-6, else fix pass | `probe_a_null_allocation_input_skips_the_date_rule` |
+| D-PR36-9 | INFO | with D-PR36-6, else fix pass | `probe_a_tax_point_date_the_allocation_did_not_give_is_archivable` |
+
+The probes are in the probe folder kept with the internal review notes:
+`CipherProbePr36Pass2Test` (package `application`), `CipherProbePr36Pass2DocumentTest` (package
+`adapter.validation`, with three extra checks), `CipherProbePr36Pass2StoreTest` (package
+`adapter.jdbc`, two extra checks, green) and `CipherProbePr36Pass2StarterTest` (package
+`autoconfigure`). The fixer adds them before touching production code. They are not committed red
+on this branch.
+
+D-PS1-27: the pass-1 condition is met (its probes are green). The date-order mechanism holds. The
+row stays open until D-PR36-6 to D-PR36-9 are closed, and for the 0.2.0 tag conditions already
+recorded.
