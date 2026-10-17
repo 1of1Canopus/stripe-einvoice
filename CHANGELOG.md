@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- The reference guard now refuses the moved-private document names in any letter case (for
+  example a lower-case copy of a private document), in content and in file names. The bare
+  review and release words stay upper case only, because in lower case they are plain English.
 - Build: the reference guard (`tools/check-private-references.sh`) now also refuses the first names of the studio's agents in the tree, the main jar and the sources jar, so public text keeps to roles. Case-sensitive and whole-word; the script's header lists each name left out and why. The jar scan reads class files as text, so a string length byte cannot read as a name on GNU grep.
 - After the security review of that change: a tab, form feed, vertical tab or carriage return
   before a name no longer hides it; only the JDK cipher class may follow a dot or a slash; the
