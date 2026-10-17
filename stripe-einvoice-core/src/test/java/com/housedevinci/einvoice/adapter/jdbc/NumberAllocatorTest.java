@@ -32,7 +32,12 @@ class NumberAllocatorTest {
           "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8), "k1");
 
   static AllocationRequest request(SeriesKey key, String invoiceId) {
-    return new AllocationRequest(key, invoiceId, "", "STRIPE-0001", JANUARY, "fr-2026.1");
+    return new AllocationRequest(
+        key, invoiceId, "", "STRIPE-0001", JANUARY, utcDate(JANUARY), "fr-2026.1");
+  }
+
+  static java.time.LocalDate utcDate(Instant instant) {
+    return java.time.LocalDate.ofInstant(instant, ZoneOffset.UTC);
   }
 
   static SeriesKey key(String seller) {
@@ -120,7 +125,8 @@ class NumberAllocatorTest {
     SeriesKey next = new SeriesKey(seller, "DEFAULT", 2027, Mode.LIVE);
     Issuance first =
         store.allocate(
-            new AllocationRequest(next, "in_2027_first", "", "STRIPE-0002", newYear, "fr-2027.1"));
+            new AllocationRequest(
+                next, "in_2027_first", "", "STRIPE-0002", newYear, utcDate(newYear), "fr-2027.1"));
 
     assertThat(first.legalNumber().counter()).isEqualTo(1L);
     assertThat(
@@ -147,10 +153,10 @@ class NumberAllocatorTest {
     // to let anything jump a counter forward, which is the point of it.
     PostgresSupport.execute(
         "INSERT INTO einvoice_series"
-            + " (seller_id, series, fiscal_year, mode, prefix, width, next_number, updated_at)"
-            + " VALUES ('"
+            + " (seller_id, series, fiscal_year, mode, prefix, width, next_number, updated_at,"
+            + " document_type) VALUES ('"
             + seller
-            + "', 'DEFAULT', 2026, 'live', 'SMALL-', 4, 9999, now())");
+            + "', 'DEFAULT', 2026, 'live', 'SMALL-', 4, 9999, now(), '380')");
 
     Issuance last = store.allocate(request(key(seller), "in_narrow_last"));
     assertThat(last.legalNumber().value()).isEqualTo("SMALL-9999");

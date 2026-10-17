@@ -9,6 +9,8 @@ import com.housedevinci.einvoice.application.IssuanceReader;
 import com.housedevinci.einvoice.application.NumberAllocator;
 import com.housedevinci.einvoice.application.NumberVoider;
 import com.housedevinci.einvoice.application.VoidRequest;
+import com.housedevinci.einvoice.domain.ComplianceFinding;
+import com.housedevinci.einvoice.domain.CorrectionTarget;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.Issuance;
@@ -22,6 +24,7 @@ import com.housedevinci.einvoice.domain.SeriesDefinition;
 import com.housedevinci.einvoice.domain.SeriesKey;
 import com.housedevinci.einvoice.domain.SeriesReport;
 import com.housedevinci.einvoice.domain.Timestamps;
+import com.housedevinci.einvoice.domain.en16931.DocumentTypeCode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -30,6 +33,7 @@ import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -70,7 +74,8 @@ public final class JdbcIssuanceStore
   static final String SELECT_ISSUANCE_COLUMNS =
       "id, seller_id, mode, stripe_invoice_id, stripe_account_id, stripe_number, series,"
           + " fiscal_year, legal_number, counter, issued_at, allocated_at, document_sha256,"
-          + " archive_key, rule_pack_version, state, void_reason, void_rule_id";
+          + " archive_key, rule_pack_version, state, void_reason, void_rule_id, document_type,"
+          + " corrects_issuance_id";
 
   static final String FIND_BY_SOURCE_FOR_UPDATE =
       "SELECT "
@@ -84,31 +89,75 @@ public final class JdbcIssuanceStore
           + " FROM einvoice_issuance WHERE seller_id = ? AND mode = ? AND stripe_invoice_id = ?";
 
   static final String CREATE_SERIES_ROW =
-      "INSERT INTO einvoice_series"
-          + " (seller_id, series, fiscal_year, mode, prefix, width, next_number, updated_at)"
-          + " VALUES (?,?,?,?,?,?,1,?) ON CONFLICT DO NOTHING";
+      "INSERT INTO einvoice_series (seller_id, document_type, series, fiscal_year, mode, prefix,"
+          + " width, next_number, updated_at) VALUES (?,?,?,?,?,?,?,1,?) ON CONFLICT DO NOTHING";
 
   // D1-03: the bound and the rendered value both come from the row's own prefix and width, never
   // from the configured definition, so an edited property cannot silently change the format of a
   // live series. D1-01: the row's prefix was resolved from the year placeholder once, at the row's
   // creation, so it already differs per fiscal year - the allocator does not need to know that
   // here.
+  //
+  // D-PS1-38: an invoice is numbered whatever its date - a sale must get its invoice - and the
+  // series keeps the later of the two dates with GREATEST, so last_issue_date never goes back and
+  // the series guard (which refuses a backwards date for every type) is never fought. An earlier
+  // date is recorded as a finding by the caller of this statement.
   static final String ALLOCATE =
-      "UPDATE einvoice_series SET next_number = next_number + 1, updated_at = ?"
-          + " WHERE seller_id = ? AND series = ? AND fiscal_year = ? AND mode = ?"
-          + " AND next_number <= (power(10, width)::bigint - 1)"
+      "UPDATE einvoice_series SET next_number = next_number + 1,"
+          + " last_issue_date = GREATEST(last_issue_date, ?), updated_at = ?"
+          + " WHERE seller_id = ? AND document_type = ? AND series = ? AND fiscal_year = ?"
+          + " AND mode = ? AND next_number <= (power(10, width)::bigint - 1)"
           + " RETURNING next_number - 1, prefix, width";
 
+  // T9: a credit note is numbered only in date order. The predicate is in the counter statement
+  // itself, under the row lock, so no read-then-write window exists; zero rows updated is re-read
+  // to tell "out of order" from "exhausted".
+  static final String ALLOCATE_IN_DATE_ORDER =
+      "UPDATE einvoice_series SET next_number = next_number + 1,"
+          + " last_issue_date = GREATEST(last_issue_date, ?), updated_at = ?"
+          + " WHERE seller_id = ? AND document_type = ? AND series = ? AND fiscal_year = ?"
+          + " AND mode = ? AND next_number <= (power(10, width)::bigint - 1)"
+          + " AND (last_issue_date IS NULL OR last_issue_date <= ?)"
+          + " RETURNING next_number - 1, prefix, width";
+
+  // The row lock, taken by its own statement before the counter moves, so the date the series
+  // held before this allocation is read under the same lock the counter is moved under.
+  static final String LOCK_SERIES =
+      "SELECT last_issue_date FROM einvoice_series"
+          + " WHERE seller_id = ? AND document_type = ? AND series = ? AND fiscal_year = ?"
+          + " AND mode = ? FOR UPDATE";
+
   static final String READ_SERIES =
-      "SELECT prefix, width, next_number FROM einvoice_series"
-          + " WHERE seller_id = ? AND series = ? AND fiscal_year = ? AND mode = ?";
+      "SELECT prefix, width, next_number, last_issue_date FROM einvoice_series"
+          + " WHERE seller_id = ? AND document_type = ? AND series = ? AND fiscal_year = ?"
+          + " AND mode = ?";
+
+  // D-CNS-S12: the invoice a credit note corrects, read within the credit note's own seller and
+  // mode. A target of another seller or mode therefore reads as absent.
+  static final String READ_CORRECTION_TARGET =
+      "SELECT id, seller_id, mode, series, fiscal_year, legal_number, document_type, state,"
+          + " document_sha256 FROM einvoice_issuance WHERE id = ? AND seller_id = ? AND mode = ?";
+
+  static final String LATEST_EVENT_OF_NUMBER =
+      "SELECT state, document_sha256 FROM einvoice_issuance_event"
+          + " WHERE seller_id = ? AND mode = ? AND legal_number = ? ORDER BY seq DESC LIMIT 1";
+
+  static final String RECORD_FINDING =
+      "INSERT INTO einvoice_finding (seller_id, mode, code, subject_id, first_seen, last_seen)"
+          + " VALUES (?,?,?,?,?,?)"
+          + " ON CONFLICT (seller_id, mode, code, subject_id) DO UPDATE"
+          + " SET last_seen = EXCLUDED.last_seen";
+
+  static final String SERIES_TYPES =
+      "SELECT seller_id, mode, series, fiscal_year, document_type FROM einvoice_series";
 
   private static final String SET_LOCK_TIMEOUT_PREFIX = "SET LOCAL lock_timeout = '";
 
   static final String INSERT_ISSUANCE =
       "INSERT INTO einvoice_issuance (seller_id, mode, stripe_invoice_id, stripe_account_id,"
           + " stripe_number, series, fiscal_year, legal_number, counter, issued_at, allocated_at,"
-          + " rule_pack_version, state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id";
+          + " rule_pack_version, state, document_type, corrects_issuance_id)"
+          + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id";
 
   static final String MARK_ARCHIVING =
       "UPDATE einvoice_issuance SET state = ?, document_sha256 = ?, archive_key = ?"
@@ -134,8 +183,8 @@ public final class JdbcIssuanceStore
   static final String SERIES_LINES =
       "SELECT counter, legal_number, state, stripe_invoice_id, issued_at, allocated_at,"
           + " void_reason, void_rule_id FROM einvoice_issuance"
-          + " WHERE seller_id = ? AND series = ? AND fiscal_year = ? AND mode = ?"
-          + " ORDER BY counter";
+          + " WHERE seller_id = ? AND document_type = ? AND series = ? AND fiscal_year = ?"
+          + " AND mode = ? ORDER BY counter";
 
   /** D1-05's default when a caller does not configure one, matching the property's own default. */
   public static final Duration DEFAULT_ALLOCATION_TIMEOUT = Duration.ofSeconds(5);
@@ -147,8 +196,24 @@ public final class JdbcIssuanceStore
   private final Clock clock;
   private final Duration allocationTimeout;
 
-  /** The configuration key of a series, before a fiscal year is known. */
-  public record SeriesId(String sellerId, String series, Mode mode) {}
+  /**
+   * The configuration key of a series, before a fiscal year is known: one per seller, document type
+   * and mode. The allocator resolves a request to exactly one of these and never falls back from
+   * one type to another (credit-note series design, section 3).
+   */
+  public record SeriesId(String sellerId, String series, Mode mode, DocumentTypeCode documentType) {
+
+    public SeriesId {
+      if (documentType == null) {
+        throw new EInvoiceException(ErrorCodes.INVALID, "a series id needs a document type");
+      }
+    }
+
+    /** An invoice series ({@code 380}). */
+    public SeriesId(String sellerId, String series, Mode mode) {
+      this(sellerId, series, mode, DocumentTypeCode.COMMERCIAL_INVOICE);
+    }
+  }
 
   public JdbcIssuanceStore(
       DataSource dataSource,
@@ -193,6 +258,7 @@ public final class JdbcIssuanceStore
     this.chain = Objects.requireNonNull(chain, "chain");
     this.series = Map.copyOf(series);
     this.clock = Objects.requireNonNull(clock, "clock");
+    refuseAmbiguousSeries(this.series);
     this.allocationTimeout = Objects.requireNonNull(allocationTimeout, "allocationTimeout");
   }
 
@@ -200,9 +266,50 @@ public final class JdbcIssuanceStore
   // Allocation
   // ---------------------------------------------------------------------------------------------
 
+  /**
+   * Allocates an <b>invoice</b> number. Any other document type is refused here with {@link
+   * ErrorCodes#DOCUMENT_TYPE_NOT_ISSUABLE}, before a statement runs (S-02, D-PS1-06): this request
+   * carries no credit lines, no target and no amounts, so nothing could check a credit note behind
+   * it, and a credit-note number with no document is a hole in a legal series. Credit-note numbers
+   * are allocated only by the pipeline that produces the document.
+   */
   @Override
   public Issuance allocate(AllocationRequest request) {
+    if (request.seriesKey().documentType() != DocumentTypeCode.COMMERCIAL_INVOICE) {
+      throw new EInvoiceException(
+          ErrorCodes.DOCUMENT_TYPE_NOT_ISSUABLE,
+          "this allocator numbers invoices (380) only. A number of type "
+              + request.seriesKey().documentTypeCode()
+              + " is allocated only by the pipeline that produces that document; allocating one"
+              + " here would leave a number no document will ever carry.");
+    }
+    return allocateTyped(request, Optional.empty());
+  }
+
+  /**
+   * The allocation itself, for every document type this store numbers.
+   *
+   * <p>Package-private on purpose: the only caller outside this package will be the document
+   * pipeline that holds the credit note's context (the document-kind seam, a later change). A
+   * credit note ({@code 381}) must name the invoice it corrects; that invoice must be an issued
+   * invoice of the same seller and mode whose stored hash still matches its chained issue event
+   * (D-CNS-S12). The check runs after the resume read and before the counter moves, so a refusal
+   * consumes no number; the insert guard in the database checks the same thing again for every
+   * writer.
+   *
+   * @param correctsIssuanceId the row id of the corrected invoice: present for a credit note,
+   *     absent for an invoice
+   */
+  Issuance allocateTyped(AllocationRequest request, Optional<Long> correctsIssuanceId) {
     SeriesKey key = request.seriesKey();
+    Objects.requireNonNull(correctsIssuanceId, "correctsIssuanceId");
+    if (key.documentType().isCreditNote() != correctsIssuanceId.isPresent()) {
+      throw new EInvoiceException(
+          ErrorCodes.CREDIT_TARGET_INVALID,
+          key.documentType().isCreditNote()
+              ? "a credit note must name the invoice it corrects"
+              : "an invoice corrects no other document");
+    }
     SeriesDefinition definition = definitionFor(key);
     return unitOfWork.inTransaction(
         unit -> {
@@ -227,10 +334,13 @@ public final class JdbcIssuanceStore
             if (existing.isPresent()) {
               return existing.get();
             }
+            if (correctsIssuanceId.isPresent()) {
+              requireCorrectableInvoice(c, key, correctsIssuanceId.get());
+            }
             createSeriesRowForNewFiscalYear(c, key, definition);
-            LegalNumber number = nextNumber(unit, key, definition);
+            LegalNumber number = nextNumber(unit, key, definition, request.issueDate());
             Instant allocatedAt = Timestamps.toStorage(clock.instant());
-            return insertIssuance(c, request, number, allocatedAt);
+            return insertIssuance(c, request, number, allocatedAt, correctsIssuanceId);
           } catch (SQLException e) {
             if ("55P03".equals(e.getSQLState())) {
               throw new EInvoiceException(
@@ -289,7 +399,7 @@ public final class JdbcIssuanceStore
 
   private SeriesDefinition definitionFor(SeriesKey key) {
     SeriesDefinition definition =
-        series.get(new SeriesId(key.sellerId(), key.series(), key.mode()));
+        series.get(new SeriesId(key.sellerId(), key.series(), key.mode(), key.documentType()));
     if (definition == null) {
       throw new EInvoiceException(
           ErrorCodes.SERIES_NOT_CONFIGURED,
@@ -322,16 +432,34 @@ public final class JdbcIssuanceStore
     try (PreparedStatement ps = c.prepareStatement(CREATE_SERIES_ROW)) {
       int i = 1;
       ps.setString(i++, key.sellerId());
+      ps.setString(i++, key.documentTypeCode());
       ps.setString(i++, key.series());
       ps.setInt(i++, key.fiscalYear());
       ps.setString(i++, key.mode().wire());
       ps.setString(i++, definition.resolvePrefix(key.fiscalYear()));
       ps.setInt(i++, definition.width());
       ps.setObject(i, ts(Timestamps.toStorage(clock.instant())));
-      if (ps.executeUpdate() > 0) {
+      int created;
+      try {
+        created = ps.executeUpdate();
+      } catch (SQLException e) {
+        if ("EIS01".equals(e.getSQLState())) {
+          // S-09: the insert guard binds a series name to one document type across fiscal years.
+          throw new EInvoiceException(
+              ErrorCodes.CONFIG,
+              "series "
+                  + key.series()
+                  + " already numbers another document type for this seller and mode; one series"
+                  + " name serves one document type. Configure a different series name.",
+              e);
+        }
+        throw e;
+      }
+      if (created > 0) {
         log.info(
-            "einvoice: opened numbering series seller={} series={} year={} mode={} at 1",
+            "einvoice: opened numbering series seller={} type={} series={} year={} mode={} at 1",
             key.sellerId(),
+            key.documentTypeCode(),
             key.series(),
             key.fiscalYear(),
             key.mode().wire());
@@ -346,40 +474,165 @@ public final class JdbcIssuanceStore
    * format cannot drift from what a restart with an edited property would otherwise produce.
    */
   private LegalNumber nextNumber(
-      JdbcUnitOfWork.Unit unit, SeriesKey key, SeriesDefinition definition) throws SQLException {
+      JdbcUnitOfWork.Unit unit, SeriesKey key, SeriesDefinition definition, LocalDate issueDate)
+      throws SQLException {
     Connection c = unit.connection();
     // T-02, D1-12: the ledger entry for this lock is recorded at the head of allocate()'s unit of
     // work, before the resume read, not here - a transaction that already holds the chain lock
     // must be refused before it does anything at all, not only once it reaches the counter.
-    try (PreparedStatement ps = c.prepareStatement(ALLOCATE)) {
+    Optional<LocalDate> previousDate = lockSeriesRow(c, key);
+    boolean inDateOrder = key.documentType().isCreditNote();
+    try (PreparedStatement ps =
+        c.prepareStatement(inDateOrder ? ALLOCATE_IN_DATE_ORDER : ALLOCATE)) {
       int i = 1;
+      ps.setObject(i++, issueDate);
       ps.setObject(i++, ts(Timestamps.toStorage(clock.instant())));
-      ps.setString(i++, key.sellerId());
-      ps.setString(i++, key.series());
-      ps.setInt(i++, key.fiscalYear());
-      ps.setString(i, key.mode().wire());
+      i = bindSeriesKey(ps, i, key);
+      if (inDateOrder) {
+        ps.setObject(i, issueDate);
+      }
       try (ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
           long counter = rs.getLong(1);
           String prefix = rs.getString(2);
           int width = rs.getInt(3);
-          return LegalNumber.render(prefix, width, counter);
+          LegalNumber number = LegalNumber.render(prefix, width, counter);
+          if (previousDate.isPresent() && issueDate.isBefore(previousDate.get())) {
+            recordOutOfOrder(c, key, number);
+          }
+          return number;
         }
       }
     }
-    throw exhaustedOrUnconfigured(c, key, definition);
+    throw exhaustedOutOfOrderOrUnconfigured(c, key, definition, issueDate);
   }
 
-  private EInvoiceException exhaustedOrUnconfigured(
-      Connection c, SeriesKey key, SeriesDefinition definition) throws SQLException {
-    try (PreparedStatement ps = c.prepareStatement(READ_SERIES)) {
+  private static int bindSeriesKey(PreparedStatement ps, int start, SeriesKey key)
+      throws SQLException {
+    int i = start;
+    ps.setString(i++, key.sellerId());
+    ps.setString(i++, key.documentTypeCode());
+    ps.setString(i++, key.series());
+    ps.setInt(i++, key.fiscalYear());
+    ps.setString(i++, key.mode().wire());
+    return i;
+  }
+
+  private static Optional<LocalDate> lockSeriesRow(Connection c, SeriesKey key)
+      throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(LOCK_SERIES)) {
+      bindSeriesKey(ps, 1, key);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          throw new EInvoiceException(
+              ErrorCodes.SERIES_NOT_CONFIGURED,
+              "the numbering series row disappeared between its creation and this allocation");
+        }
+        return Optional.ofNullable(rs.getObject(1, LocalDate.class));
+      }
+    }
+  }
+
+  /**
+   * D-PS1-27, D-PS1-38. An invoice whose date is earlier than the latest date its series already
+   * numbered is still numbered: a sale must get its invoice, and the remedy for the order of dates
+   * is a separate design. What this adds is that the fact is not silent. An open finding names the
+   * number, in the same transaction as the number itself, so the two commit or roll back together.
+   * A credit note never reaches this: its statement refuses the earlier date (T9).
+   */
+  private void recordOutOfOrder(Connection c, SeriesKey key, LegalNumber number)
+      throws SQLException {
+    Instant now = Timestamps.toStorage(clock.instant());
+    ComplianceFinding finding =
+        ComplianceFinding.of(
+            key.sellerId(), key.mode(), ErrorCodes.ISSUE_DATE_OUT_OF_ORDER, number.value(), now);
+    try (PreparedStatement ps = c.prepareStatement(RECORD_FINDING)) {
       int i = 1;
-      ps.setString(i++, key.sellerId());
-      ps.setString(i++, key.series());
-      ps.setInt(i++, key.fiscalYear());
-      ps.setString(i, key.mode().wire());
+      ps.setString(i++, finding.sellerId());
+      ps.setString(i++, finding.mode().wire());
+      ps.setString(i++, finding.code());
+      ps.setString(i++, finding.subjectId());
+      ps.setObject(i++, ts(finding.firstSeen()));
+      ps.setObject(i, ts(finding.lastSeen()));
+      ps.executeUpdate();
+    }
+    log.warn(
+        "einvoice: invoice {} in series {} is dated before the latest date that series already"
+            + " numbered; numbered anyway and recorded as finding {}",
+        number.value(),
+        key.series(),
+        ErrorCodes.ISSUE_DATE_OUT_OF_ORDER);
+  }
+
+  /**
+   * D-CNS-S12, checked by core before a number is consumed: the target exists for this seller and
+   * mode, is an invoice, is ISSUED, and its stored hash equals the hash on the latest chained event
+   * of its number, which is the ISSUED event. ISSUED is terminal and the hash write-once, so no
+   * lock is needed for this to stay true; the cap on what a credit may credit is not this method's
+   * job.
+   */
+  private static void requireCorrectableInvoice(Connection c, SeriesKey key, long targetId)
+      throws SQLException {
+    String legalNumber;
+    String sha;
+    try (PreparedStatement ps = c.prepareStatement(READ_CORRECTION_TARGET)) {
+      ps.setLong(1, targetId);
+      ps.setString(2, key.sellerId());
+      ps.setString(3, key.mode().wire());
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          throw targetInvalid("no invoice of this seller and mode has that row id");
+        }
+        if (!CorrectionTarget.requiredType().code().equals(rs.getString("document_type"))) {
+          throw targetInvalid("the target is not an invoice; a credit note corrects an invoice");
+        }
+        if (IssuanceState.of(rs.getString("state")) != IssuanceState.ISSUED) {
+          throw targetInvalid(
+              "the target invoice was never issued, so no document exists for it to correct");
+        }
+        legalNumber = rs.getString("legal_number");
+        sha = stripped(rs.getString("document_sha256"));
+      }
+    }
+    try (PreparedStatement ps = c.prepareStatement(LATEST_EVENT_OF_NUMBER)) {
+      ps.setString(1, key.sellerId());
+      ps.setString(2, key.mode().wire());
+      ps.setString(3, legalNumber);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (sha.isEmpty()
+            || !rs.next()
+            || !IssuanceState.ISSUED.name().equals(rs.getString(1))
+            || !sha.equals(stripped(rs.getString(2)))) {
+          throw targetInvalid(
+              "the target invoice's stored document hash does not match its chained issue event");
+        }
+      }
+    }
+  }
+
+  private static EInvoiceException targetInvalid(String why) {
+    return new EInvoiceException(ErrorCodes.CREDIT_TARGET_INVALID, why);
+  }
+
+  private static String stripped(String value) {
+    return value == null ? "" : value.strip();
+  }
+
+  private EInvoiceException exhaustedOutOfOrderOrUnconfigured(
+      Connection c, SeriesKey key, SeriesDefinition definition, LocalDate issueDate)
+      throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(READ_SERIES)) {
+      bindSeriesKey(ps, 1, key);
       try (ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
+          LocalDate last = rs.getObject("last_issue_date", LocalDate.class);
+          if (key.documentType().isCreditNote() && last != null && issueDate.isBefore(last)) {
+            return new EInvoiceException(
+                ErrorCodes.ISSUE_DATE_OUT_OF_ORDER,
+                "this credit note is dated before the latest date its series already numbered;"
+                    + " numbering it would make the dates of the series go backwards. Void it"
+                    + " upstream and create a new one, which takes today's date.");
+          }
           return new EInvoiceException(
               ErrorCodes.SERIES_EXHAUSTED,
               "this numbering series has handed out every number its configured width of "
@@ -395,7 +648,11 @@ public final class JdbcIssuanceStore
   }
 
   private Issuance insertIssuance(
-      Connection c, AllocationRequest request, LegalNumber number, Instant allocatedAt)
+      Connection c,
+      AllocationRequest request,
+      LegalNumber number,
+      Instant allocatedAt,
+      Optional<Long> correctsIssuanceId)
       throws SQLException {
     SeriesKey key = request.seriesKey();
     try (PreparedStatement ps = c.prepareStatement(INSERT_ISSUANCE)) {
@@ -412,7 +669,13 @@ public final class JdbcIssuanceStore
       ps.setObject(i++, ts(Timestamps.toStorage(request.issuedAt())));
       ps.setObject(i++, ts(allocatedAt));
       ps.setString(i++, request.rulePackVersion());
-      ps.setString(i, IssuanceState.NUMBERED.name());
+      ps.setString(i++, IssuanceState.NUMBERED.name());
+      ps.setString(i++, key.documentTypeCode());
+      if (correctsIssuanceId.isPresent()) {
+        ps.setLong(i, correctsIssuanceId.get());
+      } else {
+        ps.setNull(i, java.sql.Types.BIGINT);
+      }
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
         return new Issuance(
@@ -429,9 +692,29 @@ public final class JdbcIssuanceStore
             request.rulePackVersion(),
             IssuanceState.NUMBERED,
             "",
-            "");
+            "",
+            correctsIssuanceId);
       }
     } catch (SQLException e) {
+      if ("EIT01".equals(e.getSQLState())) {
+        throw new EInvoiceException(
+            ErrorCodes.CREDIT_TARGET_INVALID,
+            "the database refused the corrected invoice: a credit note may correct only an issued"
+                + " invoice of the same seller and mode whose stored hash matches its chain",
+            e);
+      }
+      if ("23505".equals(e.getSQLState())
+          && e.getMessage() != null
+          && e.getMessage().contains("einvoice_issuance_number_unique")) {
+        // Invariant 3 as a constraint: two series of one seller and mode rendered the same
+        // string. The startup check refuses overlapping prefixes first; this is the backstop, and
+        // it is a configuration fault, never a claim race to re-read.
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG,
+            "two numbering series of this seller and mode rendered the same legal number; give"
+                + " each series a prefix that no other series' numbers can start with",
+            e);
+      }
       if ("23505".equals(e.getSQLState())) {
         // The backstop, and the only place in this module where a SQL state changes control flow.
         // Two callers missed the resume read together; the loser's counter increment rolls back
@@ -481,11 +764,7 @@ public final class JdbcIssuanceStore
       Connection c, SeriesKey key, SeriesDefinition definition) throws SQLException {
     String expectedPrefix = definition.resolvePrefix(key.fiscalYear());
     try (PreparedStatement ps = c.prepareStatement(READ_SERIES)) {
-      int i = 1;
-      ps.setString(i++, key.sellerId());
-      ps.setString(i++, key.series());
-      ps.setInt(i++, key.fiscalYear());
-      ps.setString(i, key.mode().wire());
+      bindSeriesKey(ps, 1, key);
       try (ResultSet rs = ps.executeQuery()) {
         if (!rs.next()) {
           return;
@@ -563,8 +842,9 @@ public final class JdbcIssuanceStore
                   issuance.rulePackVersion(),
                   IssuanceState.VOID_UNUSED,
                   request.reason(),
-                  request.ruleId());
-          appendEvent(unit, IssuanceEvent.voided(voided, clock.instant()));
+                  request.ruleId(),
+                  issuance.correctsIssuanceId());
+          appendEvent(unit, voided, IssuanceEvent.voided(voided, clock.instant()));
           return voided;
         });
   }
@@ -662,7 +942,8 @@ public final class JdbcIssuanceStore
             ps.executeUpdate();
           }
           Issuance issued = findBySource(c, sellerId, mode, stripeInvoiceId, false).orElseThrow();
-          appendEvent(unit, IssuanceEvent.of(issued, IssuanceState.ISSUED, clock.instant()));
+          appendEvent(
+              unit, issued, IssuanceEvent.of(issued, IssuanceState.ISSUED, clock.instant()));
           return issued;
         });
   }
@@ -719,7 +1000,7 @@ public final class JdbcIssuanceStore
             // the chain, with the failing rule id or the refusal code on it. FAILED_ARCHIVE is
             // deliberately not chained: it is retryable, not a disposition, and its eventual fate
             // is ISSUED or VOID_UNUSED, both of which are.
-            appendEvent(unit, IssuanceEvent.failed(failed, state, ruleId, clock.instant()));
+            appendEvent(unit, failed, IssuanceEvent.failed(failed, state, ruleId, clock.instant()));
           }
           return failed;
         });
@@ -742,8 +1023,16 @@ public final class JdbcIssuanceStore
    * transaction's lock ledger before it is taken: a transaction may hold the series counter's row
    * lock and then this one, never the reverse (N-07 as restated by T-02b).
    */
-  private void appendEvent(JdbcUnitOfWork.Unit unit, IssuanceEvent event) throws SQLException {
+  private void appendEvent(JdbcUnitOfWork.Unit unit, Issuance issuance, IssuanceEvent untargeted)
+      throws SQLException {
     Connection c = unit.connection();
+    // D-PS1-37: a credit note's event carries the corrected invoice's whole identity, read from
+    // that invoice's own row now, never the surrogate id alone and never a caller's copy.
+    IssuanceEvent event =
+        issuance.correctsIssuanceId().isPresent()
+            ? untargeted.withCorrection(
+                correctionTarget(c, issuance, issuance.correctsIssuanceId().get()))
+            : untargeted;
     unit.locks().chainLock();
     AdvisoryLocks.lock(c, AdvisoryLocks.CHAIN_CLASS_ID, AdvisoryLocks.CHAIN_KEY);
     String prev = IssuanceChain.GENESIS;
@@ -786,8 +1075,10 @@ public final class JdbcIssuanceStore
             "INSERT INTO einvoice_issuance_event (ts, seller_id, mode, stripe_account_id, series,"
                 + " fiscal_year, legal_number, counter, stripe_invoice_id, stripe_number, state,"
                 + " issued_at, document_sha256, archive_key, rule_pack_version, void_reason,"
-                + " void_rule_id, chain_version, key_id, prev_hash, hash)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                + " void_rule_id, chain_version, key_id, prev_hash, hash, document_type,"
+                + " corrects_issuance_id, corrects_seller_id, corrects_mode, corrects_series,"
+                + " corrects_fiscal_year, corrects_legal_number)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       int i = 1;
       ps.setObject(i++, ts(linked.timestamp()));
       ps.setString(i++, linked.seriesKey().sellerId());
@@ -809,8 +1100,47 @@ public final class JdbcIssuanceStore
       ps.setString(i++, linked.chainVersion());
       ps.setString(i++, linked.keyId());
       ps.setString(i++, linked.prevHash());
-      ps.setString(i, linked.hash());
+      ps.setString(i++, linked.hash());
+      ps.setString(i++, linked.seriesKey().documentTypeCode());
+      Optional<CorrectionTarget> target = linked.corrects();
+      if (target.isPresent()) {
+        CorrectionTarget t = target.get();
+        ps.setLong(i++, t.issuanceId());
+        ps.setString(i++, t.sellerId());
+        ps.setString(i++, t.mode().wire());
+        ps.setString(i++, t.series());
+        ps.setInt(i++, t.fiscalYear());
+        ps.setString(i, t.legalNumber());
+      } else {
+        ps.setNull(i++, java.sql.Types.BIGINT);
+        ps.setNull(i++, java.sql.Types.VARCHAR);
+        ps.setNull(i++, java.sql.Types.VARCHAR);
+        ps.setNull(i++, java.sql.Types.VARCHAR);
+        ps.setNull(i++, java.sql.Types.INTEGER);
+        ps.setNull(i, java.sql.Types.VARCHAR);
+      }
       ps.executeUpdate();
+    }
+  }
+
+  private static CorrectionTarget correctionTarget(Connection c, Issuance credit, long targetId)
+      throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(READ_CORRECTION_TARGET)) {
+      ps.setLong(1, targetId);
+      ps.setString(2, credit.seriesKey().sellerId());
+      ps.setString(3, credit.seriesKey().mode().wire());
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          throw targetInvalid("the corrected invoice's row is gone or belongs to another seller");
+        }
+        return new CorrectionTarget(
+            rs.getLong("id"),
+            rs.getString("seller_id"),
+            Mode.of(rs.getString("mode")),
+            rs.getString("series"),
+            rs.getInt("fiscal_year"),
+            rs.getString("legal_number"));
+      }
     }
   }
 
@@ -863,8 +1193,8 @@ public final class JdbcIssuanceStore
       "SELECT "
           + SELECT_ISSUANCE_COLUMNS
           + " FROM einvoice_issuance"
-          + " WHERE seller_id = ? AND series = ? AND fiscal_year = ? AND mode = ?"
-          + " ORDER BY counter DESC LIMIT ?";
+          + " WHERE seller_id = ? AND document_type = ? AND series = ? AND fiscal_year = ?"
+          + " AND mode = ? ORDER BY counter DESC LIMIT ?";
 
   @Override
   public List<Issuance> inSeries(SeriesKey key, int limit) {
@@ -872,11 +1202,7 @@ public final class JdbcIssuanceStore
         unit -> {
           List<Issuance> rows = new ArrayList<>();
           try (PreparedStatement ps = unit.connection().prepareStatement(IN_SERIES)) {
-            int i = 1;
-            ps.setString(i++, key.sellerId());
-            ps.setString(i++, key.series());
-            ps.setInt(i++, key.fiscalYear());
-            ps.setString(i++, key.mode().wire());
+            int i = bindSeriesKey(ps, 1, key);
             ps.setInt(i, Math.max(1, limit));
             try (ResultSet rs = ps.executeQuery()) {
               while (rs.next()) {
@@ -896,11 +1222,7 @@ public final class JdbcIssuanceStore
           List<SeriesReport.Line> lines = new ArrayList<>();
           long open = 0;
           try (PreparedStatement ps = c.prepareStatement(SERIES_LINES)) {
-            int i = 1;
-            ps.setString(i++, key.sellerId());
-            ps.setString(i++, key.series());
-            ps.setInt(i++, key.fiscalYear());
-            ps.setString(i, key.mode().wire());
+            bindSeriesKey(ps, 1, key);
             try (ResultSet rs = ps.executeQuery()) {
               while (rs.next()) {
                 IssuanceState state = IssuanceState.of(rs.getString("state"));
@@ -922,11 +1244,7 @@ public final class JdbcIssuanceStore
           }
           long next = 1;
           try (PreparedStatement ps = c.prepareStatement(READ_SERIES)) {
-            int i = 1;
-            ps.setString(i++, key.sellerId());
-            ps.setString(i++, key.series());
-            ps.setInt(i++, key.fiscalYear());
-            ps.setString(i, key.mode().wire());
+            bindSeriesKey(ps, 1, key);
             try (ResultSet rs = ps.executeQuery()) {
               if (rs.next()) {
                 next = rs.getLong("next_number");
@@ -948,7 +1266,9 @@ public final class JdbcIssuanceStore
                   "SELECT seq, ts, seller_id, mode, stripe_account_id, series, fiscal_year,"
                       + " legal_number, counter, stripe_invoice_id, stripe_number, state,"
                       + " issued_at, document_sha256, archive_key, rule_pack_version, void_reason,"
-                      + " void_rule_id, chain_version, key_id, prev_hash, hash"
+                      + " void_rule_id, chain_version, key_id, prev_hash, hash, document_type,"
+                      + " corrects_issuance_id, corrects_seller_id, corrects_mode,"
+                      + " corrects_series, corrects_fiscal_year, corrects_legal_number"
                       + " FROM einvoice_issuance_event WHERE seq > ? ORDER BY seq LIMIT ?")) {
             ps.setLong(1, sequenceExclusive);
             ps.setInt(2, limit);
@@ -973,12 +1293,15 @@ public final class JdbcIssuanceStore
           // by a legitimate event that merely happens to share the number and the state.
           try (PreparedStatement ps =
                   c.prepareStatement(
-                      "SELECT seller_id, mode, series, fiscal_year, stripe_invoice_id,"
-                          + " legal_number, state, void_reason, void_rule_id"
-                          + " FROM einvoice_issuance"
-                          + " WHERE state IN ("
+                      "SELECT i.seller_id, i.mode, i.series, i.fiscal_year, i.stripe_invoice_id,"
+                          + " i.legal_number, i.state, i.void_reason, i.void_rule_id,"
+                          + " i.document_type, t.id, t.seller_id, t.mode, t.series,"
+                          + " t.fiscal_year, t.legal_number"
+                          + " FROM einvoice_issuance i"
+                          + " LEFT JOIN einvoice_issuance t ON t.id = i.corrects_issuance_id"
+                          + " WHERE i.state IN ("
                           + disposedStates()
-                          + ") ORDER BY id");
+                          + ") ORDER BY i.id");
               ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
               disposed.add(
@@ -991,11 +1314,56 @@ public final class JdbcIssuanceStore
                       rs.getString(6),
                       rs.getString(7),
                       rs.getString(8),
-                      rs.getString(9)));
+                      rs.getString(9),
+                      rs.getString(10),
+                      targetIdentity(rs, 11)));
             }
           }
           return disposed;
         });
+  }
+
+  @Override
+  public List<SeriesType> seriesTypes() {
+    return unitOfWork.inReadUnit(
+        unit -> {
+          List<SeriesType> types = new ArrayList<>();
+          try (PreparedStatement ps = unit.connection().prepareStatement(SERIES_TYPES);
+              ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+              types.add(
+                  new SeriesType(
+                      rs.getString(1),
+                      rs.getString(2),
+                      rs.getString(3),
+                      rs.getInt(4),
+                      rs.getString(5)));
+            }
+          }
+          return List.copyOf(types);
+        });
+  }
+
+  /**
+   * The corrected invoice's identity, as the cross-check compares it: empty for an invoice, or for
+   * a credit note whose link points at no row (which the cross-check then reports).
+   */
+  private static String targetIdentity(ResultSet rs, int first) throws SQLException {
+    long id = rs.getLong(first);
+    if (rs.wasNull()) {
+      return "";
+    }
+    return id
+        + "/"
+        + rs.getString(first + 1)
+        + "/"
+        + rs.getString(first + 2)
+        + "/"
+        + rs.getString(first + 3)
+        + "/"
+        + rs.getInt(first + 4)
+        + "/"
+        + rs.getString(first + 5);
   }
 
   @Override
@@ -1033,7 +1401,10 @@ public final class JdbcIssuanceStore
             rs.getString("seller_id"),
             rs.getString("series"),
             rs.getInt("fiscal_year"),
-            Mode.of(rs.getString("mode")));
+            Mode.of(rs.getString("mode")),
+            DocumentTypeCode.of(rs.getString("document_type")));
+    long corrects = rs.getLong("corrects_issuance_id");
+    Optional<Long> correctsIssuanceId = rs.wasNull() ? Optional.empty() : Optional.of(corrects);
     return new Issuance(
         rs.getLong("id"),
         key,
@@ -1048,7 +1419,8 @@ public final class JdbcIssuanceStore
         rs.getString("rule_pack_version"),
         IssuanceState.of(rs.getString("state")),
         rs.getString("void_reason"),
-        rs.getString("void_rule_id"));
+        rs.getString("void_rule_id"),
+        correctsIssuanceId);
   }
 
   /**
@@ -1062,13 +1434,50 @@ public final class JdbcIssuanceStore
     return value == null ? "" : value.strip();
   }
 
+  private static boolean plantedIdentity(ResultSet rs) throws SQLException {
+    for (String column :
+        new String[] {
+          "corrects_seller_id", "corrects_mode", "corrects_series", "corrects_legal_number"
+        }) {
+      if (rs.getString(column) != null) {
+        return true;
+      }
+    }
+    rs.getInt("corrects_fiscal_year");
+    return !rs.wasNull();
+  }
+
   private static IssuanceEvent readEvent(ResultSet rs) throws SQLException {
     SeriesKey key =
         new SeriesKey(
             rs.getString("seller_id"),
             rs.getString("series"),
             rs.getInt("fiscal_year"),
-            Mode.of(rs.getString("mode")));
+            Mode.of(rs.getString("mode")),
+            DocumentTypeCode.of(rs.getString("document_type")));
+    long targetId = rs.getLong("corrects_issuance_id");
+    boolean noTarget = rs.wasNull();
+    if (noTarget && plantedIdentity(rs)) {
+      // D-A1-C06: an identity without its id is never hashed and never read; the table refuses
+      // it, so a row that has it was written around the table, and the verifier reports BROKEN.
+      throw new EInvoiceException(
+          ErrorCodes.INVALID,
+          "chained event "
+              + rs.getLong("seq")
+              + " carries a corrected-invoice identity without"
+              + " its row id");
+    }
+    Optional<CorrectionTarget> target =
+        noTarget
+            ? Optional.empty()
+            : Optional.of(
+                new CorrectionTarget(
+                    targetId,
+                    rs.getString("corrects_seller_id"),
+                    Mode.of(rs.getString("corrects_mode")),
+                    rs.getString("corrects_series"),
+                    rs.getInt("corrects_fiscal_year"),
+                    rs.getString("corrects_legal_number")));
     return new IssuanceEvent(
         rs.getLong("seq"),
         instant(rs.getObject("ts", OffsetDateTime.class)),
@@ -1087,6 +1496,56 @@ public final class JdbcIssuanceStore
         rs.getString("chain_version"),
         rs.getString("key_id"),
         rs.getString("prev_hash"),
-        rs.getString("hash"));
+        rs.getString("hash"),
+        target);
+  }
+
+  /**
+   * Refused at construction, so at startup and before any row exists (credit-note series design,
+   * invariant 3 and S-09): two series of one seller and mode whose numbers could render the same
+   * string, and one series name configured for two document types. The unique index on {@code
+   * (seller_id, mode, legal_number)} is the backstop if a check here is ever wrong.
+   *
+   * <p>"Could render the same string" is tested on the prefixes, resolved for this year and the
+   * next: when one resolved prefix starts with the other, a number of the shorter one can carry the
+   * longer one's characters in its digits, so the check refuses without trying to be clever.
+   */
+  private void refuseAmbiguousSeries(Map<SeriesId, SeriesDefinition> configured) {
+    List<Map.Entry<SeriesId, SeriesDefinition>> entries = new ArrayList<>(configured.entrySet());
+    int year = clock.instant().atZone(java.time.ZoneOffset.UTC).getYear();
+    for (int a = 0; a < entries.size(); a++) {
+      for (int b = a + 1; b < entries.size(); b++) {
+        SeriesId left = entries.get(a).getKey();
+        SeriesId right = entries.get(b).getKey();
+        if (!left.sellerId().equals(right.sellerId()) || left.mode() != right.mode()) {
+          continue;
+        }
+        if (left.series().equals(right.series())) {
+          throw new EInvoiceException(
+              ErrorCodes.CONFIG,
+              "series "
+                  + left.series()
+                  + " is configured for two document types; one series name serves one type");
+        }
+        for (int y : new int[] {year, year + 1}) {
+          String l = entries.get(a).getValue().resolvePrefix(y);
+          String r = entries.get(b).getValue().resolvePrefix(y);
+          if (l.startsWith(r) || r.startsWith(l)) {
+            throw new EInvoiceException(
+                ErrorCodes.CONFIG,
+                "series "
+                    + left.series()
+                    + " and "
+                    + right.series()
+                    + " of one seller and mode have prefixes ("
+                    + l
+                    + ", "
+                    + r
+                    + ") that can render the same legal number. Give each series a prefix that"
+                    + " does not start with another's.");
+          }
+        }
+      }
+    }
   }
 }

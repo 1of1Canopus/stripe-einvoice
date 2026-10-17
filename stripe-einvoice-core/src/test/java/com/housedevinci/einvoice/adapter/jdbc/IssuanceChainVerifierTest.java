@@ -120,10 +120,10 @@ class IssuanceChainVerifierTest {
     PostgresSupport.executeOn(
         fixture.dataSource(),
         "INSERT INTO einvoice_issuance (seller_id, mode, stripe_invoice_id, series, fiscal_year,"
-            + " legal_number, counter, issued_at, allocated_at, state) VALUES ('"
+            + " legal_number, counter, issued_at, allocated_at, state, document_type) VALUES ('"
             + seller
             + "', 'live', 'in_forged', 'DEFAULT', 2026, 'INV-2026-009999', 9999, now(), now(),"
-            + " 'ISSUED')");
+            + " 'ISSUED', '380')");
 
     IssuanceChainVerifier.Report report = verifier(store).verify();
     assertThat(report.status()).isEqualTo(IssuanceChainVerifier.Status.BROKEN);

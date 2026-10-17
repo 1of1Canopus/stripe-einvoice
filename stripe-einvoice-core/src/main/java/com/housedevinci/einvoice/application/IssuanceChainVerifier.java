@@ -1,9 +1,11 @@
 package com.housedevinci.einvoice.application;
 
+import com.housedevinci.einvoice.domain.CorrectionTarget;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.IssuanceAnchor;
 import com.housedevinci.einvoice.domain.IssuanceChain;
 import com.housedevinci.einvoice.domain.IssuanceEvent;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -11,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -81,6 +84,9 @@ public final class IssuanceChainVerifier {
    * @param keyed the log's recorded mode, or false when not anchored
    * @param keyIds every distinct key id seen on a row that recomputed
    * @param unchainedDispositions disposed issuance rows with no agreeing chained event
+   * @param forms rows that recomputed, per canonical form ({@code ei1}, {@code ei2h}, {@code ei3},
+   *     {@code ei4h}), so a clean result says which form it checked (credit-note series design,
+   *     section 4)
    */
   public record Report(
       Status status,
@@ -90,7 +96,13 @@ public final class IssuanceChainVerifier {
       boolean anchored,
       boolean keyed,
       Set<String> keyIds,
-      long unchainedDispositions) {
+      long unchainedDispositions,
+      Map<String, Long> forms) {
+
+    public Report {
+      keyIds = Set.copyOf(keyIds);
+      forms = Map.copyOf(forms);
+    }
 
     public boolean intact() {
       return status == Status.INTACT || status == Status.INTACT_UNKEYED || status == Status.EMPTY;
@@ -109,24 +121,35 @@ public final class IssuanceChainVerifier {
                   + " Reporting BROKEN.",
               unchained);
           return new Report(
-              Status.BROKEN, 0, -1, IssuanceChain.GENESIS, false, false, Set.of(), unchained);
+              Status.BROKEN,
+              0,
+              -1,
+              IssuanceChain.GENESIS,
+              false,
+              false,
+              Set.of(),
+              unchained,
+              Map.of());
         }
-        return new Report(Status.EMPTY, 0, -1, IssuanceChain.GENESIS, false, false, Set.of(), 0);
+        return new Report(
+            Status.EMPTY, 0, -1, IssuanceChain.GENESIS, false, false, Set.of(), 0, Map.of());
       }
       log.warn(
           "einvoice: verifying a non-empty issuance log with no anchor row; refusing to report"
               + " INTACT. Reporting NO_ANCHOR.");
-      return new Report(Status.NO_ANCHOR, 0, -1, IssuanceChain.GENESIS, false, false, Set.of(), 0);
+      return new Report(
+          Status.NO_ANCHOR, 0, -1, IssuanceChain.GENESIS, false, false, Set.of(), 0, Map.of());
     }
     boolean expectKeyed = anchored.get().keyed();
-    String expectedVersion =
-        expectKeyed ? IssuanceChain.KEYED_VERSION : IssuanceChain.CANONICAL_VERSION;
+    Map<String, String> seriesTypes = seriesTypes();
 
     String prev = IssuanceChain.GENESIS;
     long after = 0;
     long count = 0;
+    boolean typedSeen = false;
     Set<String> keyIdsSeen = new LinkedHashSet<>();
     Set<String> chained = new LinkedHashSet<>();
+    Map<String, Long> forms = new TreeMap<>();
     while (true) {
       List<IssuanceEvent> page;
       try {
@@ -147,16 +170,21 @@ public final class IssuanceChainVerifier {
             true,
             expectKeyed,
             keyIdsSeen,
-            countUnchained(chained));
+            countUnchained(chained),
+            forms);
       }
       if (page.isEmpty()) {
         break;
       }
       for (IssuanceEvent e : page) {
         IssuanceChain rowChain = chainForRow(expectKeyed, e.keyId());
-        if (!expectedVersion.equals(e.chainVersion())
-            || rowChain == null
-            || !rowChain.verify(e, prev)) {
+        boolean untyped = IssuanceChain.untypedForm(e.chainVersion());
+        if (rowChain == null
+            || !rowChain.verify(e, prev)
+            // Nothing writes an older form after the newer one: an ei1 row after an ei3 row is
+            // a re-labelled row, whatever its hash says.
+            || (untyped && typedSeen)
+            || !typeAgreesWithSeries(e, seriesTypes)) {
           return new Report(
               Status.BROKEN,
               count,
@@ -165,9 +193,12 @@ public final class IssuanceChainVerifier {
               true,
               expectKeyed,
               keyIdsSeen,
-              countUnchained(chained));
+              countUnchained(chained),
+              forms);
         }
+        typedSeen |= !untyped;
         keyIdsSeen.add(e.keyId());
+        forms.merge(e.chainVersion(), 1L, Long::sum);
         chained.add(dispositionKey(e));
         prev = e.hash();
         after = e.sequence();
@@ -177,17 +208,18 @@ public final class IssuanceChainVerifier {
     long unchained = countUnchained(chained);
     if (anchored.get().rowCount() != count || !anchored.get().headHash().equals(prev)) {
       return new Report(
-          Status.ANCHOR_MISMATCH, count, -1, prev, true, expectKeyed, keyIdsSeen, unchained);
+          Status.ANCHOR_MISMATCH, count, -1, prev, true, expectKeyed, keyIdsSeen, unchained, forms);
     }
     if (unchained > 0) {
       log.warn(
           "einvoice: {} disposed issuance row(s) have no chained event that agrees with them."
               + " Reporting BROKEN.",
           unchained);
-      return new Report(Status.BROKEN, count, -1, prev, true, expectKeyed, keyIdsSeen, unchained);
+      return new Report(
+          Status.BROKEN, count, -1, prev, true, expectKeyed, keyIdsSeen, unchained, forms);
     }
     if (count == 0) {
-      return new Report(Status.EMPTY, 0, -1, prev, true, expectKeyed, keyIdsSeen, 0);
+      return new Report(Status.EMPTY, 0, -1, prev, true, expectKeyed, keyIdsSeen, 0, forms);
     }
     return new Report(
         expectKeyed ? Status.INTACT : Status.INTACT_UNKEYED,
@@ -197,16 +229,51 @@ public final class IssuanceChainVerifier {
         true,
         expectKeyed,
         keyIdsSeen,
-        0);
+        0,
+        forms);
+  }
+
+  private Map<String, String> seriesTypes() {
+    Map<String, String> types = new HashMap<>();
+    for (IssuanceEventReader.SeriesType t : reader.seriesTypes()) {
+      types.put(seriesId(t.sellerId(), t.mode(), t.series(), t.fiscalYear()), t.documentType());
+    }
+    return types;
+  }
+
+  /**
+   * S-01. The binding of a series to a document type lives in the series row, which is not chained.
+   * A role that outranks the triggers could flip it and turn a year of invoices into credit notes
+   * with every hash still verifying. So every chained event's type is compared with its series row:
+   * a typed event with the type it hashed, and a 0.1.0 event with the invoice type every 0.1.0
+   * event has by definition. A series row that is missing is a disagreement too.
+   */
+  private static boolean typeAgreesWithSeries(IssuanceEvent e, Map<String, String> seriesTypes) {
+    String expected =
+        IssuanceChain.untypedForm(e.chainVersion())
+            ? CorrectionTarget.requiredType().code()
+            : e.seriesKey().documentTypeCode();
+    String rowType =
+        seriesTypes.get(
+            seriesId(
+                e.seriesKey().sellerId(),
+                e.seriesKey().mode().wire(),
+                e.seriesKey().series(),
+                e.seriesKey().fiscalYear()));
+    return expected.equals(rowType);
+  }
+
+  private static String seriesId(String sellerId, String mode, String series, int fiscalYear) {
+    return sellerId + "|" + mode + "|" + series + "|" + fiscalYear;
   }
 
   // D1-02: keyed on the row's identity - seller, mode, series, fiscal year, source object id,
   // legal number and state - not merely on seller|mode|number|state. RC-02 adds the two void
   // columns: the justification for a burned number is chained, is what an auditor is shown, and
   // lives on a row the runtime role may UPDATE, so a rewrite of it must read as BROKEN exactly as
-  // a rewritten identity does. That narrower key let one
-  // legitimate chained event vouch for every row that happened to share those four values,
-  // including a forged, already-disposed row inserted out of band in a different fiscal year.
+  // a rewritten identity does. Format 2 adds the document type and, for a credit note, the
+  // corrected invoice's identity as the rows hold it now: a type rewritten on the row, or two
+  // target ids swapped, no longer agrees with what the chain recorded (D-PS1-37).
   private long countUnchained(Set<String> chained) {
     return reader.disposedIssuances().stream()
         .map(
@@ -227,7 +294,11 @@ public final class IssuanceChainVerifier {
                     + "|"
                     + d.voidReason()
                     + "|"
-                    + d.voidRuleId())
+                    + d.voidRuleId()
+                    + "|"
+                    + d.documentType()
+                    + "|"
+                    + d.correctedIdentity())
         .filter(key -> !chained.contains(key))
         .count();
   }
@@ -249,7 +320,25 @@ public final class IssuanceChainVerifier {
         + "|"
         + e.voidReason()
         + "|"
-        + e.voidRuleId();
+        + e.voidRuleId()
+        + "|"
+        + e.seriesKey().documentTypeCode()
+        + "|"
+        + e.corrects()
+            .map(
+                t ->
+                    t.issuanceId()
+                        + "/"
+                        + t.sellerId()
+                        + "/"
+                        + t.mode().wire()
+                        + "/"
+                        + t.series()
+                        + "/"
+                        + t.fiscalYear()
+                        + "/"
+                        + t.legalNumber())
+            .orElse("");
   }
 
   private IssuanceChain chainForRow(boolean expectKeyed, String rowKeyId) {

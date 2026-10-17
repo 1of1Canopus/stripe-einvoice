@@ -10,6 +10,7 @@ import com.housedevinci.einvoice.domain.SeriesDefinition;
 import com.housedevinci.einvoice.domain.SeriesKey;
 import java.time.Clock;
 import java.time.ZoneId;
+import java.util.Optional;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,13 +54,18 @@ public class EInvoiceStartupCheck implements InitializingBean {
   public void afterPropertiesSet() {
     refuseIfResettingSeriesLacksYearPlaceholder();
     JdbcSupport.requirePostgreSql(dataSource);
+    // The tax zone is required and has no default, so an unknown id must fail here rather than on
+    // the first invoice that crosses midnight. Read before the schema step: the upgrade from
+    // format 1 records each series' latest issue date as a date in this zone.
+    ZoneId zone = ZoneId.of(properties.getSeller().getTaxZone());
     if (properties.isInitializeSchema()) {
-      JdbcSupport.initializeSchema(dataSource);
+      JdbcSupport.initializeSchema(dataSource, Optional.of(zone));
+    } else {
+      // An unprepared schema is refused by name, never used: every numbering statement of this
+      // version names the document type, which a format-1 schema does not have.
+      JdbcSupport.verifySchema(dataSource);
     }
     DatabaseViewGuard.refuseViewsOverOurTables(dataSource);
-    // The tax zone is required and has no default, so an unknown id must fail here rather than on
-    // the first invoice that crosses midnight.
-    ZoneId zone = ZoneId.of(properties.getSeller().getTaxZone());
     int fiscalYear = seedSeries(zone);
     warnAboutWeakerModes();
     probeMaximumWidthNumber(fiscalYear);
