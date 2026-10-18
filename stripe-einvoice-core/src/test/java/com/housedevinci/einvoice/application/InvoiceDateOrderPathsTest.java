@@ -66,7 +66,9 @@ class InvoiceDateOrderPathsTest {
     assertThat(dating.cause()).contains(cause);
     String document = new String(harness.archivedBytes(invoiceId), StandardCharsets.UTF_8);
     assertThat(document).contains("<IssueDate>2026-01-10</IssueDate>");
-    assertThat(document).contains("<Delivery>2026-01-03</Delivery>");
+    assertThat(document)
+        .contains(
+            "<cac:Delivery><ActualDeliveryDate>2026-01-03</ActualDeliveryDate></cac:Delivery>");
     assertThat(harness.findingRows(harness.issuance(invoiceId).orElseThrow().legalNumber().value()))
         .isEqualTo(1L);
   }

@@ -6,6 +6,7 @@ import com.housedevinci.einvoice.adapter.jdbc.JdbcInboundEventStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcReprocessLedger;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcUnitOfWork;
+import com.housedevinci.einvoice.adapter.validation.UblDocumentDates;
 import com.housedevinci.einvoice.application.ArchiveStore;
 import com.housedevinci.einvoice.application.DocumentRenderer;
 import com.housedevinci.einvoice.application.DocumentValidator;
@@ -191,6 +192,9 @@ public class EInvoiceIssuanceAutoConfiguration {
         store,
         renderer,
         validator,
+        // D-PR36-6: built here, not a bean, and not @ConditionalOnMissingBean. A host that
+        // replaces the renderer or the validator cannot replace the date check through Spring.
+        new UblDocumentDates(),
         archive,
         preflightSupport,
         clock,

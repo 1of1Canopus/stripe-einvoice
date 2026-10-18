@@ -1,9 +1,11 @@
 package com.housedevinci.einvoice;
 
+import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.tngtech.archunit.core.domain.JavaClasses;
+import com.tngtech.archunit.core.domain.JavaModifier;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.lang.ArchRule;
@@ -67,6 +69,40 @@ class ArchitectureTest {
                 "java.sql..")
             .because("ports are interfaces; the adapters that implement them live elsewhere");
     rule.check(CLASSES);
+  }
+
+  /**
+   * D-PR36-6, design review R11. The date check is the unit of work's own call to a rule nobody can
+   * replace. A subclass of either class could override it, so both stay final. Example: a later
+   * refactor drops {@code final} to allow a test double, and a host subclass overrides {@code
+   * process}.
+   */
+  @Test
+  void the_unit_of_work_and_the_date_rule_are_final() {
+    classes()
+        .that()
+        .haveFullyQualifiedName("com.housedevinci.einvoice.application.IssuanceUnitOfWork")
+        .or()
+        .haveFullyQualifiedName("com.housedevinci.einvoice.application.DocumentDatesRule")
+        .should()
+        .haveModifier(JavaModifier.FINAL)
+        .because("the date check must not be overridable (D-PR36-6)")
+        .check(CLASSES);
+  }
+
+  /** Design review R8: the rule is JDK and domain only, so it is the same rule everywhere. */
+  @Test
+  void the_date_rule_depends_on_the_jdk_and_the_domain_only() {
+    classes()
+        .that()
+        .haveFullyQualifiedName("com.housedevinci.einvoice.application.DocumentDatesRule")
+        .should()
+        .onlyDependOnClassesThat()
+        .resideInAnyPackage(
+            "java..",
+            "com.housedevinci.einvoice.domain..",
+            "com.housedevinci.einvoice.application..")
+        .check(CLASSES);
   }
 
   @Test
