@@ -93,6 +93,22 @@ All notable changes to this project are documented here. The format follows
   validator answers `NOT_EVALUATED` (rule `EINVOICE-DATES`) when it is given no allocation input,
   so a skipped date check no longer reads `PASSED`. The rule also refuses a document-level
   `cbc:TaxPointDate` (BT-7): it checks BT-2, BT-7, BT-72 and BG-14.
+- The reference guard (`tools/check-private-references.sh`) now reads file names as well as
+  file content, with the same pattern: every tracked path in the tree, every member name and
+  the file name of each built jar. One shape is admitted by name only, a security review
+  document at the root of `docs/`; its text is still scanned. The tree listing is read
+  NUL-separated, and a control byte in a path, a symlink and a submodule entry are refused. In
+  a jar, a member name holding a control byte, a `..` segment or a leading `/`, two members
+  with one name (also after case folding), an empty jar and a listing that does not match the
+  jar's entry count are refused before extraction. The guard runs in the C locale, so a byte
+  that is not valid UTF-8 no longer hides a name, and a refused name is printed with every
+  non-printable byte escaped.
+- The jar side of the reference guard checks that extraction was one to one: no symlink in the
+  extracted folder, and the number of regular files and their total bytes equal what the jar's
+  central directory lists. Before, a member at `./a.txt` next to `a.txt`, the data of a
+  directory entry, or a symlink member's stored target could carry text the content scan never
+  read. Member names with an empty or `.` segment are refused by name. Content hits are printed
+  with control bytes escaped, so a carriage return in a hit cannot start a workflow command.
 - **Security review of the typed number series (D-A1-C01, C02, C04, C05, C06, C07).** The version
   stamp of the schema script is now one final block that checks every format-2 condition and
   refuses with `EIU03` (`DEI-134`); the documented by-hand command is
@@ -121,9 +137,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- **The planted-operator exposure is stated for upgraded databases (D-ADV-1).** The exposure is
+  any database where the application role may `CREATE` in schema `public`: the default on
+  PostgreSQL 14 and older, and kept on 15 and newer after an upgrade or a dump restore. Only a
+  database created new on 15 or newer refuses by default. The `REVOKE CREATE ON SCHEMA public
+  FROM PUBLIC` workaround stays. An operator planted before the `REVOKE` keeps working, so
+  SECURITY-NOTES now also gives the queries that list the operators and functions the role owns.
 - **Every guard function pins its search path (D-A1-C08).** Each trigger function the schema
   script creates now carries `SET search_path = pg_catalog, pg_temp`, so a role that can create
-  objects in `public` (the default on PostgreSQL 14 and older) cannot plant a look-alike `<>`
+  objects in `public` (the default on PostgreSQL 14 and older, and kept on 15 and newer after an
+  upgrade or a dump restore) cannot plant a look-alike `<>`
   operator that disarms a guard. The last block of the script checks the setting on every guard
   function and refuses with `EIU03` (`DEI-134`) otherwise. The backfill now accepts only `UTC` or
   a zone name with a slash, because legacy names such as `CET` are read differently by PostgreSQL

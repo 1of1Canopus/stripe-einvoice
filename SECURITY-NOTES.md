@@ -205,11 +205,26 @@ module is where that is set out.
   WHERE series = '<series>'` with the date on that series' last document.
 - **Every guard function pins its search path.** Each trigger function of the script is created
   with `SET search_path = pg_catalog, pg_temp`, so a role that can create objects in a schema on
-  its own path (the default for `public` on PostgreSQL 14 and older) cannot plant a look-alike
-  operator that makes a guard see "no difference". The final block of the script checks the pin on
-  every guard function and refuses with `EIU03` (`DEI-134`) otherwise. On 0.1.x, the guards that
-  shipped then do not pin it. On PostgreSQL 14 or older, run
-  `REVOKE CREATE ON SCHEMA public FROM PUBLIC` until you upgrade to this version.
+  its own path cannot plant a look-alike operator that makes a guard see "no difference". The
+  exposure exists in any database where the application role may `CREATE` in schema `public`.
+  That is the default on PostgreSQL 14 and older. It is also kept on PostgreSQL 15 and newer when
+  the database was upgraded or restored from a dump, because PostgreSQL 15 preserves the existing
+  permissions of `public` in those cases. Only a database created new on 15 or newer refuses by
+  default. The final block of the script checks the pin on every guard function and refuses with
+  `EIU03` (`DEI-134`) otherwise. On 0.1.x, the guards that shipped then do not pin it. Until you
+  upgrade to this version, run `REVOKE CREATE ON SCHEMA public FROM PUBLIC`. The `REVOKE` does not
+  remove an operator planted before it, and that operator keeps working. So also list the
+  operators and functions the application role owns, and drop what you find after you keep a copy
+  of its definition and run the chain verifier. Replace `einvoice_runtime` with your role's name.
+  No row should come back:
+
+  ```sql
+  SELECT oprnamespace::regnamespace AS schema, oprname AS name
+  FROM pg_operator WHERE oprowner = 'einvoice_runtime'::regrole
+  UNION ALL
+  SELECT pronamespace::regnamespace, proname
+  FROM pg_proc WHERE proowner = 'einvoice_runtime'::regrole;
+  ```
 - **The issue date given to the allocator must be a date some time zone derives from the invoice
   instant.** A far date is refused, because it would move the series date for good.
 - **The six `corrects_*` columns of a chained event are empty together or filled together.** The
