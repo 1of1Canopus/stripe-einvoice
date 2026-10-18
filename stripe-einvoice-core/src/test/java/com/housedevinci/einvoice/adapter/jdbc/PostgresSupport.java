@@ -164,7 +164,7 @@ public final class PostgresSupport {
 
   public static JdbcIssuanceStore store(
       String sellerId, SeriesDefinition definition, Clock clock, IssuanceChain chain) {
-    return new JdbcIssuanceStore(
+    return TestStores.store(
         dataSource(),
         chain,
         Map.of(

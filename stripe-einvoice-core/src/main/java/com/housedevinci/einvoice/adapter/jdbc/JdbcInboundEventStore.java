@@ -50,10 +50,18 @@ public final class JdbcInboundEventStore implements InboundEventStore {
 
   static final String FIND_FOR_UPDATE = FIND + " FOR UPDATE";
 
+  /**
+   * The state move. It also keeps two marks that later transitions never clear (D-PS1-27, design
+   * 5.6): the first time the event was parked and the first time it failed with a retry scheduled.
+   * The allocator reads them to say why an invoice was numbered after its supply day; the state and
+   * the last code are overwritten by the next run, so they cannot say it.
+   */
   static final String TRANSITION =
       "UPDATE einvoice_inbound_event SET state = ?, last_code = ?, updated_at = ?,"
           + " attempts = attempts + 1, next_attempt_at = ?, body = CASE WHEN ? THEN body ELSE NULL"
-          + " END WHERE event_id = ?";
+          + " END, parked_at = CASE WHEN ? THEN coalesce(parked_at, ?) ELSE parked_at END,"
+          + " retried_at = CASE WHEN ? THEN coalesce(retried_at, ?) ELSE retried_at END"
+          + " WHERE event_id = ?";
 
   /**
    * The privileged re-open (QUESTIONS 26), run by {@code JdbcReprocessLedger} in the same
@@ -68,9 +76,13 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   static final String REOPEN_FOR_REPROCESS =
       "UPDATE einvoice_inbound_event SET state = 'RECEIVED', last_code = ?, updated_at = ?,"
           + " attempts = 0, next_attempt_at = NULL"
-          + " WHERE event_id = ? AND state = '"
+          + " WHERE event_id = ? AND (state = '"
           + InboundState.FAILED_MAPPING.name()
-          + "'";
+          + "' OR (state = '"
+          + InboundState.FAILED_ISSUANCE.name()
+          + "' AND last_code = '"
+          + com.housedevinci.einvoice.application.IssuanceReprocess.ELIGIBLE_ISSUANCE_CODE
+          + "'))";
 
   static final String BIND_SELLER =
       "UPDATE einvoice_inbound_event SET seller_id = ?, updated_at = ? WHERE event_id = ?";
@@ -201,6 +213,14 @@ public final class JdbcInboundEventStore implements InboundEventStore {
             }
             // I-07: the state machine decides whether the body survives, not the caller.
             ps.setBoolean(i++, resolved.keepsBody());
+            ps.setBoolean(i++, resolved == InboundState.PARKED);
+            ps.setObject(i++, ts(when));
+            ps.setBoolean(
+                i++,
+                retryIn != null
+                    && (resolved == InboundState.FAILED_FETCH
+                        || resolved == InboundState.FAILED_ISSUANCE));
+            ps.setObject(i++, ts(when));
             ps.setString(i, eventId);
             ps.executeUpdate();
           }

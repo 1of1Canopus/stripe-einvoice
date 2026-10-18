@@ -37,7 +37,7 @@ class IssuanceChainVerifierTest {
     String seller = PostgresSupport.freshSeller(hint);
     SeriesDefinition definition = SIX;
     JdbcIssuanceStore store =
-        new JdbcIssuanceStore(
+        TestStores.store(
             ds,
             chain,
             Map.of(new JdbcIssuanceStore.SeriesId(seller, "DEFAULT", Mode.LIVE), definition),

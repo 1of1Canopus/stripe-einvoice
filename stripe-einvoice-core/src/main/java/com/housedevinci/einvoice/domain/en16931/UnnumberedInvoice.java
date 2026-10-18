@@ -42,7 +42,9 @@ public record UnnumberedInvoice(
     Money taxExclusiveTotal,
     Money taxTotal,
     Money taxInclusiveTotal,
-    Money payableTotal) {
+    Money payableTotal,
+    LocalDate deliveryDate,
+    com.housedevinci.einvoice.domain.SupplyPeriod invoicePeriod) {
 
   public UnnumberedInvoice {
     if (issueDate == null) {
@@ -52,6 +54,11 @@ public record UnnumberedInvoice(
     if (typeCode == null) {
       throw new EInvoiceException(
           ErrorCodes.DOCUMENT_TYPE_UNSUPPORTED, "EN 16931 requires a document type code (BR-04)");
+    }
+    if (deliveryDate != null && invoicePeriod != null) {
+      throw new EInvoiceException(
+          ErrorCodes.INVALID,
+          "this module writes a delivery date (BT-72) or an invoicing period (BG-14), not both");
     }
     currency = CurrencyExponents.requireSupported(currency);
     buyerReference =
@@ -115,32 +122,28 @@ public record UnnumberedInvoice(
         payableTotal);
   }
 
-  public java.util.Optional<String> buyerReferenceValue() {
-    return java.util.Optional.ofNullable(buyerReference);
-  }
-
-  public java.util.Optional<PaymentInstruction> paymentValue() {
-    return java.util.Optional.ofNullable(payment);
-  }
-
-  /** True when any breakdown group carries a category whose VAT the buyer accounts for. */
-  public boolean hasReverseChargeOrIntraCommunity() {
-    return taxSubtotals.stream().anyMatch(t -> t.category().requiresBothVatIdentifiers());
-  }
-
-  /**
-   * The number-dependent tail, and nothing else: BT-1 is screened by {@link EnInvoice}'s own
-   * constructor and every other rule has already run here.
-   *
-   * @param number the legal number this module allocated for the document
-   */
-  public EnInvoice numbered(LegalNumber number) {
-    if (number == null) {
-      throw new EInvoiceException(
-          ErrorCodes.MAPPING_INCOMPLETE, "EN 16931 requires an invoice number (BT-1, BR-02)");
-    }
-    return new EnInvoice(
-        number.value(),
+  /** A document with no supply date and no invoicing period (a credit note in this edition). */
+  public UnnumberedInvoice(
+      LocalDate issueDate,
+      LocalDate dueDate,
+      DocumentTypeCode typeCode,
+      String currency,
+      String buyerReference,
+      String note,
+      String precedingReference,
+      LocalDate precedingReferenceDate,
+      String upstreamNumber,
+      Party seller,
+      Party buyer,
+      PaymentInstruction payment,
+      List<DocumentLine> lines,
+      List<TaxSubtotal> taxSubtotals,
+      Money lineTotal,
+      Money taxExclusiveTotal,
+      Money taxTotal,
+      Money taxInclusiveTotal,
+      Money payableTotal) {
+    this(
         issueDate,
         dueDate,
         typeCode,
@@ -159,7 +162,84 @@ public record UnnumberedInvoice(
         taxExclusiveTotal,
         taxTotal,
         taxInclusiveTotal,
-        payableTotal);
+        payableTotal,
+        null,
+        null);
+  }
+
+  /** BT-72, the actual delivery date, when the document carries one. */
+  public java.util.Optional<LocalDate> deliveryDateValue() {
+    return java.util.Optional.ofNullable(deliveryDate);
+  }
+
+  /** BG-14, the invoicing period, when the document carries one. */
+  public java.util.Optional<com.housedevinci.einvoice.domain.SupplyPeriod> invoicePeriodValue() {
+    return java.util.Optional.ofNullable(invoicePeriod);
+  }
+
+  public java.util.Optional<String> buyerReferenceValue() {
+    return java.util.Optional.ofNullable(buyerReference);
+  }
+
+  public java.util.Optional<PaymentInstruction> paymentValue() {
+    return java.util.Optional.ofNullable(payment);
+  }
+
+  /** True when any breakdown group carries a category whose VAT the buyer accounts for. */
+  public boolean hasReverseChargeOrIntraCommunity() {
+    return taxSubtotals.stream().anyMatch(t -> t.category().requiresBothVatIdentifiers());
+  }
+
+  /**
+   * The number-dependent tail, and nothing else: BT-1 is screened by {@link EnInvoice}'s own
+   * constructor and every other rule has already run here.
+   *
+   * <p>The issue date and the supply fields come with the number, because they were fixed with it
+   * (D-PS1-27): BT-2 is the day the number was given, so the date this body was built with during
+   * the preflight is a placeholder and is replaced here.
+   *
+   * @param number the legal number this module allocated for the document
+   * @param numberedOn BT-2, the day the number was given
+   * @param delivery BT-72, or empty when a period is carried
+   * @param period BG-14, or empty when a delivery date is carried
+   */
+  public EnInvoice numbered(
+      LegalNumber number,
+      LocalDate numberedOn,
+      java.util.Optional<LocalDate> delivery,
+      java.util.Optional<com.housedevinci.einvoice.domain.SupplyPeriod> period) {
+    if (number == null) {
+      throw new EInvoiceException(
+          ErrorCodes.MAPPING_INCOMPLETE, "EN 16931 requires an invoice number (BT-1, BR-02)");
+    }
+    if (numberedOn == null || delivery == null || period == null) {
+      throw new EInvoiceException(
+          ErrorCodes.MAPPING_INCOMPLETE,
+          "a numbered document carries the day its number was given (BT-2) and its supply fields");
+    }
+    return new EnInvoice(
+        number.value(),
+        numberedOn,
+        dueDate,
+        typeCode,
+        currency,
+        buyerReference,
+        note,
+        precedingReference,
+        precedingReferenceDate,
+        upstreamNumber,
+        seller,
+        buyer,
+        payment,
+        lines,
+        taxSubtotals,
+        lineTotal,
+        taxExclusiveTotal,
+        taxTotal,
+        taxInclusiveTotal,
+        payableTotal,
+        delivery.orElse(null),
+        period.orElse(null));
   }
 
   private static void requireUniqueLineIds(List<DocumentLine> lines) {

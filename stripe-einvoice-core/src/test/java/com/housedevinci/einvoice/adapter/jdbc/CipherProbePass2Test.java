@@ -58,7 +58,7 @@ class CipherProbePass2Test {
   }
 
   private static JdbcIssuanceStore storeOn(Connection host, String seller) {
-    return new JdbcIssuanceStore(
+    return TestStores.store(
         JdbcUnitOfWork.using(host),
         PostgresSupport.dataSource(),
         CHAIN,

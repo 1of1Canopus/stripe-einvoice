@@ -303,8 +303,8 @@ numbering API only - a state the application states rather than falls into.
 
 ## Documentation
 
-- `docs/index.md` - how the series works, every property, the series report, and the one thing to
-  tell an auditor about a late invoice from a closing year.
+- `docs/index.md` - how the series works, every property, the series report, and why an
+  invoice's issue date is the day its number is given, with the day of the sale beside it.
 - `docs/documents.md` - the BT-to-Stripe mapping table field by field, the validator artefacts and
   their versions, and what is deliberately refused.
 - `docs/mandates.md` - which country requires a structured invoice from when, each date with its

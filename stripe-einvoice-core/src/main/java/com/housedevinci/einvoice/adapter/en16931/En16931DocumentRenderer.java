@@ -67,7 +67,14 @@ public final class En16931DocumentRenderer implements DocumentRenderer {
   /** The semantic model, for a caller that wants to inspect it rather than the bytes. */
   public EnInvoice model(DocumentInput input) {
     UnnumberedInvoice unnumbered = mapper.map(input.unnumbered());
-    return unnumbered.numbered(input.legalNumber());
+    return unnumbered.numbered(
+        input.legalNumber(), input.issueDate(), input.supplyDate(), input.supplyPeriod());
+  }
+
+  /** Both UBL profiles write BT-72 or BG-14 (D-PS1-44). */
+  @Override
+  public boolean carriesSupplyDate() {
+    return profile.carriesSupplyDate();
   }
 
   /** The profile this renderer writes under. */

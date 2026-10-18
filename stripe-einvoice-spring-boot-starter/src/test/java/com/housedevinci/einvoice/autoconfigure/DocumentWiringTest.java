@@ -290,9 +290,12 @@ class DocumentWiringTest {
 
     @Bean
     DocumentRenderer hostRenderer() {
-      return input ->
-          new DocumentRenderer.RenderedDocument(
-              "<HostFormat/>".getBytes(java.nio.charset.StandardCharsets.UTF_8), "xml", "host");
+      return TestRenderers.supplying(
+          input ->
+              new DocumentRenderer.RenderedDocument(
+                  "<HostFormat/>".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                  "xml",
+                  "host"));
     }
   }
 }

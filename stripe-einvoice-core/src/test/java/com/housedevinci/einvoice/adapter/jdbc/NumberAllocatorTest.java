@@ -32,8 +32,7 @@ class NumberAllocatorTest {
           "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8), "k1");
 
   static AllocationRequest request(SeriesKey key, String invoiceId) {
-    return new AllocationRequest(
-        key, invoiceId, "", "STRIPE-0001", JANUARY, utcDate(JANUARY), "fr-2026.1");
+    return new AllocationRequest(key.scope(), invoiceId, "", "STRIPE-0001", JANUARY, "fr-2026.1");
   }
 
   static java.time.LocalDate utcDate(Instant instant) {
@@ -118,15 +117,18 @@ class NumberAllocatorTest {
     // last restarted in November has no 2027 row, and every invoice after midnight on 1 January
     // would otherwise fail until someone restarted it.
     String seller = PostgresSupport.freshSeller("rollover");
-    JdbcIssuanceStore store = PostgresSupport.store(seller, SIX, CLOCK, CHAIN);
+    IssuanceTestHarness.MovableClock clock = new IssuanceTestHarness.MovableClock(JANUARY);
+    JdbcIssuanceStore store = PostgresSupport.store(seller, SIX, clock, CHAIN);
     store.allocate(request(key(seller), "in_2026_last"));
 
+    // The fiscal year is the numbering day's (D-PS1-41), so the clock crosses the year.
     Instant newYear = Instant.parse("2027-01-01T00:00:03Z");
+    clock.moveTo(newYear.plusSeconds(1));
     SeriesKey next = new SeriesKey(seller, "DEFAULT", 2027, Mode.LIVE);
     Issuance first =
         store.allocate(
             new AllocationRequest(
-                next, "in_2027_first", "", "STRIPE-0002", newYear, utcDate(newYear), "fr-2027.1"));
+                next.scope(), "in_2027_first", "", "STRIPE-0002", newYear, "fr-2027.1"));
 
     assertThat(first.legalNumber().counter()).isEqualTo(1L);
     assertThat(
@@ -144,7 +146,7 @@ class NumberAllocatorTest {
     String seller = PostgresSupport.freshSeller("exhausted");
     SeriesDefinition narrow = new SeriesDefinition("SMALL-", 4, true);
     JdbcIssuanceStore store =
-        new JdbcIssuanceStore(
+        TestStores.store(
             PostgresSupport.dataSource(),
             CHAIN,
             Map.of(new JdbcIssuanceStore.SeriesId(seller, "DEFAULT", Mode.LIVE), narrow),
@@ -156,7 +158,15 @@ class NumberAllocatorTest {
             + " (seller_id, series, fiscal_year, mode, prefix, width, next_number, updated_at,"
             + " document_type) VALUES ('"
             + seller
-            + "', 'DEFAULT', 2026, 'live', 'SMALL-', 4, 9999, now(), '380')");
+            + "', 'DEFAULT', 2026, 'live', 'SMALL-', 4, 9998, now(), '380')");
+    // A series that numbered rows carries its latest issue date (design 5.8); the seed sets it
+    // the way the allocator would have, through the one UPDATE the series guard allows.
+    PostgresSupport.execute(
+        "UPDATE einvoice_series SET next_number = next_number + 1,"
+            + " last_issue_date = DATE '2026-01-15'"
+            + " WHERE seller_id = '"
+            + seller
+            + "'");
 
     Issuance last = store.allocate(request(key(seller), "in_narrow_last"));
     assertThat(last.legalNumber().value()).isEqualTo("SMALL-9999");
@@ -230,7 +240,11 @@ class NumberAllocatorTest {
     // N-08: both timestamps are on the line, so a late invoice from a closing year can be explained
     // on the page where the question is asked.
     assertThat(report.lines().get(0).issuedAt()).isEqualTo(JANUARY);
-    assertThat(report.lines().get(0).allocatedAt()).isEqualTo(JANUARY);
+    // The allocation instant is the database clock's (D-PS1-40): it follows the test clock plus the
+    // real time the database saw pass.
+    assertThat(report.lines().get(0).allocatedAt()).isBetween(JANUARY, JANUARY.plusSeconds(60));
+    assertThat(report.lines().get(0).issueDate())
+        .isEqualTo(java.time.LocalDate.parse("2026-01-15"));
   }
 
   @Test

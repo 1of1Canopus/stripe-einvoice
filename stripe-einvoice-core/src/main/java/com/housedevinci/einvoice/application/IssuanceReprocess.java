@@ -37,8 +37,23 @@ public final class IssuanceReprocess {
 
   private static final Logger log = LoggerFactory.getLogger(IssuanceReprocess.class);
 
-  /** The only state a reprocess may start from: the terminal a mapping refusal lands on. */
+  /** The state a reprocess starts from: the terminal a mapping refusal lands on. */
   public static final InboundState ELIGIBLE = InboundState.FAILED_MAPPING;
+
+  /**
+   * The one other start (design 5.2): an allocation stopped by {@code DEI-132} because the clock
+   * was behind by more than a day. The operator fixes the clock, then re-runs the event; the re-run
+   * goes through the same refusal, so a clock that is still wrong is refused again. Never an
+   * "accept" release, and no other {@code FAILED_ISSUANCE} code qualifies.
+   */
+  public static final String ELIGIBLE_ISSUANCE_CODE = ErrorCodes.ISSUE_CLOCK_BEHIND_SERIES;
+
+  /** True for the two terminals a reprocess may start from. */
+  public static boolean eligible(InboundEvent event) {
+    return event.state() == ELIGIBLE
+        || (event.state() == InboundState.FAILED_ISSUANCE
+            && ELIGIBLE_ISSUANCE_CODE.equals(event.lastCode()));
+  }
 
   private final IssuanceUnitOfWork unitOfWork;
   private final InboundEventStore inbound;
@@ -103,7 +118,7 @@ public final class IssuanceReprocess {
     Optional<Issuance> existing =
         reader.findBySource(configuration.sellerId(), configuration.mode(), event.objectId());
 
-    if (event.state() != ELIGIBLE) {
+    if (!eligible(event)) {
       // Includes the second call after a success: the row is COMPLETED, so this is a stated no-op
       // carrying the number the first call produced, never a second run.
       return refused(

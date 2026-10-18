@@ -260,10 +260,18 @@ class CipherProbeDocumentsTest {
     // Checklist line 45. The findings list is persisted, rendered in an operator view and read by
     // whoever has the logs; some rules' own text interpolates values out of the document being
     // judged, so the port returns rule identifiers and severities and nothing else.
-    byte[] bytes =
+    byte[] rendered =
         new En16931DocumentRenderer(DocumentFixtures.germanSeller(), UblProfile.XRECHNUNG_UBL, null)
             .render(DocumentFixtures.germanStandardRated())
             .bytes();
+    // Since D-PS1-44 a rendered invoice carries its delivery date and raises no finding at all. The
+    // probe needs one rule to fire, so the delivery element is cut out of the bytes here: the
+    // validator judges bytes, and BR-DE-TMP-32 then fires on them as it did on every 0.1.x
+    // document.
+    byte[] bytes =
+        new String(rendered, java.nio.charset.StandardCharsets.UTF_8)
+            .replaceAll("<cac:Delivery>.*?</cac:Delivery>", "")
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8);
     try (En16931DocumentValidator validator =
         new En16931DocumentValidator(
             UblProfile.XRECHNUNG_UBL,
@@ -314,7 +322,7 @@ class CipherProbeDocumentsTest {
             SecureXml.DEFAULT_XSLT2_PROCESSOR,
             Duration.ofSeconds(60),
             2)) {
-      assertThat(validator.validate(bytes, null).verdict())
+      assertThat(validator.validateInDetail(bytes, false).verdict())
           .isEqualTo(DocumentValidator.Verdict.PASSED);
       DocumentValidator.Report report = validator.validate(changed, null);
       assertThat(report.verdict()).isEqualTo(DocumentValidator.Verdict.FAILED);

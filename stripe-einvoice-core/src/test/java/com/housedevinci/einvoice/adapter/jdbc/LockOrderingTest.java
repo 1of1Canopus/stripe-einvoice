@@ -38,7 +38,7 @@ class LockOrderingTest {
     DataSource recording =
         InterceptingDataSource.recording(PostgresSupport.dataSource(), recordings);
     JdbcIssuanceStore store =
-        new JdbcIssuanceStore(
+        TestStores.store(
             recording,
             CHAIN,
             Map.of(new JdbcIssuanceStore.SeriesId(seller, "DEFAULT", Mode.LIVE), SIX),
@@ -106,7 +106,7 @@ class LockOrderingTest {
   }
 
   private static JdbcIssuanceStore storeOn(Connection host, String seller) {
-    return new JdbcIssuanceStore(
+    return TestStores.store(
         JdbcUnitOfWork.using(host),
         PostgresSupport.dataSource(),
         CHAIN,

@@ -158,10 +158,7 @@ class CipherProbePr7bTest {
   }
 
   private static DocumentInput reinput(DocumentInput base, SourceInvoice invoice) {
-    return new DocumentInput(
-        new com.housedevinci.einvoice.application.MappingInput(
-            invoice, base.seriesKey(), base.issueDate(), base.rulePackVersion()),
-        base.legalNumber());
+    return com.housedevinci.einvoice.application.DocumentInputs.reinput(base, invoice);
   }
 
   private static String generate(Random random) {

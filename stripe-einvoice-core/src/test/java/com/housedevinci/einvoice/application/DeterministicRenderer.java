@@ -48,6 +48,12 @@ public final class DeterministicRenderer implements DocumentRenderer {
     return PreflightReport.passed();
   }
 
+  /** It writes the supply date, so the unit of work lets it number invoices (D-PS1-44). */
+  @Override
+  public boolean carriesSupplyDate() {
+    return true;
+  }
+
   @Override
   public RenderedDocument render(DocumentInput input) {
     renders.incrementAndGet();
@@ -61,6 +67,18 @@ public final class DeterministicRenderer implements DocumentRenderer {
     out.append("<Invoice>");
     out.append("<ID>").append(input.legalNumber().value()).append("</ID>");
     out.append("<IssueDate>").append(ISO_DATE.format(input.issueDate())).append("</IssueDate>");
+    input
+        .supplyDate()
+        .ifPresent(d -> out.append("<Delivery>").append(ISO_DATE.format(d)).append("</Delivery>"));
+    input
+        .supplyPeriod()
+        .ifPresent(
+            p ->
+                out.append("<Period>")
+                    .append(ISO_DATE.format(p.start()))
+                    .append("/")
+                    .append(ISO_DATE.format(p.end()))
+                    .append("</Period>"));
     out.append("<SourceId>").append(input.invoice().id()).append("</SourceId>");
     out.append("<Currency>").append(input.invoice().currency()).append("</Currency>");
     out.append("<Total>").append(input.invoice().totalMinor()).append("</Total>");

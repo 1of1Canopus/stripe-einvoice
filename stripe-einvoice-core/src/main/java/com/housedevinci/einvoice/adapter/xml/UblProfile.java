@@ -73,6 +73,16 @@ public enum UblProfile {
     this.requiresElectronicAddress = requiresElectronicAddress;
   }
 
+  /**
+   * Whether this profile can carry the supply date (BT-72, {@code
+   * cac:Delivery/cbc:ActualDeliveryDate}) or the invoicing period (BG-14, {@code
+   * cac:InvoicePeriod}). Both UBL profiles can; a profile that cannot is refused before a number
+   * exists (D-PS1-44).
+   */
+  public boolean carriesSupplyDate() {
+    return true;
+  }
+
   /** The value of {@code einvoice.documents.profile} that selects this one. */
   public String id() {
     return id;

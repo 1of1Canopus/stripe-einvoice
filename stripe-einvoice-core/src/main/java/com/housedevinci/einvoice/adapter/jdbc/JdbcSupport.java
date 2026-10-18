@@ -58,6 +58,19 @@ public final class JdbcSupport {
     return i == null ? null : i.atOffset(ZoneOffset.UTC);
   }
 
+  /**
+   * The issue clock (D-PS1-40): one {@code timestamptz} read on {@code c}, returned as an instant
+   * truncated to what the database stores. See {@link IssueClock#STATEMENT}.
+   */
+  static Instant readIssueClock(java.sql.Connection c) throws java.sql.SQLException {
+    try (java.sql.Statement st = c.createStatement();
+        java.sql.ResultSet rs = st.executeQuery(IssueClock.STATEMENT)) {
+      rs.next();
+      return com.housedevinci.einvoice.domain.Timestamps.toStorage(
+          instant(rs.getObject(1, OffsetDateTime.class)));
+    }
+  }
+
   static Instant instant(OffsetDateTime t) {
     return t == null ? null : t.toInstant();
   }

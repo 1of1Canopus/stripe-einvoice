@@ -303,6 +303,11 @@ class CipherProbeIssuanceTest {
     DocumentRenderer counting =
         new DocumentRenderer() {
           @Override
+          public boolean carriesSupplyDate() {
+            return true;
+          }
+
+          @Override
           public RenderedDocument render(DocumentInput input) {
             throw new IllegalStateException("never reached");
           }
@@ -356,8 +361,16 @@ class CipherProbeIssuanceTest {
 
     harness
         .unitOfWorkWithRenderer(
-            input -> {
-              throw new NullPointerException("a bug in somebody else's renderer");
+            new DocumentRenderer() {
+              @Override
+              public boolean carriesSupplyDate() {
+                return true;
+              }
+
+              @Override
+              public RenderedDocument render(DocumentInput input) {
+                throw new NullPointerException("a bug in somebody else's renderer");
+              }
             })
         .process(eventId);
 

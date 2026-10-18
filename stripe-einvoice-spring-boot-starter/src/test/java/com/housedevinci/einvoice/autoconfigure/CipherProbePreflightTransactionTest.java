@@ -133,6 +133,10 @@ class CipherProbePreflightTransactionTest {
 
   /** Records what was true while the preflight ran. */
   static final class RecordingRenderer implements DocumentRenderer {
+    @Override
+    public boolean carriesSupplyDate() {
+      return true;
+    }
 
     private final CountingDataSource dataSource;
     volatile boolean transactionActive = true;

@@ -29,7 +29,7 @@ class StripeInvoiceMapperTest {
   private static EnInvoice map(DocumentInput input, UblProfile profile) {
     return new StripeInvoiceMapper(DocumentFixtures.germanSeller(), profile, null)
         .map(input.unnumbered())
-        .numbered(input.legalNumber());
+        .numbered(input.legalNumber(), input.issueDate(), input.supplyDate(), input.supplyPeriod());
   }
 
   @Test
@@ -349,10 +349,7 @@ class StripeInvoiceMapperTest {
   }
 
   private static DocumentInput reinput(DocumentInput base, SourceInvoice invoice) {
-    return new DocumentInput(
-        new com.housedevinci.einvoice.application.MappingInput(
-            invoice, base.seriesKey(), base.issueDate(), base.rulePackVersion()),
-        base.legalNumber());
+    return com.housedevinci.einvoice.application.DocumentInputs.reinput(base, invoice);
   }
 
   /** A percentage is bounded before it multiplies anything (checklist lines 1, 2 and 4). */
