@@ -139,9 +139,14 @@ The writer and the validator are the starter's, built from `einvoice.seller.*` a
 @Bean StripeInvoiceSource source() { ... }  // or set einvoice.stripe.api-key and take the SDK
 ```
 
-You may still supply your own `DocumentRenderer` or `DocumentValidator` bean and ours backs off -
-a custom format is a paid service on top of this, and the ports are public so you are not blocked
-waiting for one.
+You may still supply your own `DocumentRenderer` or `DocumentValidator` bean and ours backs off.
+The date check does not: it is part of the unit of work, not of the validator, so no bean removes
+it. Before anything is archived, the unit of work reads the document's issue date (BT-2), supply
+date (BT-72), invoicing period (BG-14) and VAT point date (BT-7, BT-8), and compares them with the
+allocation. Example: an invoice numbered on 10 January whose renderer writes 3 January is refused,
+whatever your validator answers. The check reads UBL `Invoice` and `CreditNote` only; any other
+syntax is refused until the module ships a reader for it. A custom format is a paid service, and
+the date check applies to it. The ports are public, so you are not blocked waiting for one.
 
 With neither ours nor yours, this whole half of the module does not start: allocating a number with
 no way to produce a validated document would consume a legal series and archive nothing. **How

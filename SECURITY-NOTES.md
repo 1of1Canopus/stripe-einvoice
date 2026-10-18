@@ -157,6 +157,15 @@ module is where that is set out.
   number, a hash or an archived byte. To find them, read the series report: a line from before the
   upgrade carries no dating, and `dateOutOfOrder()` is true on each such line whose date is earlier
   than a date of a lower number. Nothing in this module claims that numbering is chronological.
+- **Documents archived by 0.1.0 were never date-checked.** The date check runs before a document
+  is written, and only from 0.2.0. An invoice archived by 0.1.0 is redelivered as stored and its
+  dates were never compared: its row has no dating to compare with, and its hash binds its bytes.
+  Example: a 0.1.0 invoice whose host renderer wrote a wrong BT-2 still carries it. Read such
+  invoices from the series report; a line with no dating is one of them.
+- **The date check trusts the date reader it is given.** The starter builds the module's reader
+  itself. A host that builds `IssuanceUnitOfWork` by hand, or declares its own unit-of-work bean,
+  chooses the reader; any reader other than the module's is logged as a WARN at every startup,
+  naming its class. Host code runs in the same JVM, so this is a signal, not a wall.
 - **The issue date trusts the database clock, checked against a second clock.** Several instances
   share one series row, so the date comes from one clock, the database's, never from an instance.
   A database clock that is wrong is refused, not believed: behind the series or behind Stripe's own
