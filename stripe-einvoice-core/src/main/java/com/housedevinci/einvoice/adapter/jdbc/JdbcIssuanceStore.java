@@ -104,6 +104,15 @@ public final class JdbcIssuanceStore
       "INSERT INTO einvoice_series (seller_id, document_type, series, fiscal_year, mode, prefix,"
           + " width, next_number, updated_at) VALUES (?,?,?,?,?,?,?,1,?) ON CONFLICT DO NOTHING";
 
+  // D-A1-C03: the one type a series name numbers, for a seller and mode, in every fiscal year.
+  static final String READ_SERIES_NAME =
+      "SELECT document_type FROM einvoice_series_name WHERE seller_id = ? AND mode = ?"
+          + " AND series = ?";
+
+  static final String CREATE_SERIES_NAME =
+      "INSERT INTO einvoice_series_name (seller_id, mode, series, document_type, created_at)"
+          + " VALUES (?,?,?,?,?) ON CONFLICT (seller_id, mode, series) DO NOTHING";
+
   // D1-03: the bound and the rendered value both come from the row's own prefix and width, never
   // from the configured definition, so an edited property cannot silently change the format of a
   // live series. D1-01: the row's prefix was resolved from the year placeholder once, at the row's
@@ -460,7 +469,8 @@ public final class JdbcIssuanceStore
                     ErrorCodes.ALLOCATION_TIMEOUT,
                     "this allocation waited longer than einvoice.numbering.allocation-timeout ("
                         + allocationTimeout
-                        + ") for the series row's lock and gave up rather than join an unbounded"
+                        + ") for a lock on the series (its row, or the name of a series another"
+                        + " transaction is creating) and gave up rather than join an unbounded"
                         + " queue",
                     e);
               }
@@ -845,6 +855,91 @@ public final class JdbcIssuanceStore
    */
   private void createSeriesRowForNewFiscalYear(
       Connection c, SeriesKey key, SeriesDefinition definition) throws SQLException {
+    try {
+      bindSeriesName(c, key);
+      insertSeriesRow(c, key, definition);
+    } catch (SQLException e) {
+      if ("40001".equals(e.getSQLState())) {
+        // D-A1-C03, series-name design 4: at REPEATABLE READ or SERIALIZABLE, a name row or year
+        // row another transaction committed after this snapshot cannot be skipped by ON CONFLICT
+        // DO NOTHING, and PostgreSQL aborts the transaction instead. That is "lost the turn to a
+        // concurrent writer of this series", which DEI-117 already means and the pipeline already
+        // retries with a new snapshot. A host that joined us retries its whole transaction, as for
+        // any 40001. Fixed text: the driver's message is not repeated.
+        throw new EInvoiceException(
+            ErrorCodes.ALLOCATION_TIMEOUT,
+            "series "
+                + key.series()
+                + " was created by a concurrent transaction under REPEATABLE READ or SERIALIZABLE"
+                + " isolation, and this transaction can no longer see it. Nothing was numbered;"
+                + " retry in a new transaction.",
+            e);
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * D-A1-C03. Binds the series name to this key's document type, or refuses when the name already
+   * numbers the other type. The name row's primary key serialises two writers of one new name; the
+   * foreign key from every per-year row carries the type, so no per-year row of the other type can
+   * exist, whatever writes it.
+   *
+   * <p>Read first, so the common case (the name exists) costs one read and no write. When the name
+   * is new, the insert waits for any other transaction creating the same name. At READ COMMITTED it
+   * then returns no row if the other committed, and the second read, with a new snapshot, sees the
+   * winner's type. At REPEATABLE READ and SERIALIZABLE it fails with {@code 40001} instead, mapped
+   * by the caller.
+   */
+  private void bindSeriesName(Connection c, SeriesKey key) throws SQLException {
+    Optional<String> bound = readSeriesName(c, key);
+    if (bound.isEmpty()) {
+      try (PreparedStatement ps = c.prepareStatement(CREATE_SERIES_NAME)) {
+        int i = 1;
+        ps.setString(i++, key.sellerId());
+        ps.setString(i++, key.mode().wire());
+        ps.setString(i++, key.series());
+        ps.setString(i++, key.documentTypeCode());
+        ps.setObject(i, ts(Timestamps.toStorage(clock.instant())));
+        if (ps.executeUpdate() > 0) {
+          return;
+        }
+      }
+      bound = readSeriesName(c, key);
+    }
+    if (bound.isEmpty()) {
+      // The insert met a conflicting name row and the next read cannot see it. Rows of this table
+      // are never deleted, so only a concurrent creation explains it: the same retryable outcome.
+      throw new EInvoiceException(
+          ErrorCodes.ALLOCATION_TIMEOUT,
+          "series "
+              + key.series()
+              + " is being created by a concurrent transaction. Nothing was numbered; retry in a"
+              + " new transaction.");
+    }
+    if (!bound.get().equals(key.documentTypeCode())) {
+      throw new EInvoiceException(
+          ErrorCodes.CONFIG,
+          "series "
+              + key.series()
+              + " already numbers another document type for this seller and mode; one series"
+              + " name serves one document type. Configure a different series name.");
+    }
+  }
+
+  private static Optional<String> readSeriesName(Connection c, SeriesKey key) throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(READ_SERIES_NAME)) {
+      ps.setString(1, key.sellerId());
+      ps.setString(2, key.mode().wire());
+      ps.setString(3, key.series());
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? Optional.of(rs.getString(1)) : Optional.empty();
+      }
+    }
+  }
+
+  private void insertSeriesRow(Connection c, SeriesKey key, SeriesDefinition definition)
+      throws SQLException {
     try (PreparedStatement ps = c.prepareStatement(CREATE_SERIES_ROW)) {
       int i = 1;
       ps.setString(i++, key.sellerId());
@@ -855,22 +950,7 @@ public final class JdbcIssuanceStore
       ps.setString(i++, definition.resolvePrefix(key.fiscalYear()));
       ps.setInt(i++, definition.width());
       ps.setObject(i, ts(Timestamps.toStorage(clock.instant())));
-      int created;
-      try {
-        created = ps.executeUpdate();
-      } catch (SQLException e) {
-        if ("EIS01".equals(e.getSQLState())) {
-          // S-09: the insert guard binds a series name to one document type across fiscal years.
-          throw new EInvoiceException(
-              ErrorCodes.CONFIG,
-              "series "
-                  + key.series()
-                  + " already numbers another document type for this seller and mode; one series"
-                  + " name serves one document type. Configure a different series name.",
-              e);
-        }
-        throw e;
-      }
+      int created = ps.executeUpdate();
       if (created > 0) {
         log.info(
             "einvoice: opened numbering series seller={} type={} series={} year={} mode={} at 1",

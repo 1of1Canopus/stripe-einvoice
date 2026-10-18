@@ -274,7 +274,10 @@ class SeriesNameBindingTest {
     assertThat(stateOf(ds, "UPDATE einvoice_series_name SET document_type = '381'" + key))
         .isEqualTo("P0001");
     assertThat(stateOf(ds, "DELETE FROM einvoice_series_name" + key)).isEqualTo("P0001");
-    assertThat(stateOf(ds, "TRUNCATE einvoice_series_name")).isEqualTo("P0001");
+    assertThat(stateOf(ds, "TRUNCATE einvoice_series_name"))
+        .as("the foreign key refuses a plain TRUNCATE before the guard runs")
+        .isEqualTo("0A000");
+    assertThat(stateOf(ds, "TRUNCATE einvoice_series_name CASCADE")).isEqualTo("P0001");
 
     // a new name is the runtime role's to create, with a matching year row
     assertThat(stateOf(runtime, nameRow(f.seller, "NEW", "381"))).isEqualTo("accepted");

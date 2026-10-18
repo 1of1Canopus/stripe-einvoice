@@ -152,7 +152,13 @@ class NumberAllocatorTest {
             Map.of(new JdbcIssuanceStore.SeriesId(seller, "DEFAULT", Mode.LIVE), narrow),
             CLOCK);
     // Seeded near the boundary by inserting the series row directly: the monotonic trigger refuses
-    // to let anything jump a counter forward, which is the point of it.
+    // to let anything jump a counter forward, which is the point of it. The name row comes first:
+    // the series row's foreign key needs it (D-A1-C03).
+    PostgresSupport.execute(
+        "INSERT INTO einvoice_series_name (seller_id, mode, series, document_type, created_at)"
+            + " VALUES ('"
+            + seller
+            + "', 'live', 'DEFAULT', '380', now())");
     PostgresSupport.execute(
         "INSERT INTO einvoice_series"
             + " (seller_id, series, fiscal_year, mode, prefix, width, next_number, updated_at,"

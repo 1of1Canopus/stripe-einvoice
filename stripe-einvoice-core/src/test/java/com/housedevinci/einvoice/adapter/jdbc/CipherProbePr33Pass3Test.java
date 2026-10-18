@@ -160,7 +160,9 @@ class CipherProbePr33Pass3Test {
         state = refused.getSQLState();
       }
     }
-    assertThat(state).isEqualTo("EIS01");
+    // D-A1-C03: the binding is the foreign key to the name row now, not a read in the guard. The
+    // foreign-key check is PostgreSQL's own qualified query, so the planted operator never runs.
+    assertThat(state).isEqualTo("23503");
   }
 
   // ------------------------------------------------------------ C08: a schema other than public
@@ -181,6 +183,9 @@ class CipherProbePr33Pass3Test {
       st.execute("SET search_path = acct");
       states = run(c, script());
       st.execute("SET search_path = public");
+      st.execute(
+          "INSERT INTO acct.einvoice_series_name (seller_id, mode, series, document_type,"
+              + " created_at) VALUES ('seller-acct', 'live', 'INV', '380', now())");
       st.execute(seriesInsert("acct", "seller-acct", "380", 2026));
       try {
         st.execute(seriesInsert("acct", "seller-acct", "381", 2027));
@@ -197,7 +202,7 @@ class CipherProbePr33Pass3Test {
       }
     }
     assertThat(states).isEmpty();
-    assertThat(refusal).isEqualTo("EIS01");
+    assertThat(refusal).as("the foreign key to the name row (D-A1-C03)").isEqualTo("23503");
     assertThat(rows).isEqualTo(1);
   }
 

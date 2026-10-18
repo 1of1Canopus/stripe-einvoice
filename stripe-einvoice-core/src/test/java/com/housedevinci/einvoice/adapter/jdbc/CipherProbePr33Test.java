@@ -236,6 +236,14 @@ class CipherProbePr33Test {
     try (Connection first = ds.getConnection()) {
       first.setAutoCommit(false);
       try (Statement st = first.createStatement()) {
+        // D-A1-C03 build: since the name table, a series row needs its name row (the foreign key),
+        // so the first writer creates it first, in the same transaction, as the allocator does.
+        // Without this line the first insert is itself refused and nothing commits.
+        st.execute(
+            "INSERT INTO einvoice_series_name (seller_id, mode, series, document_type, created_at)"
+                + " VALUES ('"
+                + seller
+                + "', 'live', 'RACE', '380', now())");
         st.execute(String.format(insert, "380", 2026, "R26-"));
       }
       CompletableFuture<Void> second =

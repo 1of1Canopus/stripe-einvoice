@@ -358,10 +358,12 @@ class CipherProbeDocumentSeriesTest {
             + " prefix, width, next_number, updated_at) VALUES ('"
             + f.seller
             + "', '381', 'INV', %d, 'live', 'X-%d-', 6, 1, now())";
+    // In the year of the existing row, the per-year unique index refuses; in another year, the
+    // foreign key to the name row, which carries the type (D-A1-C03).
     assertThatThrownBy(() -> PostgresSupport.execute(String.format(insert, 2026, 2026)))
-        .hasMessageContaining("serves one type");
+        .hasMessageContaining("einvoice_series_name_binding");
     assertThatThrownBy(() -> PostgresSupport.execute(String.format(insert, 2027, 2027)))
-        .hasMessageContaining("serves one type");
+        .hasMessageContaining("einvoice_series_name_fk");
   }
 
   @Test
