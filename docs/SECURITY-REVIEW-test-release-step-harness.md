@@ -38,7 +38,7 @@ reproductions, not tautologies. D17-06 and D17-07 need the changes prescribed be
 
 | What | Result |
 |---|---|
-| Probe suite on this head (runner record, `Cipher probes` job of run 36238873575) | **still weak: 0, fixed: 92** |
+| Probe suite on this head (runner record, `Security probes` job of run 36238873575) | **still weak: 0, fixed: 92** |
 | The five new probes on the runner | all FIXED |
 | The five new probes locally, run in isolation (`CIPHER_PROBE_MAVEN=1`) | all FIXED |
 | Checks on the pull request | 7 of 7 green on `eb5f65b` |
@@ -264,7 +264,7 @@ does not need a design page or a third adversarial pass; a verification run's nu
 
 | What | Result |
 |---|---|
-| Probe suite on this head (runner record, `Cipher probes` job of run 36250768098) | still weak: 0, fixed: 97 |
+| Probe suite on this head (runner record, `Security probes` job of run 36250768098) | still weak: 0, fixed: 97 |
 | Checks on the pull request, head `a8c8d4c` | 7 of 7 SUCCESS (read from the API, draft) |
 | Pass-1 probe file `cipher-probe-step-harness-round1.sh`, re-run by me on this head | **still weak: 0, fixed: 7** |
 | Pass-2 probe file `cipher-probe-step-harness-round2.sh` on this head | **still weak: 3, fixed: 0** |
