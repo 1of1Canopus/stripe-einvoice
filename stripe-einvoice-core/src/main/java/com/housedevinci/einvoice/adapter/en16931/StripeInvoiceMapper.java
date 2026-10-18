@@ -130,7 +130,8 @@ public final class StripeInvoiceMapper {
 
     UnnumberedInvoice document =
         new UnnumberedInvoice(
-            input.issueDate(),
+            // A placeholder: BT-2 is the numbering day and replaces this in numbered() (D-PS1-27).
+            input.supplyDate(),
             null,
             DocumentTypeCode.COMMERCIAL_INVOICE,
             currency,

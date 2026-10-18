@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS einvoice_issuance (
   fiscal_year       integer       NOT NULL,
   legal_number      varchar(64)   NOT NULL,
   counter           bigint        NOT NULL,
-  issued_at         timestamptz   NOT NULL,              -- BT-2, in the seller's tax zone (D-15)
+  issued_at         timestamptz   NOT NULL,              -- Stripe finalized_at: BT-2 up to 0.1.x, the supply date from 0.2.0
   allocated_at      timestamptz   NOT NULL,              -- when the counter was consumed (N-08)
   document_sha256   char(64)      NOT NULL DEFAULT '',   -- '' until the bytes exist
   archive_key       varchar(512)  NOT NULL DEFAULT '',
@@ -287,6 +287,36 @@ ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS corrects_series    
 ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS corrects_fiscal_year  integer;
 ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS corrects_legal_number varchar(64);
 
+-- The dates a number was given with (D-PS1-27, design 5.1 and 5.6). For an invoice the issue
+-- date (BT-2) is the NUMBERING day: the database clock read after the series row lock, turned
+-- into a date once, in Java, in the tax zone. The sale's own date travels beside it as the supply
+-- date (BT-72, the day of finalized_at) or the invoicing period (BG-14). The previous number and
+-- its date are read under the same lock; the cause says why the issue day is later than the supply
+-- day, derived from stored history only. All NULL / '' on rows written before 0.2.0, whose BT-2
+-- was finalized_at. Immutable once written (the issuance guard), and chained on every event of
+-- the number.
+ALTER TABLE einvoice_issuance ADD COLUMN IF NOT EXISTS issue_date          date;
+ALTER TABLE einvoice_issuance ADD COLUMN IF NOT EXISTS supply_date         date;
+ALTER TABLE einvoice_issuance ADD COLUMN IF NOT EXISTS supply_period_start date;
+ALTER TABLE einvoice_issuance ADD COLUMN IF NOT EXISTS supply_period_end   date;
+ALTER TABLE einvoice_issuance ADD COLUMN IF NOT EXISTS prev_legal_number   varchar(64) NOT NULL DEFAULT '';
+ALTER TABLE einvoice_issuance ADD COLUMN IF NOT EXISTS prev_issue_date     date;
+ALTER TABLE einvoice_issuance ADD COLUMN IF NOT EXISTS date_gap_cause      varchar(16) NOT NULL DEFAULT '';
+ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS allocated_at        timestamptz;
+ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS issue_date          date;
+ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS supply_date         date;
+ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS supply_period_start date;
+ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS supply_period_end   date;
+ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS prev_legal_number   varchar(64) NOT NULL DEFAULT '';
+ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS prev_issue_date     date;
+ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS date_gap_cause      varchar(16) NOT NULL DEFAULT '';
+
+-- Two marks on the inbound row that later transitions never clear: the first park and the first
+-- failure with a retry scheduled. The cause deriver reads them (design 5.6); the state and the
+-- last code are overwritten by the next run and cannot tell.
+ALTER TABLE einvoice_inbound_event ADD COLUMN IF NOT EXISTS parked_at  timestamptz;
+ALTER TABLE einvoice_inbound_event ADD COLUMN IF NOT EXISTS retried_at timestamptz;
+
 DO $$
 DECLARE
   c record;
@@ -312,7 +342,28 @@ BEGIN
          || ' OR (document_type = ''380'' AND corrects_issuance_id IS NULL'
          || ' AND corrects_seller_id IS NULL AND corrects_mode IS NULL'
          || ' AND corrects_series IS NULL AND corrects_fiscal_year IS NULL'
-         || ' AND corrects_legal_number IS NULL))')
+         || ' AND corrects_legal_number IS NULL))'),
+      -- D-PS1-27: the dating columns are empty together (a row from before 0.2.0) or carry an
+      -- issue date; a delivery date or a period, never both; an invoice with dates has a cause.
+      ('einvoice_issuance_dating_shape', 'einvoice_issuance',
+       'CHECK ((supply_period_start IS NULL) = (supply_period_end IS NULL)'
+         || ' AND (supply_period_start IS NULL OR supply_period_start <= supply_period_end)'
+         || ' AND NOT (supply_date IS NOT NULL AND supply_period_start IS NOT NULL)'
+         || ' AND date_gap_cause IN ('''', ''NONE'', ''REPROCESS'', ''SWEEP'', ''PARK'', ''RETRY'', ''LATE_WEBHOOK'', ''UNRECORDED'')'
+         || ' AND (issue_date IS NOT NULL OR (supply_date IS NULL AND supply_period_start IS NULL'
+         || ' AND prev_issue_date IS NULL AND prev_legal_number = '''' AND date_gap_cause = ''''))'
+         || ' AND (document_type <> ''380'' OR issue_date IS NULL OR date_gap_cause <> '''')'
+         || ')'),
+      ('einvoice_issuance_event_dating_shape', 'einvoice_issuance_event',
+       'CHECK ((supply_period_start IS NULL) = (supply_period_end IS NULL)'
+         || ' AND (supply_period_start IS NULL OR supply_period_start <= supply_period_end)'
+         || ' AND NOT (supply_date IS NOT NULL AND supply_period_start IS NOT NULL)'
+         || ' AND date_gap_cause IN ('''', ''NONE'', ''REPROCESS'', ''SWEEP'', ''PARK'', ''RETRY'', ''LATE_WEBHOOK'', ''UNRECORDED'')'
+         || ' AND (issue_date IS NOT NULL OR (supply_date IS NULL AND supply_period_start IS NULL'
+         || ' AND prev_issue_date IS NULL AND prev_legal_number = '''' AND date_gap_cause = ''''))'
+         || ' AND (document_type <> ''380'' OR issue_date IS NULL OR date_gap_cause <> '''')'
+         || ' AND ((issue_date IS NULL) = (allocated_at IS NULL))'
+         || ')')
     ) AS t(name, tbl, definition)
   LOOP
     IF NOT EXISTS (
@@ -448,7 +499,15 @@ BEGIN
      OR NEW.issued_at <> OLD.issued_at OR NEW.allocated_at <> OLD.allocated_at
      OR NEW.rule_pack_version <> OLD.rule_pack_version
      OR NEW.document_type IS DISTINCT FROM OLD.document_type
-     OR NEW.corrects_issuance_id IS DISTINCT FROM OLD.corrects_issuance_id THEN
+     OR NEW.corrects_issuance_id IS DISTINCT FROM OLD.corrects_issuance_id
+     -- D-PS1-27: the dates a number was given with are part of what was given.
+     OR NEW.issue_date IS DISTINCT FROM OLD.issue_date
+     OR NEW.supply_date IS DISTINCT FROM OLD.supply_date
+     OR NEW.supply_period_start IS DISTINCT FROM OLD.supply_period_start
+     OR NEW.supply_period_end IS DISTINCT FROM OLD.supply_period_end
+     OR NEW.prev_legal_number IS DISTINCT FROM OLD.prev_legal_number
+     OR NEW.prev_issue_date IS DISTINCT FROM OLD.prev_issue_date
+     OR NEW.date_gap_cause IS DISTINCT FROM OLD.date_gap_cause THEN
     RAISE EXCEPTION 'einvoice_issuance: only state, document_sha256, archive_key, void_reason and void_rule_id may change, and the last two only while the row is open';
   END IF;
   -- N-06: write-once, not merely updatable. The chain detects a rewrite of either as BROKEN, but
@@ -729,7 +788,23 @@ BEGIN
       ('einvoice_issuance_event', 'corrects_mode', false),
       ('einvoice_issuance_event', 'corrects_series', false),
       ('einvoice_issuance_event', 'corrects_fiscal_year', false),
-      ('einvoice_issuance_event', 'corrects_legal_number', false)
+      ('einvoice_issuance_event', 'corrects_legal_number', false),
+      ('einvoice_issuance', 'issue_date', false), ('einvoice_issuance', 'supply_date', false),
+      ('einvoice_issuance', 'supply_period_start', false),
+      ('einvoice_issuance', 'supply_period_end', false),
+      ('einvoice_issuance', 'prev_legal_number', false),
+      ('einvoice_issuance', 'prev_issue_date', false),
+      ('einvoice_issuance', 'date_gap_cause', false),
+      ('einvoice_issuance_event', 'allocated_at', false),
+      ('einvoice_issuance_event', 'issue_date', false),
+      ('einvoice_issuance_event', 'supply_date', false),
+      ('einvoice_issuance_event', 'supply_period_start', false),
+      ('einvoice_issuance_event', 'supply_period_end', false),
+      ('einvoice_issuance_event', 'prev_legal_number', false),
+      ('einvoice_issuance_event', 'prev_issue_date', false),
+      ('einvoice_issuance_event', 'date_gap_cause', false),
+      ('einvoice_inbound_event', 'parked_at', false),
+      ('einvoice_inbound_event', 'retried_at', false)
     ) AS t(tbl, col, no_default)
   LOOP
     IF missing IS NULL AND NOT EXISTS (
@@ -754,7 +829,7 @@ BEGIN
     END IF;
   END IF;
 
-  -- the five CHECK constraints
+  -- the seven CHECK constraints
   IF missing IS NULL THEN
     FOR c IN
       SELECT * FROM (VALUES
@@ -762,7 +837,9 @@ BEGIN
         ('einvoice_issuance_document_type', 'einvoice_issuance'),
         ('einvoice_issuance_event_document_type', 'einvoice_issuance_event'),
         ('einvoice_issuance_correction_shape', 'einvoice_issuance'),
-        ('einvoice_issuance_event_correction_shape', 'einvoice_issuance_event')
+        ('einvoice_issuance_event_correction_shape', 'einvoice_issuance_event'),
+        ('einvoice_issuance_dating_shape', 'einvoice_issuance'),
+        ('einvoice_issuance_event_dating_shape', 'einvoice_issuance_event')
       ) AS t(name, tbl)
     LOOP
       IF missing IS NULL AND NOT EXISTS (

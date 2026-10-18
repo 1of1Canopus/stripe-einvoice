@@ -25,35 +25,103 @@ explanation must never look alike to the person auditing the series.
 One transaction, in this order:
 
 1. `SELECT ... FOR UPDATE` on `(seller, mode, stripe invoice id)`. A row in any state returns its
-   existing number - **resume, never re-allocate**.
-2. `INSERT INTO einvoice_series ... ON CONFLICT DO NOTHING`, which opens a new fiscal year's row if
+   existing number, with the dates it was given - **resume, never re-allocate**.
+2. A first read of `pg_catalog.clock_timestamp()` picks the fiscal year of a resetting series.
+3. `INSERT INTO einvoice_series ... ON CONFLICT DO NOTHING`, which opens a new fiscal year's row if
    this is the first invoice of the year. The start value is 1 and is not a free parameter, so
    concurrent creators agree by construction.
-3. `SELECT last_issue_date ... FOR UPDATE` on the series row: the row lock, held until commit, so a
-   second transaction blocks here and then reads the committed value.
-4. `UPDATE einvoice_series SET next_number = next_number + 1, last_issue_date =
-   GREATEST(last_issue_date, <BT-2>) ... AND next_number <= <max for the width> RETURNING
+4. `SELECT next_number, last_issue_date, prefix, width ... FOR UPDATE` on the series row: the row
+   lock, held until commit, so a second transaction blocks here and then reads the committed value.
+5. A second read of `pg_catalog.clock_timestamp()`, **after** the lock. Java turns it into a date
+   once, in the seller's tax zone: that date is the issue date (BT-2). See "The issue date is the
+   numbering day" below.
+6. `UPDATE einvoice_series SET next_number = next_number + 1, last_issue_date =
+   GREATEST(last_issue_date, <BT-2>) ... AND next_number <= <max for the width> AND
+   (last_issue_date IS NULL AND next_number = 1 OR last_issue_date <= <BT-2>) RETURNING
    next_number - 1`.
-5. `INSERT INTO einvoice_issuance`, state `NUMBERED`. The unique constraint is the backstop when two
-   callers missed step 1 together: the loser's counter increment rolls back with its insert, so
-   there is no gap, and it re-reads the winner's number.
+7. `INSERT INTO einvoice_issuance`, state `NUMBERED`, with the issue date, the supply date and the
+   previous number. The unique constraint is the backstop when two callers missed step 1 together:
+   the loser's counter increment rolls back with its insert, so there is no gap, and it re-reads
+   the winner's number.
 
 A rollback, a crash, or a killed backend all leave the counter where it was - the counter is
 ordinary row state, not a sequence. A PostgreSQL `SEQUENCE` is deliberately non-transactional, which
 is exactly why one is not used here and why a test asserts none appears.
 
+## The issue date is the numbering day
+
+From 0.2.0 the issue date (BT-2) of an invoice is the day its number is given: the database clock,
+read after the series row lock, turned into a date in the seller profile's **required**
+`tax-zone`. The day of the sale travels beside it as the **supply date**: the delivery date
+(BT-72, `cac:Delivery/cbc:ActualDeliveryDate`) is the day of Stripe's
+`status_transitions.finalized_at`, or, when every line of the invoice names the same Stripe service
+period, the invoicing period (BG-14, `cac:InvoicePeriod`) is written instead. The delivery date is
+a proxy: it is the day Stripe finalised the invoice, which for most sales is the day of the sale.
+
+Why: numbers follow the order in which work reaches the series lock, and that order is not the
+order of finalisation. A retry, a park, a reprocess, the reconciliation sweep or a late webhook
+could give an invoice finalised on 3 March a number after an invoice finalised on 10 March. Up to
+0.1.x that invoice carried 3 March, so the dates of one series went backwards. Dated on the day its
+number is given, a later number can no longer carry an earlier date. Example: an invoice finalised
+on 10 March, parked, and numbered on 12 March is dated 12 March, carries 10 March as its delivery
+date, and records the cause `PARK`.
+
+Every invoice records, on its row and on its chained events: Stripe's `finalized_at`, the
+allocation instant, the issue date, the supply date or period, the previous number of the series
+and its issue date, and a cause for any day between supply and issue - `NONE`, `REPROCESS`,
+`SWEEP`, `PARK`, `RETRY`, `LATE_WEBHOOK`, or `UNRECORDED` when no stored history explains it (a
+worker queue past midnight, or a host that allocated directly). The cause is derived from stored
+history only; no caller can pass one. More than one day between supply and issue raises the
+finding `DEI-137`, which names the number; it is not a refusal. Lateness is counted from the day
+Stripe finalised the invoice, also when an invoicing period is written: Stripe bills a
+subscription at the start of its period, so an invoice for 1 January to 1 February finalised on
+1 January and numbered on 20 January is 19 days late.
+
+### When the clock cannot be trusted
+
+The only refusals left are about the clock. None gives a number, and none can be released by hand:
+
+- `DEI-132`: the database clock is behind the series' latest issue date (it stepped back), behind
+  the invoice's own finalisation time, or more than `einvoice.numbering.max-clock-regression`
+  (default 5 minutes, at most 1 hour) apart from the application clock. Two independent clocks must
+  agree before a legal date is written. A small gap is retried with the normal backoff; a gap of
+  more than `max-clock-regression` raises a finding that names the series; a gap of more than one
+  day from the application clock, or from Stripe's `finalized_at`, stops the event in
+  `FAILED_ISSUANCE` with no retry. More than one day behind the series is `DEI-130`, below. Remedy: fix the clock (or the tax zone),
+  then run the event again through `IssuanceReprocess`, which accepts this one `FAILED_ISSUANCE`
+  code for that purpose. The re-run goes through the same checks.
+- `DEI-130`: a series' latest issue date is more than one day after today on the database clock,
+  in the tax zone. Two causes put it there: both clocks stepped back together (one wrong time
+  source for the database and application hosts, which the cross-check cannot see), or a hand edit
+  or a forward jump of the clock. Refused at startup and before every allocation, with a finding
+  that names the series. Remedy, in this order: first check the database and application clocks
+  against an external time source (NTP); if they are wrong, fix them and retry, and do not touch
+  the series - lowering its date while the clocks are wrong would date new invoices before ones
+  already issued. Only if both clocks are right, look in the issuance chain for who moved the
+  series row, then correct `last_issue_date` as the schema owner with a recorded reason. The
+  runtime role cannot do it; the series guard refuses a backward move.
+- `DEI-131`: the fiscal year changed between the read that picked the series and the read under its
+  lock (a few seconds once a year). The worker retries in a new transaction, which picks the new
+  year's series. A host that allocates inside its own transaction gets `DEI-131` as a typed
+  exception: roll back and retry in a new transaction.
+
+A series with numbered rows and no latest issue date refuses startup and allocation with `DEI-134`.
+
+The production statement is `SELECT pg_catalog.clock_timestamp()`, schema-qualified and with no
+wrapper function: a role that may create a function earlier on the search path cannot redefine an
+invoice's legal date. It is never `now()`, which is the start of the transaction.
+
 ## Fiscal years, and the invoice that arrives late
 
-The fiscal year comes from BT-2 - Stripe's `status_transitions.finalized_at`, converted in the
-seller profile's **required** `tax-zone`, never in the JVM's default zone. An invoice finalised at
-23:30 UTC on 31 December belongs to the year its seller's tax authority says it does.
+The fiscal year of a resetting series is the year of the issue date, so of the numbering day. An
+invoice finalised on 31 December and numbered on 2 January is dated 2 January, takes a number from
+the **new** year's series, and carries 31 December as its supply date. The 0.1.x behaviour, where
+that invoice took a number from the closing year's series after new-year numbers existed, no longer
+happens.
 
-One consequence to have an answer ready for: an invoice finalised on 31 December and processed on
-2 January takes a number from the **closing** year's series, and is therefore issued after numbers
-from the new year already exist. That is correct and unavoidable, and on a date-ordered list it
-looks like tampering. The series report shows both the invoice date and the allocation timestamp on
-every line for that reason. Whether to refuse a late invoice from a closed year after a cut-off is
-the seller's accounting policy, not this module's.
+Whether to refuse a late invoice from a closed year after a cut-off is the seller's accounting
+policy, not this module's. `einvoice.numbering.closed-year-cutoff` applies to the **supply** date:
+a sale from a year that closed longer ago than the cut-off is still refused (`DEI-207`).
 
 ## Document types: one series per type
 
@@ -83,9 +151,8 @@ mode, series, fiscal year and legal number, not only its row id.
 
 Each series row records the latest BT-2 it numbered (`last_issue_date`). It moves only in the
 statement that moves the counter, and never backwards. A credit note dated before it is refused
-(`DEI-127`). An invoice dated before it is still numbered - a sale must get its invoice - and an
-open finding `DEI-127` names the number. Invoices can reach the allocator out of date order (a late
-webhook, a retry, a reprocess, the reconciliation sweep); the finding makes each case visible.
+(`DEI-127`). An invoice cannot be dated before it: its issue date is the numbering day, read under
+the same lock (see "The issue date is the numbering day").
 
 ## The series report
 
@@ -93,7 +160,8 @@ Per `(seller, series, fiscal year, mode)`, every allocated number with:
 
 - its disposition: `ISSUED`, `VOID_UNUSED` with its reason and rule id, or still open (`NUMBERED`,
   `ARCHIVING`, `FAILED_ARCHIVE`);
-- the invoice date (BT-2) and the allocation timestamp;
+- the issue date (BT-2), the supply date or period, the allocation timestamp, and the cause of any
+  day between supply and issue;
 - the Stripe invoice id it is bound to.
 
 Plus the open count and the next number the series will hand out. `contiguous()` says whether the
@@ -166,6 +234,7 @@ cause. So the remedy is this explicit, privileged call, for one event at a time.
 | `einvoice.numbering.width` | `6` | 4..12; outside that the application refuses to start |
 | `einvoice.numbering.fiscal-year-reset` | `true` | `false` - WARNs at every startup |
 | `einvoice.numbering.allocation-timeout` | `5s` | applied as `SET LOCAL lock_timeout`; a blocked allocation past this bound is a typed `DEI-117` refusal |
+| `einvoice.numbering.max-clock-regression` | `5m` | above zero and at most `1h`, refused at startup outside; how far the database clock may run behind a series or apart from the application clock before a refused allocation raises a finding (`DEI-132`). A value above `5m` WARNs at every startup: whoever controls only the database clock can then move an issue date by up to that much |
 | `einvoice.chain.hmac-secret` / `.hmac-key-id` | required, env only, base64 of >= 32 bytes | none |
 | `einvoice.chain.hmac-keys.<id>` | empty | retired ids the verifier still needs during a rotation |
 | `einvoice.chain.unkeyed` | `false` | `true` - WARNs at every startup, verifier reports `INTACT_UNKEYED` |
@@ -313,7 +382,7 @@ Two signals, and the difference matters:
 | `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision |
 | `einvoice.reconcile.interval` / `.window` / `.grace` | `15m` / `2d` / `15m` | `enabled=false` removes the only watcher there is |
 | `einvoice.reconcile.drift-sample` | `10` | `0` stops re-hashing archived documents |
-| `einvoice.numbering.closed-year-cutoff` | unset | setting it refuses late invoices from closed years |
+| `einvoice.numbering.closed-year-cutoff` | unset | setting it refuses invoices whose supply date falls in a year closed longer ago than this |
 | `einvoice.rule-pack-version` | `unversioned` | - |
 
 Nothing here disables signature verification, validation before archiving, the totals comparison or

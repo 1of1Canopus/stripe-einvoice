@@ -85,6 +85,10 @@ class CipherProbePr9Pass2Test {
 
   /** Refuses the preflight until it is repaired: the only way into the one eligible state. */
   private static final class RepairableRenderer implements DocumentRenderer {
+    @Override
+    public boolean carriesSupplyDate() {
+      return true;
+    }
 
     private final DeterministicRenderer delegate = new DeterministicRenderer();
     private boolean repaired;

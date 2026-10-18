@@ -21,11 +21,12 @@ import javax.crypto.spec.SecretKeySpec;
  *
  * <p><b>Two forms per family (credit-note series design, section 3).</b> 0.2.0 writes {@code ei3}
  * (unkeyed) and {@code ei4h} (keyed): the 0.1.0 field list plus the document type, beside the
- * series, and the full identity of the invoice a credit note corrects (D-PS1-37). The older forms
- * {@code ei1} and {@code ei2h} are still verified, never written. The version is the first element
- * of the hashed material, so a row cannot be re-labelled with an older form to hide a field without
- * breaking its own hash. An older-form row is an invoice by definition: it hashes no type, so a
- * reader that found anything else on it would be reading a rewrite (S-01).
+ * series, the full identity of the invoice a credit note corrects (D-PS1-37), and the dates the
+ * number was given with (D-PS1-27). The older forms {@code ei1} and {@code ei2h} are still
+ * verified, never written. The version is the first element of the hashed material, so a row cannot
+ * be re-labelled with an older form to hide a field without breaking its own hash. An older-form
+ * row is an invoice by definition: it hashes no type, so a reader that found anything else on it
+ * would be reading a rewrite (S-01).
  *
  * <p>What versioning does not buy on an unkeyed trail (S-10): a role that can bypass the triggers
  * can re-chain an {@code ei3} trail wholesale after rewriting it, because the anchor's own
@@ -138,6 +139,18 @@ public final class IssuanceChain {
       field(sb, t == null ? null : t.series());
       field(sb, t == null ? null : Integer.toString(t.fiscalYear()));
       field(sb, t == null ? null : t.legalNumber());
+      // D-PS1-27, Q32 (iii): the dates the number was given with, read under the series lock. A
+      // row written before 0.2.0 carries eight null markers, so dating planted on it later
+      // changes its hash.
+      IssueDating d = e.dating().orElse(null);
+      field(sb, d == null ? null : d.allocatedAt().toString());
+      field(sb, d == null ? null : d.issueDate().toString());
+      field(sb, d == null ? null : d.supplyDate().map(Object::toString).orElse(""));
+      field(sb, d == null ? null : d.supplyPeriod().map(p -> p.start().toString()).orElse(""));
+      field(sb, d == null ? null : d.supplyPeriod().map(p -> p.end().toString()).orElse(""));
+      field(sb, d == null ? null : d.previousNumber().orElse(""));
+      field(sb, d == null ? null : d.previousIssueDate().map(Object::toString).orElse(""));
+      field(sb, d == null ? null : d.cause().map(DateGapCause::wire).orElse(""));
     }
     return sb.toString();
   }
@@ -185,7 +198,8 @@ public final class IssuanceChain {
     }
     if (untypedForm(version)
         && (e.seriesKey().documentType() != CorrectionTarget.requiredType()
-            || e.corrects().isPresent())) {
+            || e.corrects().isPresent()
+            || e.dating().isPresent())) {
       return false;
     }
     return expectedPrev.equals(e.prevHash()) && hashOf(e, expectedPrev, version).equals(e.hash());

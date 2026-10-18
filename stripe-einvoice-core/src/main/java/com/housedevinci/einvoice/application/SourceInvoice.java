@@ -59,7 +59,9 @@ public record SourceInvoice(
       String taxRateId,
       long quantity,
       long netMinor,
-      long grossMinor) {
+      long grossMinor,
+      Instant periodStart,
+      Instant periodEnd) {
 
     public SourceLine {
       if (quantity <= 0) {
@@ -67,6 +69,24 @@ public record SourceInvoice(
             ErrorCodes.MAPPING_INCOMPLETE,
             "a line carries a quantity above zero (stripe field: lines.data.quantity)");
       }
+    }
+
+    /** A line with no service period (stripe fields {@code lines.data.period} absent). */
+    public SourceLine(
+        String id,
+        String description,
+        String taxRateId,
+        long quantity,
+        long netMinor,
+        long grossMinor) {
+      this(id, description, taxRateId, quantity, netMinor, grossMinor, null, null);
+    }
+
+    /** Stripe's own period of this line, start included and end excluded, when it has one. */
+    public java.util.Optional<AllocationRequest.ServicePeriod> period() {
+      return periodStart != null && periodEnd != null && periodEnd.isAfter(periodStart)
+          ? java.util.Optional.of(new AllocationRequest.ServicePeriod(periodStart, periodEnd))
+          : java.util.Optional.empty();
     }
   }
 
@@ -134,6 +154,25 @@ public record SourceInvoice(
           ErrorCodes.MAPPING_INCOMPLETE,
           "the invoice carries no buyer (stripe fields: customer_name, customer_address)");
     }
+  }
+
+  /**
+   * The service period of the invoice, only when every line names the same one (design 5.5). Lines
+   * with different periods, or any line without one, give no period: the document then carries the
+   * supply day (BT-72) instead of an invoicing period (BG-14). Stripe's invoice-level {@code
+   * period_start}/{@code period_end} are not used: they describe the invoice's own window, which
+   * for a subscription need not be the service period.
+   */
+  public java.util.Optional<AllocationRequest.ServicePeriod> commonServicePeriod() {
+    java.util.Optional<AllocationRequest.ServicePeriod> first = java.util.Optional.empty();
+    for (SourceLine line : lines) {
+      java.util.Optional<AllocationRequest.ServicePeriod> period = line.period();
+      if (period.isEmpty() || (first.isPresent() && !first.equals(period))) {
+        return java.util.Optional.empty();
+      }
+      first = period;
+    }
+    return first;
   }
 
   /** True once Stripe has finalised the invoice; before that there is nothing to issue. */

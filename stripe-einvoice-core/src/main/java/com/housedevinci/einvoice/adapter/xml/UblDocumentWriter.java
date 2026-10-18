@@ -1,5 +1,7 @@
 package com.housedevinci.einvoice.adapter.xml;
 
+import com.housedevinci.einvoice.domain.EInvoiceException;
+import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.Percentage;
 import com.housedevinci.einvoice.domain.en16931.Contact;
 import com.housedevinci.einvoice.domain.en16931.DocumentLine;
@@ -70,6 +72,16 @@ public final class UblDocumentWriter {
     requireProfileRequirements(invoice);
 
     boolean creditNote = invoice.typeCode().isCreditNote();
+    if (!creditNote
+        && invoice.deliveryDateValue().isEmpty()
+        && invoice.invoicePeriodValue().isEmpty()) {
+      // D-PS1-44: BT-2 is the numbering day, so an invoice without BT-72 or BG-14 would hide the
+      // day of the sale. Never written without it.
+      throw new EInvoiceException(
+          ErrorCodes.SUPPLY_DATE_NOT_CARRIED,
+          "an invoice carries its supply date (BT-72) or its invoicing period (BG-14); this one"
+              + " carries neither");
+    }
     String root = creditNote ? "CreditNote" : "Invoice";
     String currency = invoice.currency();
 
@@ -92,6 +104,17 @@ public final class UblDocumentWriter {
     invoice.noteValue().ifPresent(n -> w.element("cbc:Note", n));
     w.element("cbc:DocumentCurrencyCode", currency);
     invoice.buyerReferenceValue().ifPresent(r -> w.element("cbc:BuyerReference", r));
+    // BG-14 (D-PS1-44): the service period every line names. UBL places it after the buyer
+    // reference and before the references, in both document types.
+    invoice
+        .invoicePeriodValue()
+        .ifPresent(
+            period -> {
+              w.start("cac:InvoicePeriod");
+              w.element("cbc:StartDate", date(period.start()));
+              w.element("cbc:EndDate", date(period.end()));
+              w.end();
+            });
 
     invoice
         .precedingReferenceValue()
@@ -125,6 +148,16 @@ public final class UblDocumentWriter {
     w.start("cac:AccountingCustomerParty");
     party(w, invoice.buyer(), false);
     w.end();
+
+    // BT-72 (D-PS1-44): the issue date is the numbering day, so the day of the sale travels here.
+    invoice
+        .deliveryDateValue()
+        .ifPresent(
+            day -> {
+              w.start("cac:Delivery");
+              w.element("cbc:ActualDeliveryDate", date(day));
+              w.end();
+            });
 
     invoice.paymentValue().ifPresent(payment -> paymentMeans(w, payment));
 

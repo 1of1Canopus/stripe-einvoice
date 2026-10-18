@@ -8,6 +8,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Invoice dates go up with their numbers (D-PS1-27).** The issue date (BT-2) of an invoice is
+  now the day its number is given: the database clock (`pg_catalog.clock_timestamp()`), read after
+  the series row lock, turned into a date once, in Java, in the seller's tax zone. The day of the
+  sale is written as the delivery date (BT-72, the day of `finalized_at`) or, when every line names
+  the same Stripe service period, as the invoicing period (BG-14). Example: an invoice finalised on
+  10 March, parked, and numbered on 12 March is dated 12 March and delivered 10 March.
+- **What the record shows.** Every invoice row and its chained events carry the allocation instant,
+  the issue date, the supply date or period, the previous number of the series and its issue date,
+  and a cause for any day between supply and issue (`NONE`, `REPROCESS`, `SWEEP`, `PARK`, `RETRY`,
+  `LATE_WEBHOOK`, `UNRECORDED`), derived from stored history only. The series report shows them; a
+  line from before 0.2.0 has a computed `dateOutOfOrder()` flag. More than one day between supply
+  and issue raises the finding `DEI-137`.
+- **Clock refusals, none of them releasable by hand.** `DEI-132` when the database clock is behind
+  the series, behind the invoice's own finalisation time, or apart from the application clock by
+  more than `einvoice.numbering.max-clock-regression` (new property, default `5m`, at most `1h`,
+  refused at startup outside); retried while small, terminal beyond one day, and then eligible for
+  `IssuanceReprocess` after the clock is fixed. `DEI-130` when a series' latest issue date is more
+  than one day ahead, at startup and before each allocation, with a finding. `DEI-131` when the
+  fiscal year changes under the lock; retried in a new transaction.
+- **`DEI-280`.** A document renderer that does not declare `carriesSupplyDate()` is refused before
+  a number exists; the UBL writer refuses an invoice with neither BT-72 nor BG-14.
+
 - **Number series per document type (schema format 2).** The document type (BT-3) is part of the
   series key: invoices (`380`) and credit notes (`381`) count in separate series, a series name
   serves one type, and a legal number is unique per seller and mode across series. This edition
@@ -19,8 +41,8 @@ All notable changes to this project are documented here. The format follows
   matches its chained issue event (`DEI-128`). The chained event of a credit note records the
   corrected invoice's full identity.
 - **The latest issue date of a series** (`einvoice_series.last_issue_date`). It moves only with
-  the counter and never backwards. A credit note dated before it is refused (`DEI-127`); an
-  invoice dated before it is numbered and recorded as an open finding `DEI-127`.
+  the counter and never backwards. A credit note dated before it is refused (`DEI-127`). An invoice
+  cannot be dated before it, since its issue date is the numbering day.
 - **Chain forms `ei3` and `ei4h`.** New events hash the document type and the corrected invoice.
   The verifier still reads `ei1` and `ei2h`, reports how many rows it checked in each form, and
   reports BROKEN when a series row's type disagrees with its events.
@@ -34,9 +56,25 @@ All notable changes to this project are documented here. The format follows
   schema owner, in one transaction, rewriting no number, hash or archived byte. Stop every 0.1.x
   instance first; see "Upgrading a 0.1.x database to format 2" in `docs/index.md`. The runtime role
   needs the new `SELECT` grant on `einvoice_schema` (`docs/schema-grants.sql`).
-- **`AllocationRequest` takes the issue date** (BT-2 as a date in the seller's tax zone) as a new
-  required component. Code that calls `NumberAllocator.allocate` directly must pass it;
-  `IssuanceNumberingService` is unchanged.
+- **BT-2 changes meaning at 0.2.0.** It was the day of `finalized_at`; it is now the numbering day.
+  The fiscal year of a resetting series follows it: an invoice finalised on 31 December and
+  numbered on 2 January takes a number in the new year's series. `closed-year-cutoff` now applies
+  to the supply date.
+- **`AllocationRequest` takes a `SeriesScope`** (seller, series, mode, type) instead of a
+  `SeriesKey`, no issue date, and an optional service period. A direct caller of
+  `NumberAllocator.allocate` passes neither a date nor a fiscal year: the allocator decides both
+  under the lock. A host that allocates inside its own transaction retries `DEI-131` and a
+  retryable `DEI-132` in a new transaction. `IssuanceNumberingService` keeps its signature.
+- **`JdbcIssuanceStore` takes the tax zone** in every public constructor, and the canonical one
+  also takes `max-clock-regression`. `DocumentRenderer` gains `carriesSupplyDate()` (default
+  `false`). `MappingInput` carries the supply date instead of an issue date; `DocumentInput` adds
+  the allocated series and dates; `UnnumberedInvoice.numbered` takes the issue date and supply
+  fields; `EnInvoice`, `SourceInvoice.SourceLine`, `Issuance`, `IssuanceEvent` and
+  `SeriesReport.Line` gain components, with the earlier constructors kept.
+- **Schema format 2 gains columns** (still format 2, not yet released): the dating columns on
+  `einvoice_issuance` and `einvoice_issuance_event`, `parked_at` and `retried_at` on
+  `einvoice_inbound_event`, two `CHECK` constraints, and the dating columns join the issuance
+  guard's immutable list. The completeness check before the version stamp covers them.
 - `SeriesKey`, `Issuance`, `IssuanceEvent`, `IssuanceEventReader.DisposedIssuance` and
   `IssuanceChainVerifier.Report` carry the new fields. The earlier constructors of the first four
   remain and mean an invoice.
@@ -50,6 +88,18 @@ All notable changes to this project are documented here. The format follows
   a dot, in any letter case (for example a lower-case copy of a review document, or a release runbook with
   another extension). Its self-test now pins the upper-case form of five document names and the combined
   file-name cases (lower-case private name, the slug re-scan, a mixed-case jar member).
+- **Security review of the invoice date order (D-PR36-1 to 5).** Lateness (`DEI-137`, the cause)
+  is counted from the day Stripe finalised the invoice, also when an invoicing period is written.
+  The chain verifier compares each disposed row's dates with its chained event, and a void event
+  now carries the dates. `DEI-130` tells the operator to check both clocks against NTP before
+  touching the series. The module's validator refuses a document whose BT-2, BT-72 or BG-14
+  differs from the allocation (rule `EINVOICE-DATES`). A test reads the production issue clock
+  against the real time in three session zones.
+- **Security review of the invoice date order, pass 2 (D-PR36-7, 8, 9).** A value of
+  `einvoice.numbering.max-clock-regression` above `5m` now logs a WARN at every startup. The module's
+  validator answers `NOT_EVALUATED` (rule `EINVOICE-DATES`) when it is given no allocation input,
+  so a skipped date check no longer reads `PASSED`. The rule also refuses a document-level
+  `cbc:TaxPointDate` (BT-7): it checks BT-2, BT-7, BT-72 and BG-14.
 - The reference guard (`tools/check-private-references.sh`) now reads file names as well as
   file content, with the same pattern: every tracked path in the tree, every member name and
   the file name of each built jar. One shape is admitted by name only, a security review
@@ -70,8 +120,9 @@ All notable changes to this project are documented here. The format follows
   stamp of the schema script is now one final block that checks every format-2 condition and
   refuses with `EIU03` (`DEI-134`); the documented by-hand command is
   `psql -X -v ON_ERROR_STOP=1 --single-transaction`. The two new insert guards qualify every table
-  they read with the trigger's schema, so a temporary table cannot shadow it. `AllocationRequest`
-  refuses an issue date no time zone derives from the invoice instant. The backfill refuses a tax
+  they read with the trigger's schema, so a temporary table cannot shadow it. (The window that
+  refused an issue date no time zone derives from the invoice instant left with the request's issue
+  date; a far date is now refused as `DEI-130`.) The backfill refuses a tax
   zone that is not a PostgreSQL region id. A chained event's six `corrects_*` columns are empty
   together or filled together, and a half-filled row is a decode error. A probe now guards the
   pre-seam clause of the chain verifier.

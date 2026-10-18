@@ -33,18 +33,11 @@ class CipherProbePr1Test {
   }
 
   private static AllocationRequest requestIn(SeriesKey k, String invoiceId, Instant issuedAt) {
-    return new AllocationRequest(
-        k,
-        invoiceId,
-        "",
-        "STRIPE-X",
-        issuedAt,
-        java.time.LocalDate.ofInstant(issuedAt, java.time.ZoneOffset.UTC),
-        "fr-2026.1");
+    return new AllocationRequest(k.scope(), invoiceId, "", "STRIPE-X", issuedAt, "fr-2026.1");
   }
 
   private static JdbcIssuanceStore storeFor(String seller, SeriesDefinition def) {
-    return new JdbcIssuanceStore(
+    return TestStores.store(
         PostgresSupport.dataSource(),
         CHAIN,
         Map.of(
@@ -57,10 +50,19 @@ class CipherProbePr1Test {
   @Test
   void probe_a_new_fiscal_year_does_not_reissue_the_previous_years_legal_number() {
     String seller = PostgresSupport.freshSeller("probe-year");
-    JdbcIssuanceStore store = storeFor(seller, SIX);
+    // The fiscal year is the numbering day's (D-PS1-41), so the clock moves across the year.
+    IssuanceTestHarness.MovableClock clock =
+        new IssuanceTestHarness.MovableClock(Instant.parse("2026-06-01T12:00:00Z"));
+    JdbcIssuanceStore store =
+        TestStores.store(
+            PostgresSupport.dataSource(),
+            CHAIN,
+            Map.of(new JdbcIssuanceStore.SeriesId(seller, "DEFAULT", Mode.LIVE), SIX),
+            clock);
     Issuance a =
         store.allocate(
             requestIn(key(seller, 2026), "in_y2026", Instant.parse("2026-06-01T10:00:00Z")));
+    clock.moveTo(Instant.parse("2027-06-01T12:00:00Z"));
     Issuance b =
         store.allocate(
             requestIn(key(seller, 2027), "in_y2027", Instant.parse("2027-06-01T10:00:00Z")));
@@ -75,12 +77,12 @@ class CipherProbePr1Test {
     DataSource ds = PostgresSupport.freshDatabase("probexcheck");
     String seller = "seller-xcheck";
     JdbcIssuanceStore store =
-        new JdbcIssuanceStore(
+        TestStores.store(
             ds,
             CHAIN,
             Map.of(new JdbcIssuanceStore.SeriesId(seller, "DEFAULT", Mode.LIVE), SIX),
             CLOCK);
-    store.allocate(requestIn(key(seller, 2026), "in_a", Instant.parse("2026-06-01T10:00:00Z")));
+    store.allocate(requestIn(key(seller, 2026), "in_a", Instant.parse("2026-01-15T09:00:00Z")));
     store.voidUnused(new VoidRequest(seller, Mode.LIVE, "in_a", "probe disposition", ""));
     // An out-of-band row, inserted by a host's own JdbcTemplate, already disposed, carrying the
     // same legal number in the next fiscal year. No chained event exists for it.
@@ -240,7 +242,7 @@ class CipherProbePr1Test {
 
   private static JdbcIssuanceStore storeOn(
       JdbcUnitOfWork unitOfWork, String seller, SeriesDefinition definition) {
-    return new JdbcIssuanceStore(
+    return TestStores.store(
         unitOfWork,
         PostgresSupport.dataSource(),
         CHAIN,

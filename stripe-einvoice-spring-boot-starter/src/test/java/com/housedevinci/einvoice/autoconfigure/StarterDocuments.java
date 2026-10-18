@@ -82,6 +82,9 @@ final class StarterDocuments {
         net,
         tax,
         gross,
-        gross);
+        gross,
+        // BT-72 (D-PS1-44): an invoice is never written without its supply date.
+        LocalDate.of(2026, 4, 1),
+        null);
   }
 }

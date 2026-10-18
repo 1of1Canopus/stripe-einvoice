@@ -33,10 +33,56 @@ public record IssuanceEvent(
     String keyId,
     String prevHash,
     String hash,
-    Optional<CorrectionTarget> corrects) {
+    Optional<CorrectionTarget> corrects,
+    Optional<IssueDating> dating) {
 
   public IssuanceEvent {
     corrects = corrects == null ? Optional.empty() : corrects;
+    dating = dating == null ? Optional.empty() : dating;
+  }
+
+  /** An event with no dating: the shape of every row written before 0.2.0. */
+  public IssuanceEvent(
+      long sequence,
+      Instant timestamp,
+      SeriesKey seriesKey,
+      String stripeInvoiceId,
+      String stripeAccountId,
+      String stripeNumber,
+      LegalNumber legalNumber,
+      IssuanceState state,
+      Instant issuedAt,
+      String documentSha256,
+      String archiveKey,
+      String rulePackVersion,
+      String voidReason,
+      String voidRuleId,
+      String chainVersion,
+      String keyId,
+      String prevHash,
+      String hash,
+      Optional<CorrectionTarget> corrects) {
+    this(
+        sequence,
+        timestamp,
+        seriesKey,
+        stripeInvoiceId,
+        stripeAccountId,
+        stripeNumber,
+        legalNumber,
+        state,
+        issuedAt,
+        documentSha256,
+        archiveKey,
+        rulePackVersion,
+        voidReason,
+        voidRuleId,
+        chainVersion,
+        keyId,
+        prevHash,
+        hash,
+        corrects,
+        Optional.empty());
   }
 
   /** An invoice event, which corrects nothing: the shape of every 0.1.0 row. */
@@ -105,7 +151,8 @@ public record IssuanceEvent(
         keyId,
         prevHash,
         hash,
-        Optional.of(target));
+        Optional.of(target),
+        dating);
   }
 
   public IssuanceEvent withChain(String prevHash, String chainVersion, String keyId, String hash) {
@@ -128,7 +175,8 @@ public record IssuanceEvent(
         keyId,
         prevHash,
         hash,
-        corrects);
+        corrects,
+        dating);
   }
 
   public IssuanceEvent withSequence(long sequence) {
@@ -151,7 +199,8 @@ public record IssuanceEvent(
         keyId,
         prevHash,
         hash,
-        corrects);
+        corrects,
+        dating);
   }
 
   /**
@@ -185,7 +234,8 @@ public record IssuanceEvent(
         base.keyId(),
         base.prevHash(),
         base.hash(),
-        base.corrects());
+        base.corrects(),
+        base.dating());
   }
 
   /** The disposition event for a number that will never carry a document. */
@@ -212,6 +262,33 @@ public record IssuanceEvent(
         "",
         "",
         "",
-        "");
+        "",
+        Optional.empty(),
+        issuance.dating());
+  }
+
+  /** The same event carrying a number's dating, as the store reads it from the row (D-PS1-40). */
+  public IssuanceEvent withDating(Optional<IssueDating> numbered) {
+    return new IssuanceEvent(
+        sequence,
+        timestamp,
+        seriesKey,
+        stripeInvoiceId,
+        stripeAccountId,
+        stripeNumber,
+        legalNumber,
+        state,
+        issuedAt,
+        documentSha256,
+        archiveKey,
+        rulePackVersion,
+        voidReason,
+        voidRuleId,
+        chainVersion,
+        keyId,
+        prevHash,
+        hash,
+        corrects,
+        numbered);
   }
 }

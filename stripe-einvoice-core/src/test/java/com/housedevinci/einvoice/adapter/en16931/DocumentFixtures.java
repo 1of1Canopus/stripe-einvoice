@@ -299,7 +299,8 @@ public final class DocumentFixtures {
   }
 
   private static DocumentInput input(SourceInvoice invoice) {
-    return new DocumentInput(mapping(invoice), NUMBER);
+    return com.housedevinci.einvoice.application.DocumentInputs.numberedOnSupplyDay(
+        mapping(invoice), NUMBER);
   }
 
   /** The stage of the input the preflight is handed: everything except the legal number. */

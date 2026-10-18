@@ -26,7 +26,8 @@ public record Issuance(
     IssuanceState state,
     String voidReason,
     String voidRuleId,
-    Optional<Long> correctsIssuanceId) {
+    Optional<Long> correctsIssuanceId,
+    Optional<IssueDating> dating) {
 
   public Issuance {
     Identifiers.validate("stripe invoice id", stripeInvoiceId);
@@ -45,6 +46,13 @@ public record Issuance(
     voidReason = voidReason == null ? "" : voidReason;
     voidRuleId = voidRuleId == null ? "" : voidRuleId;
     correctsIssuanceId = correctsIssuanceId == null ? Optional.empty() : correctsIssuanceId;
+    dating = dating == null ? Optional.empty() : dating;
+    // D-PS1-40: the issue date is derived from the allocation instant, so the two are one value.
+    if (dating.isPresent()
+        && !dating.get().allocatedAt().equals(Timestamps.toStorage(allocatedAt))) {
+      throw new EInvoiceException(
+          ErrorCodes.INVALID, "an issuance's dating must come from its own allocation instant");
+    }
     // The database CHECK says the same thing; the value object refuses it first, so a row read
     // back in any other shape fails loudly instead of travelling (credit-note series design).
     if (seriesKey.documentType().isCreditNote() != correctsIssuanceId.isPresent()) {
@@ -52,6 +60,42 @@ public record Issuance(
           ErrorCodes.INVALID,
           "a credit note names the invoice it corrects, and an invoice names none");
     }
+  }
+
+  /** A row with no recorded dating: the shape of every row written before 0.2.0. */
+  public Issuance(
+      long id,
+      SeriesKey seriesKey,
+      String stripeInvoiceId,
+      String stripeAccountId,
+      String stripeNumber,
+      LegalNumber legalNumber,
+      Instant issuedAt,
+      Instant allocatedAt,
+      String documentSha256,
+      String archiveKey,
+      String rulePackVersion,
+      IssuanceState state,
+      String voidReason,
+      String voidRuleId,
+      Optional<Long> correctsIssuanceId) {
+    this(
+        id,
+        seriesKey,
+        stripeInvoiceId,
+        stripeAccountId,
+        stripeNumber,
+        legalNumber,
+        issuedAt,
+        allocatedAt,
+        documentSha256,
+        archiveKey,
+        rulePackVersion,
+        state,
+        voidReason,
+        voidRuleId,
+        correctsIssuanceId,
+        Optional.empty());
   }
 
   /** An invoice row, which corrects nothing: the shape every 0.1.0 row has. */
@@ -85,7 +129,18 @@ public record Issuance(
         state,
         voidReason,
         voidRuleId,
+        Optional.empty(),
         Optional.empty());
+  }
+
+  /**
+   * BT-2 of this document: the numbering day for a row written by 0.2.0 or later, and for an older
+   * row the day of {@code issuedAt} in {@code taxZone}, which is what 0.1.x wrote.
+   */
+  public java.time.LocalDate issueDateIn(java.time.ZoneId taxZone) {
+    return dating
+        .map(IssueDating::issueDate)
+        .orElseGet(() -> java.time.LocalDate.ofInstant(issuedAt, taxZone));
   }
 
   /** The archived document's content hash, absent while the number has no document. */

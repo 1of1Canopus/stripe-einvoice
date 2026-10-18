@@ -200,6 +200,10 @@ class ScreenedFieldCoverageTest {
     if (type == boolean.class) {
       return Boolean.FALSE;
     }
+    if (type == com.housedevinci.einvoice.domain.SupplyPeriod.class) {
+      return new com.housedevinci.einvoice.domain.SupplyPeriod(
+          LocalDate.of(2026, 2, 1), LocalDate.of(2026, 2, 28));
+    }
     if (type == LocalDate.class) {
       return LocalDate.of(2026, 4, 1);
     }
