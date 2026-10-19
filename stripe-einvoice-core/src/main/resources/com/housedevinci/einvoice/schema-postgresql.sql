@@ -437,7 +437,10 @@ CREATE TABLE IF NOT EXISTS einvoice_series_name (
     CONSTRAINT einvoice_series_name_document_type CHECK (document_type IN ('380', '381')),
   created_at    timestamptz NOT NULL,
   CONSTRAINT einvoice_series_name_pkey PRIMARY KEY (seller_id, mode, series),
-  -- the foreign-key target: PostgreSQL needs a unique constraint on exactly the referenced columns
+  -- the foreign-key target: PostgreSQL needs a unique constraint on exactly the referenced columns.
+  -- Implied by the primary key, so it never refuses a row the primary key accepts; it exists only so
+  -- the foreign key can carry the type. Every ON CONFLICT on this table names no target, so a clash
+  -- on either index does nothing (D-C03-B6).
   CONSTRAINT einvoice_series_name_type_key UNIQUE (seller_id, mode, series, document_type)
 );
 
@@ -465,13 +468,14 @@ END $$;
 -- The fill: one name row per name that carries exactly one type. It never picks a type: a name with
 -- two types gets no row, so the foreign key below cannot be added and the final block refuses the
 -- stamp, even when a runner goes on after the refusal above (D-A1-C01). min() is there only because
--- SQL needs an aggregate; with one distinct type it is that type.
+-- SQL needs an aggregate; with one distinct type it is that type. No conflict target: both unique
+-- indexes of the table are then arbiters (D-C03-B6), as in the allocator's own insert.
 INSERT INTO einvoice_series_name (seller_id, mode, series, document_type, created_at)
 SELECT seller_id, mode, series, min(document_type), now()
   FROM einvoice_series
  GROUP BY seller_id, mode, series
 HAVING count(DISTINCT document_type) = 1
-ON CONFLICT (seller_id, mode, series) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- The binding itself. Found by name on this schema's table, like the other constraints, so a
 -- second run is a no-op.

@@ -22,9 +22,10 @@ import com.housedevinci.einvoice.domain.Issuance;
  *
  * <p><b>Retry is the transaction's owner's job.</b> When a concurrent transaction conflicts with
  * the opening of a series under REPEATABLE READ or SERIALIZABLE, PostgreSQL aborts the later one
- * and the allocation fails with {@link com.housedevinci.einvoice.domain.ErrorCodes#ALLOCATION_TIMEOUT}; an allocation
- * that joined a host transaction does not retry inside it, so the host retries its whole
- * transaction, as it must for any serialization failure.
+ * and the allocation fails with {@link
+ * com.housedevinci.einvoice.domain.ErrorCodes#ALLOCATION_TIMEOUT}; an allocation that joined a host
+ * transaction does not retry inside it, so the host retries its whole transaction, as it must for
+ * any serialization failure.
  */
 public interface NumberAllocator {
 

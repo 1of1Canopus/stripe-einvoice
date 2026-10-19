@@ -109,9 +109,14 @@ public final class JdbcIssuanceStore
       "SELECT document_type FROM einvoice_series_name WHERE seller_id = ? AND mode = ?"
           + " AND series = ?";
 
+  // No conflict target, on purpose (D-C03-B6): the table has two unique indexes, the primary key
+  // and the type key the foreign key needs. PostgreSQL does nothing only on the indexes named as
+  // arbiters, so naming the primary key alone let a concurrent writer of the same name raise 23505
+  // from the type key. With no target both are arbiters. A row of the other type still conflicts
+  // on the primary key, and the read after this statement refuses it with CONFIG.
   static final String CREATE_SERIES_NAME =
       "INSERT INTO einvoice_series_name (seller_id, mode, series, document_type, created_at)"
-          + " VALUES (?,?,?,?,?) ON CONFLICT (seller_id, mode, series) DO NOTHING";
+          + " VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING";
 
   // D1-03: the bound and the rendered value both come from the row's own prefix and width, never
   // from the configured definition, so an edited property cannot silently change the format of a
