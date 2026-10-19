@@ -82,9 +82,13 @@ class SeriesNameRaceTest {
 
   /** Waits until some backend is waiting on a lock that {@code blocker} holds. */
   private static boolean waitsOn(int blocker) throws Exception {
+    return waitsOn(PostgresSupport.dataSource(), blocker);
+  }
+
+  private static boolean waitsOn(DataSource on, int blocker) throws Exception {
     long deadline = System.nanoTime() + WAIT.toNanos();
     while (System.nanoTime() < deadline) {
-      try (Connection c = PostgresSupport.dataSource().getConnection();
+      try (Connection c = on.getConnection();
           PreparedStatement ps =
               c.prepareStatement(
                   "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
@@ -585,5 +589,142 @@ class SeriesNameRaceTest {
     assertThat(waited).isInstanceOf(EInvoiceException.class);
     assertThat(((EInvoiceException) waited).code()).isEqualTo(ErrorCodes.ALLOCATION_TIMEOUT);
     assertThat(sqlState(waited)).isEqualTo("55P03");
+  }
+
+  // ------------------------------------------------------------------ D-C03-B6: both unique
+  // indexes
+
+  /**
+   * A fresh database where a writer can be held between its heap insert and its index inserts.
+   * PostgreSQL inserts index entries in index OID order, so a test-only, non-unique index whose
+   * expression waits on an advisory lock (only in sessions with {@code c03b.pause = on}) is created
+   * before the primary key and the type key, which are then re-created. Nothing else changes.
+   */
+  private static HikariDataSource pausable(String hint) {
+    HikariDataSource ds = (HikariDataSource) PostgresSupport.freshDatabase(hint);
+    for (String sql :
+        new String[] {
+          "CREATE FUNCTION c03b_pause(text) RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$ BEGIN"
+              + " IF current_setting('c03b.pause', true) = 'on' THEN"
+              + " PERFORM pg_advisory_xact_lock(424303); END IF; RETURN $1; END $$",
+          "ALTER TABLE einvoice_series DROP CONSTRAINT einvoice_series_name_fk",
+          "ALTER TABLE einvoice_series_name DROP CONSTRAINT einvoice_series_name_type_key",
+          "ALTER TABLE einvoice_series_name DROP CONSTRAINT einvoice_series_name_pkey",
+          "CREATE INDEX c03b_pause_first ON einvoice_series_name ((c03b_pause(series)))",
+          "ALTER TABLE einvoice_series_name ADD CONSTRAINT einvoice_series_name_pkey"
+              + " PRIMARY KEY (seller_id, mode, series)",
+          "ALTER TABLE einvoice_series_name ADD CONSTRAINT einvoice_series_name_type_key"
+              + " UNIQUE (seller_id, mode, series, document_type)",
+          "ALTER TABLE einvoice_series ADD CONSTRAINT einvoice_series_name_fk FOREIGN KEY"
+              + " (seller_id, mode, series, document_type) REFERENCES einvoice_series_name"
+              + " (seller_id, mode, series, document_type)"
+        }) {
+      PostgresSupport.executeOn(ds, sql);
+    }
+    return ds;
+  }
+
+  private static HikariDataSource paused(HikariDataSource ds) {
+    HikariConfig config = new HikariConfig();
+    config.setJdbcUrl(ds.getJdbcUrl());
+    config.setUsername(ds.getUsername());
+    config.setPassword(ds.getPassword());
+    config.setMaximumPoolSize(2);
+    config.setConnectionInitSql("SET c03b.pause = 'on'");
+    return new HikariDataSource(config);
+  }
+
+  private static JdbcIssuanceStore opener(DataSource ds, String seller, DocumentTypeCode type) {
+    return TestStores.store(
+        ds,
+        DocumentSeriesFixture.CHAIN,
+        Map.of(
+            new JdbcIssuanceStore.SeriesId(seller, "RACE", Mode.LIVE, type),
+            type == DocumentTypeCode.CREDIT_NOTE ? RACE_CREDITS : RACE_INVOICES),
+        CLOCK);
+  }
+
+  /**
+   * D-C03-B6, deterministic. Writer A (held) has inserted its name row into the heap but not into
+   * any index when writer B inserts the same name, same type, and commits. A then meets B's row in
+   * the primary key and in the type key. Both are unique indexes; with only the primary key as the
+   * conflict target, the type key raised {@code 23505} and A's allocation died with DEI-102. With
+   * no target, both are arbiters and A does nothing, then reads B's matching type and goes on.
+   */
+  @Test
+  void a_writer_that_meets_the_same_name_in_the_type_key_first_does_nothing_and_goes_on()
+      throws Exception {
+    String seller = PostgresSupport.freshSeller("c03b");
+    try (HikariDataSource ds = pausable("c03brace");
+        HikariDataSource held = paused(ds);
+        Connection gate = ds.getConnection()) {
+      exec(gate, "SELECT pg_advisory_lock(424303)");
+      CompletableFuture<Throwable> a =
+          CompletableFuture.supplyAsync(
+              () ->
+                  catchThrowable(
+                      () ->
+                          opener(held, seller, DocumentTypeCode.COMMERCIAL_INVOICE)
+                              .openSeries(new SeriesKey(seller, "RACE", 2026, Mode.LIVE))));
+      assertThat(waitsOn(ds, pid(gate))).as("writer A is held inside its insert").isTrue();
+      opener(ds, seller, DocumentTypeCode.COMMERCIAL_INVOICE)
+          .openSeries(new SeriesKey(seller, "RACE", 2027, Mode.LIVE));
+      exec(gate, "SELECT pg_advisory_unlock(424303)");
+      assertThat(a.get(WAIT.toSeconds(), TimeUnit.SECONDS)).as("writer A").isNull();
+      assertThat(
+              PostgresSupport.scalarOn(
+                  ds,
+                  "SELECT count(*) FROM einvoice_series_name WHERE seller_id = '"
+                      + seller
+                      + "' AND document_type = '380'"))
+          .isEqualTo(1);
+      assertThat(
+              PostgresSupport.scalarOn(
+                  ds, "SELECT count(*) FROM einvoice_series WHERE seller_id = '" + seller + "'"))
+          .isEqualTo(2);
+    }
+  }
+
+  /**
+   * The same interleaving with the other type: doing nothing must not hide the binding. Writer A
+   * (credit notes) does nothing on the name, reads B's invoice type, and is refused with CONFIG
+   * naming the series; no credit-note row exists.
+   */
+  @Test
+  void doing_nothing_on_the_name_never_hides_a_second_type() throws Exception {
+    String seller = PostgresSupport.freshSeller("c03bt");
+    try (HikariDataSource ds = pausable("c03btype");
+        HikariDataSource held = paused(ds);
+        Connection gate = ds.getConnection()) {
+      exec(gate, "SELECT pg_advisory_lock(424303)");
+      CompletableFuture<Throwable> a =
+          CompletableFuture.supplyAsync(
+              () ->
+                  catchThrowable(
+                      () ->
+                          opener(held, seller, DocumentTypeCode.CREDIT_NOTE)
+                              .openSeries(
+                                  new SeriesKey(
+                                      seller,
+                                      "RACE",
+                                      2027,
+                                      Mode.LIVE,
+                                      DocumentTypeCode.CREDIT_NOTE))));
+      assertThat(waitsOn(ds, pid(gate))).isTrue();
+      opener(ds, seller, DocumentTypeCode.COMMERCIAL_INVOICE)
+          .openSeries(new SeriesKey(seller, "RACE", 2026, Mode.LIVE));
+      exec(gate, "SELECT pg_advisory_unlock(424303)");
+      Throwable refused = a.get(WAIT.toSeconds(), TimeUnit.SECONDS);
+      assertThat(refused).isInstanceOf(EInvoiceException.class);
+      assertThat(((EInvoiceException) refused).code()).isEqualTo(ErrorCodes.CONFIG);
+      assertThat(refused.getMessage()).contains("RACE");
+      assertThat(
+              PostgresSupport.scalarOn(
+                  ds,
+                  "SELECT count(*) FROM einvoice_series WHERE seller_id = '"
+                      + seller
+                      + "' AND document_type = '381'"))
+          .isZero();
+    }
   }
 }
