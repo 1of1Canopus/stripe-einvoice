@@ -262,6 +262,8 @@ class CipherProbePr11Test {
         harness.store(),
         reader,
         writer,
+        com.housedevinci.einvoice.adapter.jdbc.IssuanceTestHarness.lockWith(
+            harness.store(), reader, writer),
         harness.renderer(),
         validator,
         new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),

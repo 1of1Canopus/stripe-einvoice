@@ -36,6 +36,26 @@ public abstract class AbstractJdbcUnitOfWork implements JdbcUnitOfWork {
   }
 
   @Override
+  public <T> T onOneConnection(SessionWork<T> work) {
+    Connection connection = null;
+    try {
+      connection = acquire();
+      JdbcUnitOfWork bound = joined(connection) ? this : new HeldConnectionUnitOfWork(connection);
+      return work.run(connection, bound);
+    } catch (SQLException e) {
+      throw JdbcSupport.unavailable(e);
+    } finally {
+      if (connection != null) {
+        try {
+          release(connection);
+        } catch (SQLException e) {
+          throw JdbcSupport.unavailable(e);
+        }
+      }
+    }
+  }
+
+  @Override
   public <T> T inTransaction(SqlWork<T> work) {
     return run(work, true);
   }

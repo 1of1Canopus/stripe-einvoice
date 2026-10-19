@@ -252,6 +252,52 @@ final class ArchiveRetryFixture {
     };
   }
 
+  /** The harness archive, except that each PUT waits for {@code release} before it stores. */
+  static ArchiveStore heldPut(
+      InMemoryArchiveStore inner,
+      java.util.concurrent.CountDownLatch inPut,
+      java.util.concurrent.CountDownLatch release) {
+    return new ArchiveStore() {
+      @Override
+      public boolean supportsAtomicCreate() {
+        return true;
+      }
+
+      @Override
+      public WriteResult putIfAbsent(ArchiveKey key, byte[] bytes) {
+        inPut.countDown();
+        try {
+          if (!release.await(30, java.util.concurrent.TimeUnit.SECONDS)) {
+            throw new IllegalStateException("the test never released the PUT");
+          }
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw new IllegalStateException(e);
+        }
+        synchronized (inner) {
+          return inner.putIfAbsent(key, bytes);
+        }
+      }
+
+      @Override
+      public Optional<byte[]> get(ArchiveKey key) {
+        synchronized (inner) {
+          return inner.get(key);
+        }
+      }
+
+      @Override
+      public java.util.List<String> list(String prefix, int limit) {
+        return inner.list(prefix, limit);
+      }
+
+      @Override
+      public String describe() {
+        return "held archive (test)";
+      }
+    };
+  }
+
   /** The chained events of one invoice, oldest first: state, hash, key and rule id. */
   static List<String> chained(IssuanceTestHarness harness, String invoiceId) {
     List<String> out = new ArrayList<>();
