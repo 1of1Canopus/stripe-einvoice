@@ -5,9 +5,11 @@ import com.housedevinci.einvoice.domain.ArchiveKey;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -83,7 +85,8 @@ public final class FilesystemArchiveStore implements ArchiveStore {
 
   private WriteResult identicalOrConflict(ArchiveKey key, Path target, byte[] bytes)
       throws IOException {
-    byte[] stored = Files.readAllBytes(target);
+    // The name existed a moment ago (the link or move just refused it), so absent now is a fault.
+    byte[] stored = readObject(target).orElseThrow(() -> unavailable(new NoSuchFileException("")));
     if (MessageDigest.isEqual(stored, bytes)) {
       // What a retry of the same input looks like. The key carries the content hash, so identical
       // bytes at the same key is the expected outcome of a resumed issuance, not a coincidence.
@@ -102,13 +105,14 @@ public final class FilesystemArchiveStore implements ArchiveStore {
   public Optional<byte[]> get(ArchiveKey key) {
     Path target = resolve(key);
     try {
-      // Read the bytes and let the read decide. Files.exists answers false when it cannot tell
-      // (no permission, a link loop), and "cannot tell" must never look like "no object": a
-      // resumed issuance would then re-render and burn a number with the document on disk
-      // (D-RTR-8). Only NoSuchFileException is absence.
-      return Optional.of(Files.readAllBytes(target));
-    } catch (NoSuchFileException absent) {
-      return Optional.empty();
+      // Only "no such file" is absence, and only while the archive root itself is there: when the
+      // root is gone (volume dropped), ENOENT is the same answer for every key and must not read
+      // as "no object" (D-RTR-9).
+      Optional<byte[]> stored = readObject(target);
+      if (stored.isEmpty()) {
+        requireRoot();
+      }
+      return stored;
     } catch (IOException e) {
       throw unavailable(e);
     }
@@ -121,10 +125,15 @@ public final class FilesystemArchiveStore implements ArchiveStore {
       return List.of();
     }
     try {
-      // Files.isDirectory is false for "cannot tell" as well; read the attributes instead so that
-      // only a missing path is an empty list and an unreadable one is a failure (D-RTR-8).
-      if (!Files.readAttributes(start, BasicFileAttributes.class).isDirectory()) {
-        return List.of();
+      requireRoot();
+    } catch (IOException e) {
+      throw unavailable(e);
+    }
+    try {
+      // Only a missing path is an empty list; a prefix that is not a folder is a fault (D-RTR-11).
+      BasicFileAttributes attributes = Files.readAttributes(start, BasicFileAttributes.class);
+      if (!attributes.isDirectory()) {
+        throw new IOException("archive prefix is not a folder");
       }
     } catch (NoSuchFileException absent) {
       return List.of();
@@ -132,8 +141,10 @@ public final class FilesystemArchiveStore implements ArchiveStore {
       throw unavailable(e);
     }
     List<String> keys = new ArrayList<>();
-    try (Stream<Path> walk = Files.walk(start)) {
-      walk.filter(Files::isRegularFile)
+    // Files.find hands over the attributes of each entry without following links, so a broken
+    // link, a FIFO or an entry that cannot be classified is listed rather than dropped.
+    try (Stream<Path> found = Files.find(start, Integer.MAX_VALUE, (p, a) -> !a.isDirectory())) {
+      found
           .map(path -> root.relativize(path).toString().replace('\\', '/'))
           .filter(name -> !name.contains("/.einvoice-"))
           .sorted(Comparator.naturalOrder())
@@ -142,7 +153,7 @@ public final class FilesystemArchiveStore implements ArchiveStore {
     } catch (NoSuchFileException vanished) {
       return List.of();
     } catch (IOException | UncheckedIOException e) {
-      // Files.walk reports a directory it cannot open while the stream runs, as an unchecked
+      // The walk reports a directory it cannot open while the stream runs, as an unchecked
       // exception. It is a read failure like any other.
       throw unavailable(e instanceof UncheckedIOException u ? u.getCause() : (IOException) e);
     }
@@ -152,6 +163,37 @@ public final class FilesystemArchiveStore implements ArchiveStore {
   @Override
   public String describe() {
     return "filesystem archive at " + root;
+  }
+
+  /**
+   * Reads the object at the path, or empty when there is none. Attributes first, without following
+   * links: a link, a FIFO, a device or a folder is not an archived document and is a fault, not
+   * bytes from outside the root and not a read that never returns (D-RTR-10). The open then refuses
+   * links too. A regular file swapped for a FIFO between the two calls needs write access to the
+   * volume; that residual window is stated, not closed.
+   */
+  private static Optional<byte[]> readObject(Path target) throws IOException {
+    try {
+      BasicFileAttributes attributes =
+          Files.readAttributes(target, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+      if (!attributes.isRegularFile()) {
+        throw new IOException("archive object is not a regular file");
+      }
+      try (InputStream in = Files.newInputStream(target, LinkOption.NOFOLLOW_LINKS)) {
+        return Optional.of(in.readAllBytes());
+      }
+    } catch (NoSuchFileException absent) {
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * The root must be a folder that can be read; otherwise nothing under it can be called absent.
+   */
+  private void requireRoot() throws IOException {
+    if (!Files.readAttributes(root, BasicFileAttributes.class).isDirectory()) {
+      throw new IOException("archive root is not a folder");
+    }
   }
 
   private Path resolve(ArchiveKey key) {
