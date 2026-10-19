@@ -132,3 +132,87 @@ The retry code is not on this branch, so this is stated, not probed:
 corrections inside `get`, `list` and `identicalOrConflict`; no new mechanism. The fix pass adds
 `CipherProbePr41Test` first, then applies the fixes; all 11 tests must be green, with the six
 `probe_*` tests flipping.
+
+## Pass 2 (2026-10-19)
+
+Head reviewed: `c25505b` (fix pass, main merged in). Re-verification of D-RTR-9 to D-RTR-11,
+then an attack on the new surface.
+
+### Numbers
+
+| Item | Result |
+|---|---|
+| `./mvnw -B clean verify` | BUILD SUCCESS, 678 + 140 + 9 = 827 tests, 0 failures, 0 skipped, coverage gate met |
+| Existing `CipherProbe*` suites | all green, unchanged |
+| `CipherProbePr41Test` | 11 of 11 green |
+| Mutations re-run (five) | each one turns its probes red; code restored after each |
+| New probes `CipherProbePr41Pass2Test` | 3 red (`probe_*`), 4 green (`confirm_*`) |
+
+### Prior findings
+
+- D-RTR-9 (MEDIUM): fixed. `requireRoot()` runs before any empty answer. Mutation "no-op
+  `requireRoot`" turns both root probes red.
+- D-RTR-10 (LOW): fixed for the last name of the path. Mutation "follow links" turns the link
+  probe red; mutation "skip the file-type check" turns the FIFO (named pipe) probe red. A linked
+  folder further up the path is still open: see D-RTR-12.
+- D-RTR-11 (LOW): fixed. Mutation "back to `Files.walk` plus `isRegularFile`" turns the
+  dropped-entry probe red. The fix pass had no mutation for the file-prefix probe, so this pass
+  ran one: `throw new IOException("archive prefix is not a folder")` replaced by
+  `return List.of()`. `probe_list_reports_empty_when_the_prefix_is_a_file` turns red.
+
+### D-RTR-12 (LOW) - a linked folder on the way still leaves the root
+
+`NOFOLLOW_LINKS` (do not follow a symbolic link) applies to the last name of the path only. The
+kernel still follows a link in any folder name before it. Precondition: write access to the
+archive volume, the same as D-RTR-10. Pre-existing, but D-RTR-10's fix was meant to keep every
+read inside the root, and it does not.
+
+Example 1, read: `live/acme` is a link to `/srv/other`. `get` on
+`live/acme/2026/INV-000001-<sha>.xml` returns the bytes of `/srv/other/2026/INV-000001-<sha>.xml`.
+Example 2, write: `live` is a link to `/srv/other`. `putIfAbsent` creates `/srv/other/acme/2026/`
+and writes the legal document there. The next run reads it back as archived.
+Example 3, list: `live` is a link to `/srv/other`. `list("live/acme")` names files outside the
+root as archive keys.
+
+Probes (red on `c25505b`): `probe_get_follows_a_linked_folder_out_of_the_archive_root`,
+`probe_put_writes_through_a_linked_folder_out_of_the_archive_root`,
+`probe_list_walks_a_linked_folder_out_of_the_archive_root`, in
+`stripe-einvoice-core/src/test-pending/java/.../adapter/file/CipherProbePr41Pass2Test.java`.
+Run with `./mvnw -Pprobes-pending -pl stripe-einvoice-core test -Dtest=CipherProbePr41Pass2Test`.
+
+Fix (correction, same class, no new mechanism): in `FilesystemArchiveStore`, a private
+`requireFoldersBelowRoot(Path target)` reads each existing name from the root down to the
+target's folder with `readAttributes(..., NOFOLLOW_LINKS)`. A name that exists and is not a plain
+folder throws `ARCHIVE_UNAVAILABLE`. Call it in `readObject` before the stat (a missing name there
+means absent, then `requireRoot` as today), in `putIfAbsent` before `createDirectories` and again
+after it, and in `list` on `start` (the start itself included) before the walk. The root itself
+stays followed: see "root is a link" below. Move the probe file into `src/test/java` when green.
+
+### Attacks that did not break
+
+- Root replaced by a link to another folder. `requireRoot` follows it. That is right: a root
+  that is a link to a mounted volume is a normal deployment, and the root is operator
+  configuration, not data. A dangling root link is `ARCHIVE_UNAVAILABLE` for `get` and `list`.
+  Pinned by `confirm_a_root_that_is_a_link_to_a_folder_is_followed_by_design` and
+  `confirm_a_root_link_that_dangles_is_unavailable`. Not a finding.
+- Root disappears between `requireRoot` and the read. In `get` the root check runs after the
+  empty answer, so a volume that drops (a one-way event) can never read as absent. The residual
+  case needs the root to vanish and come back between two system calls; acceptable, stated.
+  In `list` the check runs before the walk, so a drop in that window could return an empty list.
+  Suspected only: 3000 rounds with a thread moving the root away at a random moment never
+  produced an empty list. Not a finding. If the D-RTR-12 fix touches `list` anyway, calling
+  `requireRoot` again before each empty return costs one line and closes it.
+- A folder at the key. `putIfAbsent` gets "already exists" from the link, then `readObject`
+  refuses a non-regular file: `ARCHIVE_UNAVAILABLE`, nothing overwritten. Pinned by
+  `confirm_put_over_a_folder_at_the_key_is_unavailable`.
+- A very deep tree. `Files.find` walks with a loop and a stack of open folders, not recursion,
+  so there is no stack overflow. Depth is bounded by the path length limit of the OS. Running out
+  of file handles surfaces as `UncheckedIOException`, which maps to `ARCHIVE_UNAVAILABLE`. A
+  300-level tree lists in milliseconds (`confirm_list_on_a_deep_tree_finishes`). Note, not a
+  finding of this PR: `list` sorts every entry before applying `limit`, so memory grows with the
+  archive size. That was the same on main.
+
+### Verdict
+
+**MERGE WITH FIXES**: D-RTR-12 (LOW). Correction inside `FilesystemArchiveStore`; three probes in
+`src/test-pending` must turn green and move to `src/test/java`.
