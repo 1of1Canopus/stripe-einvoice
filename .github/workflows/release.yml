@@ -163,7 +163,7 @@ jobs:
           # release fix exists to close - a shipped sample that could not start - is exactly what
           # that job catches, and a check nothing has to pass is advice. Expected and intended
           # consequence: a release refuses until main's ruleset lists it.
-          for want in "Build & test" "DCO sign-off" "Cipher probes" "Reference guard" "Sample app from a clean clone"; do
+          for want in "Build & test" "DCO sign-off" "Security probes" "Reference guard" "Sample app from a clean clone"; do
             printf '%s\n' "$contexts" | grep -qxF "$want" || missing="$missing\n  - $want"
           done
           if [ -n "$missing" ]; then
