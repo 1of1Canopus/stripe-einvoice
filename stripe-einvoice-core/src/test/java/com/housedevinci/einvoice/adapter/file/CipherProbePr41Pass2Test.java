@@ -42,8 +42,7 @@ class CipherProbePr41Pass2Test {
     Files.writeString(outside.resolve(Path.of(KEY.value()).getFileName().toString()), "outside");
     Files.createSymbolicLink(root.resolve("acme"), base.resolve("outside"));
     FilesystemArchiveStore store = new FilesystemArchiveStore(base.resolve("archive"));
-    assertThatThrownBy(() -> store.get(KEY))
-        .satisfies(CipherProbePr41Pass2Test::assertUnavailable);
+    assertThatThrownBy(() -> store.get(KEY)).satisfies(CipherProbePr41Pass2Test::assertUnavailable);
   }
 
   @Test
@@ -100,8 +99,7 @@ class CipherProbePr41Pass2Test {
   void confirm_a_root_link_that_dangles_is_unavailable() throws IOException {
     Path root = Files.createSymbolicLink(base.resolve("archive"), base.resolve("missing"));
     FilesystemArchiveStore store = new FilesystemArchiveStore(root);
-    assertThatThrownBy(() -> store.get(KEY))
-        .satisfies(CipherProbePr41Pass2Test::assertUnavailable);
+    assertThatThrownBy(() -> store.get(KEY)).satisfies(CipherProbePr41Pass2Test::assertUnavailable);
     assertThatThrownBy(() -> store.list("live", 10))
         .satisfies(CipherProbePr41Pass2Test::assertUnavailable);
   }

@@ -51,7 +51,10 @@ public final class FilesystemArchiveStore implements ArchiveStore {
   public WriteResult putIfAbsent(ArchiveKey key, byte[] bytes) {
     Path target = resolve(key);
     try {
+      requireFoldersBelowRoot(target.getParent());
       Files.createDirectories(target.getParent());
+      // Checked again: a folder may have been swapped for a link between the two calls (D-RTR-12).
+      requireFoldersBelowRoot(target.getParent());
       Path temporary = Files.createTempFile(target.getParent(), ".einvoice-", ".part");
       try {
         Files.write(temporary, bytes, StandardOpenOption.TRUNCATE_EXISTING);
@@ -130,6 +133,7 @@ public final class FilesystemArchiveStore implements ArchiveStore {
       throw unavailable(e);
     }
     try {
+      requireFoldersBelowRoot(start);
       // Only a missing path is an empty list; a prefix that is not a folder is a fault (D-RTR-11).
       BasicFileAttributes attributes = Files.readAttributes(start, BasicFileAttributes.class);
       if (!attributes.isDirectory()) {
@@ -150,7 +154,13 @@ public final class FilesystemArchiveStore implements ArchiveStore {
           .sorted(Comparator.naturalOrder())
           .limit(Math.max(0, limit))
           .forEach(keys::add);
+      requireRoot();
     } catch (NoSuchFileException vanished) {
+      try {
+        requireRoot();
+      } catch (IOException e) {
+        throw unavailable(e);
+      }
       return List.of();
     } catch (IOException | UncheckedIOException e) {
       // The walk reports a directory it cannot open while the stream runs, as an unchecked
@@ -172,7 +182,8 @@ public final class FilesystemArchiveStore implements ArchiveStore {
    * links too. A regular file swapped for a FIFO between the two calls needs write access to the
    * volume; that residual window is stated, not closed.
    */
-  private static Optional<byte[]> readObject(Path target) throws IOException {
+  private Optional<byte[]> readObject(Path target) throws IOException {
+    requireFoldersBelowRoot(target.getParent());
     try {
       BasicFileAttributes attributes =
           Files.readAttributes(target, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
@@ -193,6 +204,34 @@ public final class FilesystemArchiveStore implements ArchiveStore {
   private void requireRoot() throws IOException {
     if (!Files.readAttributes(root, BasicFileAttributes.class).isDirectory()) {
       throw new IOException("archive root is not a folder");
+    }
+  }
+
+  /**
+   * Every folder name between the root and the path must be a plain folder, not a link: the
+   * no-follow flag on the last name of a path says nothing about the names above it (D-RTR-12). A
+   * name that does not exist ends the check, since nothing below it can exist either. The root
+   * itself may be a link, by design; the operator chose it.
+   */
+  private void requireFoldersBelowRoot(Path folder) throws IOException {
+    if (!folder.startsWith(root)) {
+      throw new IOException("archive path is outside the root");
+    }
+    Path current = root;
+    for (Path name : root.relativize(folder)) {
+      if (name.toString().isEmpty()) {
+        continue;
+      }
+      current = current.resolve(name);
+      try {
+        BasicFileAttributes attributes =
+            Files.readAttributes(current, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        if (!attributes.isDirectory()) {
+          throw new IOException("archive folder is a link or not a folder");
+        }
+      } catch (NoSuchFileException absent) {
+        return;
+      }
     }
   }
 

@@ -116,6 +116,11 @@ All notable changes to this project are documented here. The format follows
 - **`list` reports entries it cannot classify (D-RTR-11).** The listing uses `Files.find`, so a
   broken link or an odd entry is listed (the sweep can then flag it) instead of dropped. A prefix
   that exists but is not a folder is `ARCHIVE_UNAVAILABLE`, not an empty list.
+- **A linked folder inside the archive no longer leads out of it (D-RTR-12).** The no-follow flag
+  guards only the last name of a path. Every folder name from the root down is now checked and
+  must be a plain folder, in `get`, `putIfAbsent` (before and after the folders are made) and
+  `list`; `list` also re-checks the root after the walk. Example: `live/acme` linking to
+  `/srv/other` used to let a legal invoice be written there. It is now `ARCHIVE_UNAVAILABLE`.
 - The reference guard now refuses the moved-private document names in any letter case (for
   example a lower-case copy of a private document), in content and in file names. The bare
   review and release words stay upper case only, because in lower case they are plain English.
