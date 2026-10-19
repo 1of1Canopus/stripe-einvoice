@@ -64,21 +64,30 @@ public final class DeterministicRenderer implements DocumentRenderer {
       throw err;
     }
     StringBuilder out = new StringBuilder();
-    out.append("<Invoice>");
+    // UBL namespaces, so the unit of work's date reader can read it (D-PR36-6). cbc is the default
+    // namespace: the literal <IssueDate>...</IssueDate> text is what the date probes rewrite.
+    out.append("<inv:Invoice xmlns:inv=\"urn:oasis:names:specification:ubl:schema:xsd:Invoice-2\"")
+        .append(" xmlns=\"urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2\"")
+        .append(
+            " xmlns:cac=\"urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2\">");
     out.append("<ID>").append(input.legalNumber().value()).append("</ID>");
     out.append("<IssueDate>").append(ISO_DATE.format(input.issueDate())).append("</IssueDate>");
     input
         .supplyDate()
-        .ifPresent(d -> out.append("<Delivery>").append(ISO_DATE.format(d)).append("</Delivery>"));
+        .ifPresent(
+            d ->
+                out.append("<cac:Delivery><ActualDeliveryDate>")
+                    .append(ISO_DATE.format(d))
+                    .append("</ActualDeliveryDate></cac:Delivery>"));
     input
         .supplyPeriod()
         .ifPresent(
             p ->
-                out.append("<Period>")
+                out.append("<cac:InvoicePeriod><StartDate>")
                     .append(ISO_DATE.format(p.start()))
-                    .append("/")
+                    .append("</StartDate><EndDate>")
                     .append(ISO_DATE.format(p.end()))
-                    .append("</Period>"));
+                    .append("</EndDate></cac:InvoicePeriod>"));
     out.append("<SourceId>").append(input.invoice().id()).append("</SourceId>");
     out.append("<Currency>").append(input.invoice().currency()).append("</Currency>");
     out.append("<Total>").append(input.invoice().totalMinor()).append("</Total>");
@@ -89,7 +98,7 @@ public final class DeterministicRenderer implements DocumentRenderer {
           .append(line.netMinor())
           .append("</Line>");
     }
-    out.append("</Invoice>");
+    out.append("</inv:Invoice>");
     if (out.length() > 1_000_000) {
       throw new EInvoiceException(ErrorCodes.RENDER_FAILED, "rendered document is implausible");
     }

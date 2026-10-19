@@ -8,7 +8,6 @@ import com.housedevinci.einvoice.autoconfigure.TestPostgres;
 import com.housedevinci.einvoice.autoconfigure.TestRenderers;
 import com.housedevinci.einvoice.domain.Percentage;
 import com.housedevinci.einvoice.domain.Totals;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -40,17 +39,7 @@ public class IssuanceTestApp {
   DocumentRenderer renderer() {
     return TestRenderers.supplying(
         input ->
-            new DocumentRenderer.RenderedDocument(
-                ("<Invoice><ID>"
-                        + input.legalNumber().value()
-                        + "</ID><IssueDate>"
-                        + input.issueDate()
-                        + "</IssueDate><SourceId>"
-                        + input.invoice().id()
-                        + "</SourceId></Invoice>")
-                    .getBytes(StandardCharsets.UTF_8),
-                "xml",
-                "test"));
+            new DocumentRenderer.RenderedDocument(TestRenderers.datedUbl(input), "xml", "test"));
   }
 
   @Bean

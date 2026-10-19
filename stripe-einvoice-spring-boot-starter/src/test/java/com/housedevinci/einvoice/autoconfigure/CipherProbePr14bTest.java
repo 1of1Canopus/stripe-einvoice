@@ -184,6 +184,7 @@ class CipherProbePr14bTest {
           store,
           renderer,
           validator,
+          new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
           archive,
           preflightSupport,
           clock,

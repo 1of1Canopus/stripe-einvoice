@@ -388,7 +388,9 @@ class IssuanceUnitOfWorkTest {
     assertThat(outcome.legalNumber()).isEqualTo("INV-2027-000001");
     String document = new String(harness.archivedBytes("in_late_ok"), StandardCharsets.UTF_8);
     assertThat(document).contains("<IssueDate>2027-06-01</IssueDate>");
-    assertThat(document).contains("<Delivery>2026-01-16</Delivery>");
+    assertThat(document)
+        .contains(
+            "<cac:Delivery><ActualDeliveryDate>2026-01-16</ActualDeliveryDate></cac:Delivery>");
   }
 
   @Test
@@ -403,7 +405,8 @@ class IssuanceUnitOfWorkTest {
     paris.unitOfWork().process(paris.receive("invoice.finalized", "in_zone"));
     assertThat(new String(paris.archivedBytes("in_zone"), StandardCharsets.UTF_8))
         .contains("<IssueDate>2026-01-16</IssueDate>")
-        .contains("<Delivery>2026-01-16</Delivery>");
+        .contains(
+            "<cac:Delivery><ActualDeliveryDate>2026-01-16</ActualDeliveryDate></cac:Delivery>");
 
     IssuanceTestHarness lisbon = IssuanceTestHarness.createInZone("Atlantic/Azores");
     lisbon.moveClockTo(Instant.parse("2026-01-15T23:45:00Z"));
@@ -411,7 +414,8 @@ class IssuanceUnitOfWorkTest {
     lisbon.unitOfWork().process(lisbon.receive("invoice.finalized", "in_zone"));
     assertThat(new String(lisbon.archivedBytes("in_zone"), StandardCharsets.UTF_8))
         .contains("<IssueDate>2026-01-15</IssueDate>")
-        .contains("<Delivery>2026-01-15</Delivery>");
+        .contains(
+            "<cac:Delivery><ActualDeliveryDate>2026-01-15</ActualDeliveryDate></cac:Delivery>");
   }
 
   @Test
