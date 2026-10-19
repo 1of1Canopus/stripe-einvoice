@@ -40,8 +40,9 @@ public abstract class AbstractJdbcUnitOfWork implements JdbcUnitOfWork {
     Connection connection = null;
     try {
       connection = acquire();
-      JdbcUnitOfWork bound = joined(connection) ? this : new HeldConnectionUnitOfWork(connection);
-      return work.run(connection, bound);
+      boolean joined = joined(connection);
+      JdbcUnitOfWork bound = joined ? this : new HeldConnectionUnitOfWork(connection);
+      return work.run(connection, bound, joined);
     } catch (SQLException e) {
       throw JdbcSupport.unavailable(e);
     } finally {

@@ -259,6 +259,14 @@ public final class ErrorCodes {
    */
   public static final String ISSUANCE_IN_FLIGHT = "DEI-245";
 
+  /**
+   * The issuance row lock could not be released on its own session (D-PR42-4): usually the backend
+   * died (a failover, a terminated backend, a network cut). The connection is closed, never pooled,
+   * so the lock goes with it. Logged at ERROR; the run's own outcome stands. DEI-246 is reserved by
+   * the archive marker design.
+   */
+  public static final String ROW_LOCK_RELEASE_FAILED = "DEI-247";
+
   /** The exact bytes did not pass validation. The failing rule id is recorded. */
   public static final String VALIDATION_REFUSED = "DEI-250";
 

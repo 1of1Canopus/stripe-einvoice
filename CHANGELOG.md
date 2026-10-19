@@ -118,6 +118,12 @@ All notable changes to this project are documented here. The format follows
 - **`DEI-104`: a pooler in transaction mode is refused** before a number is taken, because it
   would silently turn the session lock into no lock. Session pooling and direct connections work.
 - A redelivery whose archive read fails is retried (`DEI-241`), never reported as tampered.
+- **Security review of the row lock, pass 1 (D-PR42-1, 3, 4, 5).** The starter runs the session
+  check once at startup, outside any transaction, and a joined holder needs none, so a host
+  transaction on a pool of two is never starved. The lock's pre-check reads only this database's
+  locks: row 42 of a staging database on the same cluster no longer waits for production row 42. A
+  failed lock release has its own code, `DEI-247`. The README mount-point note names the harm and
+  gives `RequiresMountsFor=` and `mountpoint -q` checks.
 - **A burn writes the rule id and nothing else.** The trigger refuses a move to
   `FAILED_VALIDATION` that also changes the document hash, the archive key or the void reason; the
   void reason changes only with a move to `VOID_UNUSED`.

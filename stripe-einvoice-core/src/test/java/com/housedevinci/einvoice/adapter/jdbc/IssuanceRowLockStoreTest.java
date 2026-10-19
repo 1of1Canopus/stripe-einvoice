@@ -188,7 +188,6 @@ class IssuanceRowLockStoreTest {
     try {
       String seller = PostgresSupport.freshSeller("joined");
       JdbcIssuanceStore own = store(single, seller, JdbcUnitOfWork.ownConnection(single));
-      own.verifySessionPinning();
       Issuance row = own.allocate(request(key(seller), "in_joined"));
       try (Connection caller = single.getConnection();
           Connection blocker = single.getConnection()) {

@@ -31,6 +31,9 @@ final class IssuanceRowLocks {
   static final String TRY =
       "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_locks l"
           + " WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 2"
+          // D-PR42-3: advisory locks belong to one database; another database's row is not ours.
+          + " AND l.database = (SELECT d.oid FROM pg_catalog.pg_database d"
+          + " WHERE d.datname = pg_catalog.current_database())"
           + " AND l.classid = CAST(? AS bigint)::oid AND l.objid = CAST(? AS bigint)::oid)"
           + " THEN false ELSE pg_catalog.pg_try_advisory_lock(?, ?) END,"
           + " pg_catalog.pg_backend_pid()";
@@ -90,7 +93,7 @@ final class IssuanceRowLocks {
         "einvoice: the archive lock of issuance row {} could not be released on its own session;"
             + " the connection is closed instead of pooled ({})",
         issuanceId,
-        ErrorCodes.SESSION_NOT_PINNED);
+        ErrorCodes.ROW_LOCK_RELEASE_FAILED);
     try (Statement st = c.createStatement()) {
       st.execute(EVICT);
     } catch (SQLException expected) {
