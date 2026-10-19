@@ -21,7 +21,7 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
 /**
- * Cipher probes for PR 16 (the archive test's object store moved from MinIO to S3Mock).
+ * Security probes for PR 16 (the archive test's object store moved from MinIO to S3Mock).
  *
  * <p>D16-01 asks whether the replacement server still proves what the old one proved: that the 412
  * the adapter depends on is caused by {@code If-None-Match: *} and not by the server refusing every

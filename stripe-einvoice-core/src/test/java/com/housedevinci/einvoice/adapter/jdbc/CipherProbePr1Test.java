@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 
-/** Cipher probes for PR 1. Each one FAILS on 71ce8d6 and must go green with the fix. */
+/** Security probes for PR 1. Each one FAILS on 71ce8d6 and must go green with the fix. */
 class CipherProbePr1Test {
 
   private static SeriesKey key(String seller, int year) {
