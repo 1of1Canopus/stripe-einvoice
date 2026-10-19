@@ -16,7 +16,7 @@ misleading remedy, the rendered bytes, and one test that does not kill its mutan
 | item | result |
 |---|---|
 | `./mvnw -B clean verify`, Docker up | BUILD SUCCESS, 688 tests (core 545, starter 135, sample 8), 0 failures, 0 skipped, JaCoCo gate met |
-| existing Cipher probes | all green inside that run, unchanged |
+| existing Security probes | all green inside that run, unchanged |
 | builder's 17 mutations, re-run by this review | 15 RED as claimed; M2 GREEN (equivalent, confirmed); M5 GREEN with the mutant of design item 5 (finding D-PR36-5) |
 | new probes of this pass | 5 fail on `dfd249a`; 2 extra checks pass |
 

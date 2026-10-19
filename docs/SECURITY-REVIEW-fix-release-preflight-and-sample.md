@@ -100,7 +100,7 @@ both before the scanner step.
 
 Moving the smoke body into `tools/run-sample-smoke.sh` and calling it from both workflows is the
 right shape and removes the drift risk. But `Sample app from a clean clone` is not in the list of
-contexts the preflight job requires main to carry (`Build & test`, `DCO sign-off`, `Cipher probes`,
+contexts the preflight job requires main to carry (`Build & test`, `DCO sign-off`, `Security probes`,
 `Reference guard`), which is this repository's only machine-readable statement of what must be green
 before a merge. A check that may be red on a merged pull request is advice, and "a check nothing had
 to pass" is the defect this branch exists to close.
