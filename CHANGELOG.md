@@ -95,6 +95,32 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **An unreadable archive object is a failure, not "absent" (D-RTR-8).** The filesystem archive
+  used `Files.exists`, which answers false when it cannot tell (no permission, a link loop). A
+  read failure looked like "no object", so a resumed run could burn a number while the document
+  was on disk, and `list` hid a directory it could not read. `get` now reads the bytes and only
+  `NoSuchFileException` is absent; `list` reads the directory attributes and reports any other
+  I/O error as `ARCHIVE_UNAVAILABLE`. Example: the archive directory loses its permissions during
+  a deploy; the retry now fails and retries later instead of re-rendering and burning the number.
+  The S3 store was checked: only `NoSuchKeyException` is absent, a 403 is a failure.
+- **A missing archive root is not "no object" (D-RTR-9).** When the archive volume drops or the
+  root folder is moved, every key answers "no such file". `get` and `list` now read the root's
+  attributes before any empty answer, and a missing root, or a root that is not a folder, is
+  `ARCHIVE_UNAVAILABLE`. Example: the volume drops at 10:00 and an invoice is redelivered at
+  10:05; it is retried later instead of ending as tampered.
+- **The archive reads only regular files, and never follows links (D-RTR-10).** `get` and the
+  write-once comparison share one reader: it reads the attributes without following links,
+  refuses anything that is not a regular file, and opens with `NOFOLLOW_LINKS`. Example: a named
+  pipe at a key used to block the call for ever; a symbolic link used to return the bytes of a
+  file outside the archive root. Both are now `ARCHIVE_UNAVAILABLE`.
+- **`list` reports entries it cannot classify (D-RTR-11).** The listing uses `Files.find`, so a
+  broken link or an odd entry is listed (the sweep can then flag it) instead of dropped. A prefix
+  that exists but is not a folder is `ARCHIVE_UNAVAILABLE`, not an empty list.
+- **A linked folder inside the archive no longer leads out of it (D-RTR-12).** The no-follow flag
+  guards only the last name of a path. Every folder name from the root down is now checked and
+  must be a plain folder, in `get`, `putIfAbsent` (before and after the folders are made) and
+  `list`; `list` also re-checks the root after the walk. Example: `live/acme` linking to
+  `/srv/other` used to let a legal invoice be written there. It is now `ARCHIVE_UNAVAILABLE`.
 - The reference guard now refuses the moved-private document names in any letter case (for
   example a lower-case copy of a private document), in content and in file names. The bare
   review and release words stay upper case only, because in lower case they are plain English.
