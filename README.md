@@ -163,7 +163,12 @@ same number at once: the second one gets `DEI-245` and retries later.
 - **A pooler in transaction or statement mode is refused** (`DEI-104`), before any number is taken.
   Under such a pooler a session lock is no lock at all. PgBouncer in session mode, or a direct
   connection, works. There is no setting that turns this check off.
-- The connection pool needs at least two connections: the check opens two at once, the first time.
+- The check needs two free connections besides the caller's own, the first time. The starter runs
+  it once at startup, outside any transaction (a refused pooler fails the startup). A host that
+  wires the store by hand calls `JdbcIssuanceStore.verifySessionPinning()` at startup.
+- A lock that cannot be released on its own session (the backend died: a failover, a terminated
+  backend, a network cut) is logged at ERROR with `DEI-247`, and the connection is closed instead
+  of pooled.
 - If a database connection dies while it holds the lock, PostgreSQL releases the lock at once. A
   half-open TCP connection keeps it until the server notices: set `tcp_keepalives_idle`,
   `tcp_keepalives_interval` and `tcp_keepalives_count` on the server (and `tcpKeepAlive=true` on
@@ -172,9 +177,12 @@ same number at once: the second one gets `DEI-245` and retries later.
 
 ### The filesystem archive and its mount point
 
-Mount the archive volume read-write and make the application fail to start when it is not mounted
-(for example a Kubernetes volume with no fallback directory). An empty directory where the volume
-should be looks like a new, empty archive to this version.
+Until the archive marker lands (before 0.2.0), an empty directory where the volume should be looks
+like a new, empty archive. Then a resumed row can burn a number whose document is on the real
+volume, and new documents are written to the local disk. Make the start fail when the volume is
+not mounted: with systemd, `RequiresMountsFor=<archive root>` on the service; in a container
+entrypoint, `mountpoint -q <archive root> || exit 1`. A Kubernetes volume in the pod spec is
+mounted or the pod does not start.
 
 ### What it needs from you
 

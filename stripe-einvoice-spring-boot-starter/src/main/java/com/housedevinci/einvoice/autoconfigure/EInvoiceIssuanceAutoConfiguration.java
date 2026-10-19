@@ -70,6 +70,32 @@ public class EInvoiceIssuanceAutoConfiguration {
    * worker, the reconciliation sweep, the reprocess and the webhook controller are all already
    * conditional. Nothing else in this module reads an inbound event.
    */
+  /**
+   * D-PR42-1: the issuance row lock's session check, once, at startup, outside any transaction, so
+   * a host transaction never waits for the two connections the check needs. {@code DEI-104} (a
+   * pooler in transaction or statement mode) fails the startup. A database not reachable yet only
+   * WARNs, and the check then runs before the first lock instead.
+   */
+  @Bean
+  public org.springframework.beans.factory.SmartInitializingSingleton einvoiceSessionPinningCheck(
+      ObjectProvider<JdbcIssuanceStore> store) {
+    return () ->
+        store.ifAvailable(
+            s -> {
+              try {
+                s.verifySessionPinning();
+              } catch (EInvoiceException e) {
+                if (ErrorCodes.SESSION_NOT_PINNED.equals(e.code())) {
+                  throw e;
+                }
+                log.warn(
+                    "einvoice: the database session check could not run at startup ({}); it runs"
+                        + " before the first issuance row lock instead",
+                    e.code());
+              }
+            });
+  }
+
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnProperty(prefix = "einvoice.issuance", name = "enabled", matchIfMissing = true)

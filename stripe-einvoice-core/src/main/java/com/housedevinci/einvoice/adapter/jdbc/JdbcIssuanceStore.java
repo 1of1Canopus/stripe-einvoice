@@ -380,12 +380,37 @@ public final class JdbcIssuanceStore
       java.util.function.Function<com.housedevinci.einvoice.application.IssuanceRowLock.Held, T>
           work) {
     Objects.requireNonNull(work, "work");
-    verifySessionPinning();
+    Optional<Optional<T>> done = attempt(issuanceId, work);
+    if (done.isEmpty()) {
+      // D-PR42-1: the first own-connection holder on this data source. The session check needs
+      // two free connections, so it runs here with none held, then the lock is tried again.
+      verifySessionPinning();
+      done = attempt(issuanceId, work);
+    }
+    return done.orElseThrow(
+        () ->
+            new EInvoiceException(
+                ErrorCodes.SESSION_NOT_PINNED, "the session check did not settle for this pool"));
+  }
+
+  /**
+   * One try at the lock. Empty when an own-connection holder must first run R5's check, which it
+   * never does while it holds a connection. A joined holder needs no check: every statement from
+   * the TRY to the UNLOCK runs inside the caller's one open transaction, which any pooler keeps on
+   * one server connection.
+   */
+  private <T> Optional<Optional<T>> attempt(
+      long issuanceId,
+      java.util.function.Function<com.housedevinci.einvoice.application.IssuanceRowLock.Held, T>
+          work) {
     return unitOfWork.onOneConnection(
-        (connection, bound) -> {
+        (connection, bound, joined) -> {
+          if (!joined && !sessionPinned()) {
+            return Optional.empty();
+          }
           Optional<Integer> holder = IssuanceRowLocks.tryLock(connection, issuanceId);
           if (holder.isEmpty()) {
-            return Optional.empty();
+            return Optional.of(Optional.<T>empty());
           }
           boolean released = false;
           try {
@@ -394,7 +419,7 @@ public final class JdbcIssuanceStore
                 work.apply(
                     new com.housedevinci.einvoice.application.IssuanceRowLock.Held(locked, locked));
             released = IssuanceRowLocks.unlock(connection, issuanceId, holder.get());
-            return Optional.of(result);
+            return Optional.of(Optional.of(result));
           } finally {
             if (!released) {
               if (!IssuanceRowLocks.unlock(connection, issuanceId, holder.get())) {
@@ -403,6 +428,20 @@ public final class JdbcIssuanceStore
             }
           }
         });
+  }
+
+  /** True once R5's check has passed for this store's data source (for a startup probe). */
+  public boolean sessionPinningVerified() {
+    return sessionPinned();
+  }
+
+  private boolean sessionPinned() {
+    PINNING_CHECK.lock();
+    try {
+      return SESSION_PINNED.contains(dataSource);
+    } finally {
+      PINNING_CHECK.unlock();
+    }
   }
 
   /**

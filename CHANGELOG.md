@@ -95,6 +95,38 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A refusal on a resumed run is recorded (QUESTIONS 38, D-DD-B1).** A run that resumed a row in
+  `ARCHIVING` or `FAILED_ARCHIVE` and was then refused by the validator, the date check or the
+  renderer ended on `DEI-113` (illegal transition), with the number still open and re-enqueued by
+  the sweep. Two new edges, `ARCHIVING -> FAILED_VALIDATION` and `FAILED_ARCHIVE ->
+  FAILED_VALIDATION`, in the enum and in the database trigger, burn the number with its rule id
+  and a chained event. Example: `F-2026-0042`'s archive write times out on 10 January; after an
+  upgrade the retry renders BT-2 = 3 January; the event now ends on `DEI-250` with
+  `EINVOICE-DATES`, the row is `FAILED_VALIDATION`, and the sweep reports `DEI-279` instead of
+  re-enqueueing it.
+- **A resumed row reads its own archive key before it renders.** Same bytes as recorded: the number
+  is issued with no render, because the document already exists. Other bytes: `DEI-240`. A read
+  failure: retried, never a burn. No object: the run renders and checks again. A burn of a row that
+  had recorded a hash keeps that hash and logs both hashes at WARN.
+- **Two workers can no longer burn a number whose archive write is in flight (D-RTR-7).** During a
+  rolling deploy, worker A wrote its ARCHIVING marker and was uploading; worker B resumed the row,
+  found no object yet, rendered other bytes, was refused and burned the number; A's document then
+  landed. The row is now held under a session-level advisory lock from just before the marker until
+  the outcome is recorded. A second worker gets `DEI-245` and retries; it reads, renders and writes
+  nothing. **Breaking for hand-wired hosts:** `IssuanceUnitOfWork` takes an `IssuanceRowLock` after
+  the writer (pass the same `JdbcIssuanceStore`), and `JdbcUnitOfWork` gains `onOneConnection`.
+- **`DEI-104`: a pooler in transaction mode is refused** before a number is taken, because it
+  would silently turn the session lock into no lock. Session pooling and direct connections work.
+- A redelivery whose archive read fails is retried (`DEI-241`), never reported as tampered.
+- **Security review of the row lock, pass 1 (D-PR42-1, 3, 4, 5).** The starter runs the session
+  check once at startup, outside any transaction, and a joined holder needs none, so a host
+  transaction on a pool of two is never starved. The lock's pre-check reads only this database's
+  locks: row 42 of a staging database on the same cluster no longer waits for production row 42. A
+  failed lock release has its own code, `DEI-247`. The README mount-point note names the harm and
+  gives `RequiresMountsFor=` and `mountpoint -q` checks.
+- **A burn writes the rule id and nothing else.** The trigger refuses a move to
+  `FAILED_VALIDATION` that also changes the document hash, the archive key or the void reason; the
+  void reason changes only with a move to `VOID_UNUSED`.
 - **An unreadable archive object is a failure, not "absent" (D-RTR-8).** The filesystem archive
   used `Files.exists`, which answers false when it cannot tell (no permission, a link loop). A
   read failure looked like "no object", so a resumed run could burn a number while the document
@@ -121,32 +153,6 @@ All notable changes to this project are documented here. The format follows
   must be a plain folder, in `get`, `putIfAbsent` (before and after the folders are made) and
   `list`; `list` also re-checks the root after the walk. Example: `live/acme` linking to
   `/srv/other` used to let a legal invoice be written there. It is now `ARCHIVE_UNAVAILABLE`.
-- **A refusal on a resumed run is recorded (QUESTIONS 38, D-DD-B1).** A run that resumed a row in
-  `ARCHIVING` or `FAILED_ARCHIVE` and was then refused by the validator, the date check or the
-  renderer ended on `DEI-113` (illegal transition), with the number still open and re-enqueued by
-  the sweep. Two new edges, `ARCHIVING -> FAILED_VALIDATION` and `FAILED_ARCHIVE ->
-  FAILED_VALIDATION`, in the enum and in the database trigger, burn the number with its rule id
-  and a chained event. Example: `F-2026-0042`'s archive write times out on 10 January; after an
-  upgrade the retry renders BT-2 = 3 January; the event now ends on `DEI-250` with
-  `EINVOICE-DATES`, the row is `FAILED_VALIDATION`, and the sweep reports `DEI-279` instead of
-  re-enqueueing it.
-- **A resumed row reads its own archive key before it renders.** Same bytes as recorded: the number
-  is issued with no render, because the document already exists. Other bytes: `DEI-240`. A read
-  failure: retried, never a burn. No object: the run renders and checks again. A burn of a row that
-  had recorded a hash keeps that hash and logs both hashes at WARN.
-- **Two workers can no longer burn a number whose archive write is in flight (D-RTR-7).** During a
-  rolling deploy, worker A wrote its ARCHIVING marker and was uploading; worker B resumed the row,
-  found no object yet, rendered other bytes, was refused and burned the number; A's document then
-  landed. The row is now held under a session-level advisory lock from just before the marker until
-  the outcome is recorded. A second worker gets `DEI-245` and retries; it reads, renders and writes
-  nothing. **Breaking for hand-wired hosts:** `IssuanceUnitOfWork` takes an `IssuanceRowLock` after
-  the writer (pass the same `JdbcIssuanceStore`), and `JdbcUnitOfWork` gains `onOneConnection`.
-- **`DEI-104`: a pooler in transaction mode is refused** before a number is taken, because it
-  would silently turn the session lock into no lock. Session pooling and direct connections work.
-- A redelivery whose archive read fails is retried (`DEI-241`), never reported as tampered.
-- **A burn writes the rule id and nothing else.** The trigger refuses a move to
-  `FAILED_VALIDATION` that also changes the document hash, the archive key or the void reason; the
-  void reason changes only with a move to `VOID_UNUSED`.
 - The reference guard now refuses the moved-private document names in any letter case (for
   example a lower-case copy of a private document), in content and in file names. The bare
   review and release words stay upper case only, because in lower case they are plain English.

@@ -71,7 +71,11 @@ public interface JdbcUnitOfWork {
   /** Work that holds one connection for its whole duration. */
   @FunctionalInterface
   interface SessionWork<T> {
-    T run(Connection connection, JdbcUnitOfWork bound) throws SQLException;
+    /**
+     * @param joined true when {@code connection} is a caller's, inside the caller's open
+     *     transaction: every statement of the work then runs in that one transaction
+     */
+    T run(Connection connection, JdbcUnitOfWork bound, boolean joined) throws SQLException;
   }
 
   /** The implementation's kind, for one log line at startup. */
