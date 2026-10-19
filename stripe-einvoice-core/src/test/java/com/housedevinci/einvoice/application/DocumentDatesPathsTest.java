@@ -357,17 +357,17 @@ class DocumentDatesPathsTest {
         .isEqualTo(InboundState.FAILED_ISSUANCE);
     harness.archive().heal();
 
+    Issuance before = harness.issuance("in_p8").orElseThrow();
+
     IssuanceUnitOfWork.Outcome retry = lenient(harness, backdating(harness, 7)).process(eventId);
 
-    // Nothing is archived and the event is terminal. The row cannot record the refusal:
-    // FAILED_ARCHIVE has no FAILED_VALIDATION successor (IssuanceState), so the event concludes on
-    // the store's illegal-transition code, not on EINVOICE-DATES. The internal open-questions log,
-    // item 38, asks for the edge.
-    assertThat(retry.state()).isEqualTo(InboundState.FAILED_ISSUANCE);
-    assertThat(retry.code()).isEqualTo(ErrorCodes.ILLEGAL_TRANSITION);
-    assertThat(harness.archive().size()).isZero();
-    assertThat(harness.issuance("in_p8").orElseThrow().state())
-        .isEqualTo(IssuanceState.FAILED_ARCHIVE);
+    // QUESTIONS 38, D-DD-B1: the resumed run read its own key, found no object, rendered, and the
+    // refusal is now written on the row and in the chain, not lost behind DEI-113.
+    refusedOnDates(harness, "in_p8", eventId, retry, ErrorCodes.VALIDATION_REFUSED);
+    Issuance after = harness.issuance("in_p8").orElseThrow();
+    assertThat(after.voidRuleId()).isEqualTo(DocumentDatesRule.RULE_ID);
+    assertThat(after.documentSha256()).isEqualTo(before.documentSha256()).isNotEmpty();
+    assertThat(after.archiveKey()).isEqualTo(before.archiveKey()).isNotEmpty();
   }
 
   @Test
