@@ -1580,7 +1580,9 @@ public final class JdbcIssuanceStore
             // this the only explanation lived on a row that can legitimately change; now it is in
             // the chain, with the failing rule id or the refusal code on it. FAILED_ARCHIVE is
             // deliberately not chained: it is retryable, not a disposition, and its eventual fate
-            // is ISSUED or VOID_UNUSED, both of which are.
+            // is ISSUED, VOID_UNUSED or - since QUESTIONS 38, after a resumed run that found no
+            // object at its key - FAILED_VALIDATION, all of which are. The event copies the row,
+            // so a burned resumed row's event carries the first attempt's hash and key.
             appendEvent(unit, failed, IssuanceEvent.failed(failed, state, ruleId, clock.instant()));
           }
           return failed;

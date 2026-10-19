@@ -594,6 +594,16 @@ BEGIN
      OR NEW.date_gap_cause IS DISTINCT FROM OLD.date_gap_cause THEN
     RAISE EXCEPTION 'einvoice_issuance: only state, document_sha256, archive_key, void_reason and void_rule_id may change, and the last two only while the row is open';
   END IF;
+  -- D-RTR-2: a burn records its rule id and nothing else. From NUMBERED the hash, the key and the
+  -- reason are still empty, so the write-once clauses below do not hold them; a burn that planted
+  -- a key would also make an orphan object look known to the sweep. Since QUESTIONS 38 a burn
+  -- also leaves ARCHIVING and FAILED_ARCHIVE, where the row keeps the hash and key it recorded.
+  IF NEW.state <> OLD.state AND NEW.state = 'FAILED_VALIDATION'
+     AND (NEW.document_sha256 IS DISTINCT FROM OLD.document_sha256
+          OR NEW.archive_key IS DISTINCT FROM OLD.archive_key
+          OR NEW.void_reason IS DISTINCT FROM OLD.void_reason) THEN
+    RAISE EXCEPTION 'einvoice_issuance: a burn records its rule id and nothing else (hash, key and reason stay as they were)';
+  END IF;
   -- N-06: write-once, not merely updatable. The chain detects a rewrite of either as BROKEN, but
   -- detection is not prevention when prevention costs one clause.
   IF OLD.document_sha256 <> '' AND NEW.document_sha256 <> OLD.document_sha256 THEN
@@ -613,7 +623,13 @@ BEGIN
   -- disposition that does move the state writes no chained event, which the verifier's cross-check
   -- reports as BROKEN. Not "write-once" as the other two columns are: the void legitimately
   -- replaces the burn's rule id, in that one statement and nowhere else.
-  IF (NEW.void_reason <> OLD.void_reason OR NEW.void_rule_id <> OLD.void_rule_id)
+  -- D-RTR-2: the reason is the operator's, so it changes only with the void itself; the rule id
+  -- changes with the void or with the burn that records it.
+  IF NEW.void_reason <> OLD.void_reason
+     AND NOT (NEW.state <> OLD.state AND NEW.state = 'VOID_UNUSED') THEN
+    RAISE EXCEPTION 'einvoice_issuance: the void justification changes only when the number is voided';
+  END IF;
+  IF NEW.void_rule_id <> OLD.void_rule_id
      AND NOT (NEW.state <> OLD.state AND NEW.state IN ('VOID_UNUSED', 'FAILED_VALIDATION')) THEN
     RAISE EXCEPTION 'einvoice_issuance: the void justification changes only when the number is voided';
   END IF;
@@ -623,8 +639,8 @@ BEGIN
   IF NEW.state <> OLD.state THEN
     IF NOT (
          (OLD.state = 'NUMBERED'          AND NEW.state IN ('ARCHIVING', 'FAILED_VALIDATION', 'FAILED_ARCHIVE', 'VOID_UNUSED'))
-      OR (OLD.state = 'ARCHIVING'         AND NEW.state IN ('ISSUED', 'FAILED_ARCHIVE', 'VOID_UNUSED'))
-      OR (OLD.state = 'FAILED_ARCHIVE'    AND NEW.state IN ('ARCHIVING', 'VOID_UNUSED'))
+      OR (OLD.state = 'ARCHIVING'         AND NEW.state IN ('ISSUED', 'FAILED_ARCHIVE', 'FAILED_VALIDATION', 'VOID_UNUSED'))
+      OR (OLD.state = 'FAILED_ARCHIVE'    AND NEW.state IN ('ARCHIVING', 'FAILED_VALIDATION', 'VOID_UNUSED'))
       OR (OLD.state = 'FAILED_VALIDATION' AND NEW.state IN ('VOID_UNUSED'))
     ) THEN
       RAISE EXCEPTION 'einvoice_issuance: % -> % is not a declared transition', OLD.state, NEW.state;

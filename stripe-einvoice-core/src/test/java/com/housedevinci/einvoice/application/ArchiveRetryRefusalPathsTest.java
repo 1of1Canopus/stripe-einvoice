@@ -10,7 +10,6 @@ import static com.housedevinci.einvoice.application.ArchiveRetryFixture.prepare;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.housedevinci.einvoice.adapter.jdbc.IssuanceTestHarness;
-import com.housedevinci.einvoice.adapter.jdbc.PostgresSupport;
 import com.housedevinci.einvoice.application.ArchiveRetryFixture.Row;
 import com.housedevinci.einvoice.domain.ComplianceFinding;
 import com.housedevinci.einvoice.domain.EInvoiceException;
@@ -24,7 +23,6 @@ import com.housedevinci.einvoice.domain.SeriesReport;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
@@ -332,7 +330,10 @@ class ArchiveRetryRefusalPathsTest {
   // ------------------------------------------------------------------ S7
 
   @Test
-  void a_reprocess_that_resumes_a_failed_archive_row_burns_on_refusal() {
+  void a_reprocess_never_resumes_a_numbered_row() {
+    // S7 is refused by design, not a burn path: IssuanceReprocess refuses any event whose invoice
+    // already holds a number (REFUSED_NUMBERED), so it cannot reach a resumed FAILED_ARCHIVE row.
+    // The resumed row is reached by the sweeper's retry of its own event instead (S1 to S6).
     Row row = prepare(FAILED_ARCHIVE_NO_OBJECT, "in_s7");
     IssuanceTestHarness harness = row.harness();
     AtomicBoolean profileIncomplete = new AtomicBoolean(true);
@@ -360,14 +361,15 @@ class ArchiveRetryRefusalPathsTest {
     assertThat(harness.unitOfWorkWithRenderer(repairable).process(paid).state())
         .isEqualTo(InboundState.FAILED_MAPPING);
     profileIncomplete.set(false);
+    int renders = harness.renderer().renders();
 
     IssuanceReprocess.Result result =
         harness.reprocessWith(repairable).reprocess(new ReprocessRequest(paid, "ops", "fixed"));
 
-    assertThat(result.state()).isEqualTo(InboundState.FAILED_ISSUANCE);
-    assertThat(result.code()).isEqualTo(ErrorCodes.VALIDATION_REFUSED);
-    assertThat(row.now().state()).isEqualTo(IssuanceState.FAILED_VALIDATION);
-    assertThat(row.chained()).containsExactly(burnLine(row.now(), DocumentDatesRule.RULE_ID));
+    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REFUSED_NUMBERED);
+    assertThat(harness.renderer().renders()).isEqualTo(renders);
+    assertThat(row.now().state()).isEqualTo(IssuanceState.FAILED_ARCHIVE);
+    assertThat(row.chained()).isEmpty();
   }
 
   // ------------------------------------------------------------------ S8
@@ -458,27 +460,8 @@ class ArchiveRetryRefusalPathsTest {
   }
 
   // ------------------------------------------------------------------ S13
-
-  @Test
-  void the_verifier_reads_a_burned_retry_as_intact() {
-    Row row = prepare(ARCHIVING_NO_OBJECT, "in_s13");
-    row.retryBackdated();
-    IssuanceChainVerifier verifier =
-        new IssuanceChainVerifier(
-            row.harness().store(),
-            row.harness().store(),
-            Map.of("k1", "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8)));
-    assertThat(verifier.verify().status()).isEqualTo(IssuanceChainVerifier.Status.INTACT);
-
-    PostgresSupport.execute(
-        "ALTER TABLE einvoice_issuance DISABLE TRIGGER einvoice_issuance_guard;"
-            + " UPDATE einvoice_issuance SET void_rule_id = 'PLANTED' WHERE seller_id = '"
-            + row.harness().sellerId()
-            + "';"
-            + " ALTER TABLE einvoice_issuance ENABLE TRIGGER einvoice_issuance_guard");
-
-    assertThat(verifier.verify().status()).isEqualTo(IssuanceChainVerifier.Status.BROKEN);
-  }
+  // The verifier reads the whole log, so it runs on its own database:
+  // IssuanceChainVerifierTest.the_verifier_reads_a_burned_retry_as_intact.
 
   // ------------------------------------------------------------------ S14
 

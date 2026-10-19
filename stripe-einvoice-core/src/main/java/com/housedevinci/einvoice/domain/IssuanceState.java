@@ -36,10 +36,20 @@ public enum IssuanceState {
 
   /**
    * The exact bytes did not pass schema or schematron. Final: retrying cannot change the outcome.
+   *
+   * <p><b>A burn after a resumed run.</b> A row that reached {@code ARCHIVING} keeps the hash and
+   * key it recorded then (they are write-once). When the resumed run reads that key, finds no
+   * object, renders again and is refused, the recorded hash names the <em>first</em> bytes, which
+   * passed and were never archived, and the rule id names the refusal of the <em>later</em> bytes.
+   * The run logs both hashes at WARN. A resumed run that finds the object never burns: it issues.
    */
   FAILED_VALIDATION,
 
-  /** The archive write failed. Retryable until the retry ceiling, then a compliance finding. */
+  /**
+   * The archive write failed. Retryable until the retry ceiling, then a compliance finding. Its
+   * eventual fate is {@code ISSUED}, {@code VOID_UNUSED}, or {@code FAILED_VALIDATION} when the
+   * resumed run is refused and no object exists at its key.
+   */
   FAILED_ARCHIVE,
 
   /**
@@ -52,8 +62,10 @@ public enum IssuanceState {
   public Set<IssuanceState> allowedNext() {
     return switch (this) {
       case NUMBERED -> Set.of(ARCHIVING, FAILED_VALIDATION, FAILED_ARCHIVE, VOID_UNUSED);
-      case ARCHIVING -> Set.of(ISSUED, FAILED_ARCHIVE, VOID_UNUSED);
-      case FAILED_ARCHIVE -> Set.of(ARCHIVING, VOID_UNUSED);
+      // QUESTIONS 38: a resumed run re-validates from ARCHIVING and FAILED_ARCHIVE when the
+      // archive holds no object at the row's key, so a refusal there is a burn like any other.
+      case ARCHIVING -> Set.of(ISSUED, FAILED_ARCHIVE, FAILED_VALIDATION, VOID_UNUSED);
+      case FAILED_ARCHIVE -> Set.of(ARCHIVING, FAILED_VALIDATION, VOID_UNUSED);
       case FAILED_VALIDATION -> Set.of(VOID_UNUSED);
       case ISSUED, VOID_UNUSED -> Set.of();
     };
@@ -74,10 +86,11 @@ public enum IssuanceState {
    *
    * <p>The three states that append to the chain: {@code ISSUED}, {@code VOID_UNUSED} and - since
    * D7-03 - {@code FAILED_VALIDATION}, the state a number burned by a validation or render refusal
-   * lands on. {@code FAILED_ARCHIVE} is not one of them: it is retryable rather than settled, and
-   * its eventual fate is one of the three. The verifier's cross-check builds its own query from
-   * this predicate, so the domain and the verifier cannot drift apart about what "settled" means
-   * (D9-04).
+   * lands on, from {@code NUMBERED} or, since QUESTIONS 38, from a resumed {@code ARCHIVING} or
+   * {@code FAILED_ARCHIVE} row. {@code FAILED_ARCHIVE} is not one of them: it is retryable rather
+   * than settled, and its eventual fate is one of the three. The verifier's cross-check builds its
+   * own query from this predicate, so the domain and the verifier cannot drift apart about what
+   * "settled" means (D9-04).
    */
   public boolean disposed() {
     return this == ISSUED || this == VOID_UNUSED || this == FAILED_VALIDATION;

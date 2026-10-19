@@ -63,6 +63,47 @@ class IssuanceChainVerifierTest {
   }
 
   @Test
+  void the_verifier_reads_a_burned_retry_as_intact() {
+    // QUESTIONS 38, S13: a number burned from FAILED_ARCHIVE after a resumed run. The row keeps the
+    // first attempt's hash and key, the event copies them, and the cross-check agrees with both.
+    Fixture fixture = onItsOwnDatabase("burnretry", CHAIN);
+    String seller = fixture.seller();
+    JdbcIssuanceStore store = fixture.store();
+    com.housedevinci.einvoice.domain.Issuance row =
+        store.allocate(request(key(seller), "in_burn_retry"));
+    String sha = "a".repeat(64);
+    store.markArchiving(
+        seller,
+        Mode.LIVE,
+        "in_burn_retry",
+        sha,
+        com.housedevinci.einvoice.domain.ArchiveKey.of(
+            row.seriesKey(), row.legalNumber(), sha, "xml"));
+    store.markFailed(
+        seller,
+        Mode.LIVE,
+        "in_burn_retry",
+        com.housedevinci.einvoice.domain.IssuanceState.FAILED_ARCHIVE,
+        "");
+    store.markFailed(
+        seller,
+        Mode.LIVE,
+        "in_burn_retry",
+        com.housedevinci.einvoice.domain.IssuanceState.FAILED_VALIDATION,
+        "EINVOICE-DATES");
+
+    assertThat(verifier(store).verify().status()).isEqualTo(IssuanceChainVerifier.Status.INTACT);
+
+    PostgresSupport.executeOn(
+        fixture.dataSource(),
+        "ALTER TABLE einvoice_issuance DISABLE TRIGGER einvoice_issuance_guard;"
+            + " UPDATE einvoice_issuance SET void_rule_id = 'PLANTED';"
+            + " ALTER TABLE einvoice_issuance ENABLE TRIGGER einvoice_issuance_guard");
+
+    assertThat(verifier(store).verify().status()).isEqualTo(IssuanceChainVerifier.Status.BROKEN);
+  }
+
+  @Test
   void an_unkeyed_log_is_never_reported_as_intact() {
     // A separate word for a separate property: an unkeyed log can be recomputed by anyone who can
     // write a row, so a clean unkeyed result must not read like a clean keyed one.

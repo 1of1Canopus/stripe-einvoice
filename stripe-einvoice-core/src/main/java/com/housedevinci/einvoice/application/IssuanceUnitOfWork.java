@@ -393,6 +393,14 @@ public final class IssuanceUnitOfWork {
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
     }
 
+    // QUESTIONS 38, D-RTR-1: a resumed row that recorded a hash may already have its document in
+    // the archive. It looks before it renders, so a number whose valid document exists is never
+    // burned, and a read that fails is never mistaken for an absent object.
+    Optional<Outcome> resumed = resumeFromArchive(event, invoice, issuance);
+    if (resumed.isPresent()) {
+      return resumed.get();
+    }
+
     // The same MappingInput the preflight approved, plus what the allocator fixed under the series
     // lock: the number, its series, and its dates. BT-2 comes from the allocation and nowhere else,
     // so a resumed run renders the same date the first run was given (D-PS1-27).
@@ -451,6 +459,18 @@ public final class IssuanceUnitOfWork {
       if (refused.isPresent()) {
         return concludeOn(event, refused.get(), issuance.legalNumber());
       }
+      if (issuance.documentHash().isPresent()) {
+        // D-RTR-6: two hashes now describe this number, and only the operator can tell them apart.
+        // Hashes and ids only, never content.
+        log.warn(
+            "einvoice: number {} was refused on a resumed run ({}) and is burned. Its recorded"
+                + " hash {} names the first bytes, which passed and were not in the archive at the"
+                + " resumed read; the refused bytes hash to {}",
+            issuance.legalNumber().value(),
+            ruleId,
+            issuance.documentSha256(),
+            Hashes.sha256Hex(archived));
+      }
       inbound.transition(
           event.eventId(), InboundState.FAILED_ISSUANCE, code, ruleId, clock.instant(), null);
       return new Outcome(
@@ -461,35 +481,99 @@ public final class IssuanceUnitOfWork {
     ArchiveKey key =
         ArchiveKey.of(
             issuance.seriesKey(), issuance.legalNumber(), documentSha256, document.extension());
+    return archiveAndIssue(event, invoice, documentSha256, key, Optional.of(archived));
+  }
 
+  /**
+   * What a resumed row with a recorded hash concludes before anything is rendered (QUESTIONS 38,
+   * D-RTR-1), or empty when the run renders as usual.
+   *
+   * <p>The marker is written only after validation passed, so a recorded hash always names bytes
+   * that passed the gate. Four outcomes of reading the row's own key, and only one may burn:
+   *
+   * <ul>
+   *   <li>the read fails: the row goes {@code FAILED_ARCHIVE} and the event is retried. "Could not
+   *       look" is not "nothing there";
+   *   <li>the object holds the recorded bytes: the document exists, so the number is issued by the
+   *       existing edges, with no render. Those bytes passed the gate when they were written, under
+   *       the rule pack already on the row, and they sit in the legal archive;
+   *   <li>the object holds other bytes: {@code DEI-240}, terminal, never a burn. The key carries
+   *       the content hash, so this is a second writer or a tampered store;
+   *   <li>no object: empty, and the run renders, validates and checks dates as on a first run. A
+   *       refusal then burns through the edge from this state.
+   * </ul>
+   */
+  private Optional<Outcome> resumeFromArchive(
+      InboundEvent event, SourceInvoice invoice, Issuance issuance) {
+    boolean marked =
+        issuance.state() == IssuanceState.ARCHIVING
+            || issuance.state() == IssuanceState.FAILED_ARCHIVE;
+    if (!marked || issuance.documentHash().isEmpty() || issuance.archiveObjectKey().isEmpty()) {
+      return Optional.empty();
+    }
+    ArchiveKey key = new ArchiveKey(issuance.archiveKey());
+    Optional<byte[]> stored;
+    try {
+      stored = archive.get(key);
+    } catch (EInvoiceException e) {
+      return Optional.of(archiveFailed(event, invoice, e.code(), backoffFor(event)));
+    } catch (RuntimeException e) {
+      // D2-04's class of risk: a host store's own bug. Logged server-side only. Still retried:
+      // waiting is the only way to learn what the archive holds, and the ceiling bounds it.
+      log.error("einvoice: the archive store threw an unexpected exception on a resumed read", e);
+      return Optional.of(
+          archiveFailed(event, invoice, ErrorCodes.ARCHIVE_FAILED, backoffFor(event)));
+    }
+    if (stored.isEmpty()) {
+      return Optional.empty();
+    }
+    byte[] recorded =
+        issuance.documentSha256().getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    byte[] found =
+        Hashes.sha256Hex(stored.get()).getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    if (!MessageDigest.isEqual(recorded, found)) {
+      log.warn(
+          "einvoice: the archive holds other bytes than number {} recorded, at its own key;"
+              + " refused as a content conflict, never overwritten and never burned",
+          issuance.legalNumber().value());
+      return Optional.of(archiveFailed(event, invoice, ErrorCodes.ARCHIVE_CONTENT_CONFLICT, null));
+    }
+    return Optional.of(
+        archiveAndIssue(event, invoice, issuance.documentSha256(), key, Optional.empty()));
+  }
+
+  /**
+   * P3 and P4: the marker, the write when there are bytes to write, and the issue.
+   *
+   * @param toWrite the bytes to put at the key, or empty when a resumed run found them already
+   *     there with the recorded hash: the marker is re-asserted and the number issued, no PUT
+   */
+  private Outcome archiveAndIssue(
+      InboundEvent event,
+      SourceInvoice invoice,
+      String documentSha256,
+      ArchiveKey key,
+      Optional<byte[]> toWrite) {
     // P3: say what we are about to write, then write it.
     try {
       writer.markArchiving(
           configuration.sellerId(), configuration.mode(), invoice.id(), documentSha256, key);
-      archive.putIfAbsent(key, archived.clone());
-      if (configuration.readBackAfterWrite()) {
-        readBack(key, archived);
+      if (toWrite.isPresent()) {
+        archive.putIfAbsent(key, toWrite.get().clone());
+        if (configuration.readBackAfterWrite()) {
+          readBack(key, toWrite.get());
+        }
       }
     } catch (EInvoiceException e) {
       // RC-01: this write is inside a catch, so it must never raise a second, different failure in
       // place of the first - which is what it did when the row had been voided in the meantime.
-      Optional<WriteRefusal> refused =
-          concludeIssuance(invoice.id(), IssuanceState.FAILED_ARCHIVE, "");
-      if (refused.isPresent()) {
-        return concludeOn(event, refused.get(), null);
-      }
       Duration retryIn = ErrorCodes.ARCHIVE_UNAVAILABLE.equals(e.code()) ? backoffFor(event) : null;
-      return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
+      return archiveFailed(event, invoice, e.code(), retryIn);
     } catch (RuntimeException e) {
       // D2-04: a host-supplied ArchiveStore is the same class of risk as the renderer and the
       // validator - always somebody else's code in 0.1.0.
       log.error("einvoice: the archive store threw an unexpected exception", e);
-      Optional<WriteRefusal> refused =
-          concludeIssuance(invoice.id(), IssuanceState.FAILED_ARCHIVE, "");
-      return refused
-          .map(refusal -> concludeOn(event, refusal, null))
-          .orElseGet(
-              () -> fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.ARCHIVE_FAILED, null));
+      return archiveFailed(event, invoice, ErrorCodes.ARCHIVE_FAILED, null);
     }
 
     // P4: the document exists. Wrapped like P3 (D2-01): a crash or a store failure here falls
@@ -508,6 +592,21 @@ public final class IssuanceUnitOfWork {
     }
     inbound.transition(event.eventId(), InboundState.COMPLETED, "", clock.instant(), null);
     return new Outcome(event.eventId(), InboundState.COMPLETED, "", issued.legalNumber().value());
+  }
+
+  /**
+   * The archive could not be written or read: the row goes {@code FAILED_ARCHIVE} (it stays there
+   * when it already was), and the event concludes on {@code code}, retried when {@code retryIn} is
+   * set. Never a burn.
+   */
+  private Outcome archiveFailed(
+      InboundEvent event, SourceInvoice invoice, String code, Duration retryIn) {
+    Optional<WriteRefusal> refused =
+        concludeIssuance(invoice.id(), IssuanceState.FAILED_ARCHIVE, "");
+    if (refused.isPresent()) {
+      return concludeOn(event, refused.get(), null);
+    }
+    return fail(event, InboundState.FAILED_ISSUANCE, code, retryIn);
   }
 
   /**
