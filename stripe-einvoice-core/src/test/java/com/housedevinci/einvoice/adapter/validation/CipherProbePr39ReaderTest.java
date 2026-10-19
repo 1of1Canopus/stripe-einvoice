@@ -17,16 +17,16 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
-/**
- * Security review of PR 39 (D-PR36-6), pass 1: the reader and the two callers of the one rule.
- */
+/** Security review of PR 39 (D-PR36-6), pass 1: the reader and the two callers of the one rule. */
 class CipherProbePr39ReaderTest {
 
   private static final String CBC =
       "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2";
   private static final String OPEN =
       "<Invoice xmlns=\"urn:oasis:names:specification:ubl:schema:xsd:Invoice-2\""
-          + " xmlns:cbc=\"" + CBC + "\""
+          + " xmlns:cbc=\""
+          + CBC
+          + "\""
           + " xmlns:cac=\"urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2\""
           + " xmlns:ext=\"urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2\">";
   private final UblDocumentDates reader = new UblDocumentDates();
@@ -50,9 +50,12 @@ class CipherProbePr39ReaderTest {
   void an_issue_date_nested_in_an_extension_is_not_read() {
     FoundDates found =
         invoice(
-            "<ext:UBLExtensions><ext:UBLExtension><ext:ExtensionContent><cbc:IssueDate>" + day
+            "<ext:UBLExtensions><ext:UBLExtension><ext:ExtensionContent><cbc:IssueDate>"
+                + day
                 + "</cbc:IssueDate></ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions>"
-                + "<cbc:IssueDate>" + week + "</cbc:IssueDate>");
+                + "<cbc:IssueDate>"
+                + week
+                + "</cbc:IssueDate>");
     assertThat(found.readability()).isEqualTo(Readability.READ);
     assertThat(found.issueDate()).contains(week);
   }
@@ -61,8 +64,13 @@ class CipherProbePr39ReaderTest {
   void a_second_prefix_for_cbc_is_still_a_second_issue_date() {
     FoundDates found =
         invoice(
-            "<cbc:IssueDate>" + day + "</cbc:IssueDate><b:IssueDate xmlns:b=\"" + CBC + "\">"
-                + week + "</b:IssueDate>");
+            "<cbc:IssueDate>"
+                + day
+                + "</cbc:IssueDate><b:IssueDate xmlns:b=\""
+                + CBC
+                + "\">"
+                + week
+                + "</b:IssueDate>");
     assertThat(found.readability()).isEqualTo(Readability.AMBIGUOUS);
   }
 
@@ -76,8 +84,12 @@ class CipherProbePr39ReaderTest {
   @Test
   void the_right_date_in_a_comment_only_is_not_read() {
     FoundDates found =
-        invoice("<!-- <cbc:IssueDate>" + day + "</cbc:IssueDate> --><cbc:IssueDate>" + week
-            + "</cbc:IssueDate>");
+        invoice(
+            "<!-- <cbc:IssueDate>"
+                + day
+                + "</cbc:IssueDate> --><cbc:IssueDate>"
+                + week
+                + "</cbc:IssueDate>");
     assertThat(found.issueDate()).contains(week);
     FoundDates onlyComment = invoice("<!-- <cbc:IssueDate>" + day + "</cbc:IssueDate> -->");
     assertThat(onlyComment.issueDate()).isEmpty();
@@ -103,15 +115,19 @@ class CipherProbePr39ReaderTest {
 
   @Test
   void a_character_reference_is_the_date_it_spells() {
-    String spelled = day.substring(0, day.length() - 1) + "&#" + (int) day.charAt(day.length() - 1) + ";";
+    String spelled =
+        day.substring(0, day.length() - 1) + "&#" + (int) day.charAt(day.length() - 1) + ";";
     assertThat(invoice("<cbc:IssueDate>" + spelled + "</cbc:IssueDate>").issueDate()).contains(day);
   }
 
   @Test
   void a_bt7_or_bt8_in_a_line_is_not_document_level_and_a_document_level_bt8_is_refused() {
     FoundDates found =
-        invoice("<cbc:IssueDate>" + day + "</cbc:IssueDate><cac:InvoicePeriod><cbc:DescriptionCode>"
-            + "432</cbc:DescriptionCode></cac:InvoicePeriod>");
+        invoice(
+            "<cbc:IssueDate>"
+                + day
+                + "</cbc:IssueDate><cac:InvoicePeriod><cbc:DescriptionCode>"
+                + "432</cbc:DescriptionCode></cac:InvoicePeriod>");
     assertThat(found.periodCode()).isTrue();
     assertThat(DocumentDatesRule.check(found, input.dating()).archivable()).isFalse();
   }
@@ -142,19 +158,29 @@ class CipherProbePr39ReaderTest {
     variants.put("true", xml);
     variants.put("backdated", xml.replace(issue, "<cbc:IssueDate>" + week + "</cbc:IssueDate>"));
     variants.put("padded", xml.replace(issue, "<cbc:IssueDate>" + day + " </cbc:IssueDate>"));
-    variants.put("cdata", xml.replace(issue, "<cbc:IssueDate><![CDATA[" + day + "]]></cbc:IssueDate>"));
-    variants.put("comment inside", xml.replace(issue, "<cbc:IssueDate>" + day + "<!--x--></cbc:IssueDate>"));
+    variants.put(
+        "cdata", xml.replace(issue, "<cbc:IssueDate><![CDATA[" + day + "]]></cbc:IssueDate>"));
+    variants.put(
+        "comment inside", xml.replace(issue, "<cbc:IssueDate>" + day + "<!--x--></cbc:IssueDate>"));
     variants.put(
         "bt7", xml.replace(issue, issue + "<cbc:TaxPointDate>" + week + "</cbc:TaxPointDate>"));
     try (En16931DocumentValidator validator =
         new En16931DocumentValidator(
-            UblProfile.XRECHNUNG_UBL, SecureXml.DEFAULT_XSLT2_PROCESSOR, Duration.ofSeconds(60), 2)) {
+            UblProfile.XRECHNUNG_UBL,
+            SecureXml.DEFAULT_XSLT2_PROCESSOR,
+            Duration.ofSeconds(60),
+            2)) {
       for (Map.Entry<String, String> v : variants.entrySet()) {
         byte[] bytes = v.getValue().getBytes(StandardCharsets.UTF_8);
         DocumentValidator.Report byValidator = validator.validate(bytes, input);
-        DocumentValidator.Report byRule = DocumentDatesRule.check(reader.read(bytes), input.dating());
+        DocumentValidator.Report byRule =
+            DocumentDatesRule.check(reader.read(bytes), input.dating());
         System.out.println(
-            "CIPHER two callers " + v.getKey() + ": validator=" + byValidator.verdict() + " rule="
+            "CIPHER two callers "
+                + v.getKey()
+                + ": validator="
+                + byValidator.verdict()
+                + " rule="
                 + byRule.verdict());
         if (byValidator.archivable()) {
           assertThat(byRule.archivable()).as(v.getKey()).isTrue();
