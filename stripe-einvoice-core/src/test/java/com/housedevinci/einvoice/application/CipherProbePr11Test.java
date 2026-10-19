@@ -255,6 +255,7 @@ class CipherProbePr11Test {
         writer,
         harness.renderer(),
         validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
         archive,
         harness.preflightSupport(),
         java.time.Clock.fixed(

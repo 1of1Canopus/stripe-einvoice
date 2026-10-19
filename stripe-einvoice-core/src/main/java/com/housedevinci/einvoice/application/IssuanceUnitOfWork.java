@@ -81,6 +81,7 @@ public final class IssuanceUnitOfWork {
   private final IssuanceWriter writer;
   private final DocumentRenderer renderer;
   private final DocumentValidator validator;
+  private final DocumentDates dates;
   private final ArchiveStore archive;
   private final PreflightSupport preflightSupport;
   private final Clock clock;
@@ -152,6 +153,23 @@ public final class IssuanceUnitOfWork {
     }
   }
 
+  /**
+   * The readers this module ships, by class name. {@code application} cannot import the adapter, so
+   * a reader is recognised by its exact class name and by being loaded from the same code source as
+   * this class (design review R1). A lambda, an anonymous class, a subclass, or a class of the same
+   * name in another jar is foreign.
+   */
+  private static final Set<String> MODULE_DATE_READERS =
+      Set.of("com.housedevinci.einvoice.adapter.validation.UblDocumentDates");
+
+  /**
+   * @param dates the reader of the document's own dates, which the unit of work compares with the
+   *     allocation before anything is archived, whatever {@code validator} answers (D-PR36-6). Pass
+   *     {@code new UblDocumentDates()} from {@code adapter.validation}. Any other reader is logged
+   *     as a WARN at construction, so at every startup: the guarantee EINVOICE-DATES then rests on
+   *     that reader. A host that wires this class by hand writes the composition root, with the
+   *     same trust as choosing the allocator.
+   */
   public IssuanceUnitOfWork(
       InboundEventStore inbound,
       StripeInvoiceSource source,
@@ -160,6 +178,7 @@ public final class IssuanceUnitOfWork {
       IssuanceWriter writer,
       DocumentRenderer renderer,
       DocumentValidator validator,
+      DocumentDates dates,
       ArchiveStore archive,
       PreflightSupport preflightSupport,
       Clock clock,
@@ -171,10 +190,33 @@ public final class IssuanceUnitOfWork {
     this.writer = Objects.requireNonNull(writer, "writer");
     this.renderer = Objects.requireNonNull(renderer, "renderer");
     this.validator = Objects.requireNonNull(validator, "validator");
+    this.dates = Objects.requireNonNull(dates, "dates");
     this.archive = Objects.requireNonNull(archive, "archive");
     this.preflightSupport = Objects.requireNonNull(preflightSupport, "preflightSupport");
     this.clock = Objects.requireNonNull(clock, "clock");
     this.configuration = Objects.requireNonNull(configuration, "configuration");
+    if (!isModuleReader(dates)) {
+      log.warn(
+          "einvoice: the document date reader {} is not the module's own. The guarantee"
+              + " EINVOICE-DATES (the archived BT-2, BT-7, BT-8, BT-72 and BG-14 equal the"
+              + " allocation) now rests on that class. Pass new UblDocumentDates() to keep the"
+              + " module's check.",
+          dates.getClass().getName());
+    }
+  }
+
+  /** Design review R1: the exact class name, and the same code source as this class. */
+  static boolean isModuleReader(DocumentDates dates) {
+    Class<?> type = dates.getClass();
+    if (!MODULE_DATE_READERS.contains(type.getName())) {
+      return false;
+    }
+    java.security.CodeSource ours = IssuanceUnitOfWork.class.getProtectionDomain().getCodeSource();
+    java.security.CodeSource theirs = type.getProtectionDomain().getCodeSource();
+    return ours != null
+        && theirs != null
+        && ours.getLocation() != null
+        && ours.getLocation().equals(theirs.getLocation());
   }
 
   /** Drives one recorded event as far as it can go, and records where it stopped. */
@@ -363,11 +405,14 @@ public final class IssuanceUnitOfWork {
     // never reaching a FAILED_* state the retry ceiling can govern. RuntimeException is caught
     // alongside this module's own exception type; the cause is logged server-side only (checklist
     // line 47), and the row gets a stable, generic code, never the cause.
-    byte[] bytes;
+    // Design review R2: one private array. It is hashed once, here, and no port ever holds it:
+    // the validator, the date reader and the archive each get their own copy, so a port that keeps
+    // its array and rewrites it later cannot change what is read, hashed, keyed or compared.
+    byte[] archived;
     DocumentRenderer.RenderedDocument document;
     try {
       document = renderer.render(input);
-      bytes = document.bytes();
+      archived = document.bytes();
     } catch (EInvoiceException e) {
       return renderRefused(event, invoice, e.code(), backoffFor(event));
     } catch (RuntimeException e) {
@@ -376,12 +421,17 @@ public final class IssuanceUnitOfWork {
     }
     DocumentValidator.Report report;
     try {
-      report = validator.validate(bytes, input);
+      report = validator.validate(archived.clone(), input);
     } catch (EInvoiceException e) {
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), backoffFor(event));
     } catch (RuntimeException e) {
       log.error("einvoice: the document validator threw an unexpected exception", e);
       return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.VALIDATOR_FAILED, null);
+    }
+    if (report.archivable()) {
+      // D-PR36-6: the last gate before the archive, and not the validator's job. Whatever
+      // validator is wired, the dates in these bytes are compared with the allocation here.
+      report = checkDates(archived, input);
     }
     if (!report.archivable()) {
       // D9-02: the rule id is a host port's own string. It is normalised once, here at the
@@ -407,7 +457,7 @@ public final class IssuanceUnitOfWork {
           event.eventId(), InboundState.FAILED_ISSUANCE, code, issuance.legalNumber().value());
     }
 
-    String documentSha256 = Hashes.sha256Hex(bytes);
+    String documentSha256 = Hashes.sha256Hex(archived);
     ArchiveKey key =
         ArchiveKey.of(
             issuance.seriesKey(), issuance.legalNumber(), documentSha256, document.extension());
@@ -416,9 +466,9 @@ public final class IssuanceUnitOfWork {
     try {
       writer.markArchiving(
           configuration.sellerId(), configuration.mode(), invoice.id(), documentSha256, key);
-      archive.putIfAbsent(key, bytes);
+      archive.putIfAbsent(key, archived.clone());
       if (configuration.readBackAfterWrite()) {
-        readBack(key, bytes);
+        readBack(key, archived);
       }
     } catch (EInvoiceException e) {
       // RC-01: this write is inside a catch, so it must never raise a second, different failure in
@@ -458,6 +508,25 @@ public final class IssuanceUnitOfWork {
     }
     inbound.transition(event.eventId(), InboundState.COMPLETED, "", clock.instant(), null);
     return new Outcome(event.eventId(), InboundState.COMPLETED, "", issued.legalNumber().value());
+  }
+
+  /**
+   * The rule EINVOICE-DATES over the private array (D-PR36-6, design review R3). The reader is a
+   * port: if it throws or answers nothing, the answer is NOT_EVALUATED, never a strand in {@code
+   * MAPPED} and never a pass. The cause is logged server-side only.
+   */
+  private DocumentValidator.Report checkDates(byte[] archived, DocumentInput input) {
+    DocumentDates.FoundDates found;
+    try {
+      found = dates.read(archived.clone());
+    } catch (EInvoiceException e) {
+      log.error("einvoice: the document date reader refused with code {}", e.code());
+      found = null;
+    } catch (RuntimeException e) {
+      log.error("einvoice: the document date reader threw an unexpected exception", e);
+      found = null;
+    }
+    return DocumentDatesRule.check(found, input.dating());
   }
 
   /**

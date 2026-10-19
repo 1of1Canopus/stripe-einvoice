@@ -107,6 +107,7 @@ public final class IssuanceTestHarness {
         store,
         renderer,
         validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
         archive,
         preflightSupport,
         clock,
@@ -127,6 +128,7 @@ public final class IssuanceTestHarness {
         store,
         renderer,
         validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
         archive,
         preflightSupport,
         clock,
@@ -146,6 +148,7 @@ public final class IssuanceTestHarness {
         store,
         renderer,
         validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
         archive,
         preflightSupport,
         clock,
@@ -166,6 +169,7 @@ public final class IssuanceTestHarness {
         store,
         substituteRenderer,
         validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
         archive,
         preflightSupport,
         clock,
@@ -186,6 +190,31 @@ public final class IssuanceTestHarness {
         store,
         renderer,
         validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
+        substituteArchive,
+        preflightSupport,
+        clock,
+        configurationFor("DEFAULT", pinnedApiVersion));
+  }
+
+  /**
+   * A unit of work with every document port chosen by the test, for the date-check paths
+   * (D-PR36-6): a host renderer, a host validator, a host date reader and a host archive.
+   */
+  public IssuanceUnitOfWork unitOfWorkWith(
+      com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer,
+      DocumentValidator substituteValidator,
+      com.housedevinci.einvoice.application.DocumentDates substituteDates,
+      com.housedevinci.einvoice.application.ArchiveStore substituteArchive) {
+    return new IssuanceUnitOfWork(
+        inbound,
+        source,
+        store,
+        store,
+        store,
+        substituteRenderer,
+        substituteValidator,
+        substituteDates,
         substituteArchive,
         preflightSupport,
         clock,

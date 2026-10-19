@@ -157,4 +157,24 @@ class CipherProbePr36Pass2DocumentTest {
     System.out.println("CIPHER period: " + report.verdict() + " " + report.findings());
     assertThat(report.archivable()).isTrue();
   }
+
+  /**
+   * Design review R6 (P19). BT-8, the coded VAT point date ({@code cac:InvoicePeriod/
+   * cbc:DescriptionCode}, for example 432 "paid to date"), moves the VAT point like BT-7. The
+   * allocation gave no period; the document carries an invoicing period with only that code.
+   */
+  @Test
+  void probe_a_vat_point_date_code_is_archivable() {
+    DocumentInput input = DocumentFixtures.germanStandardRated();
+    String xml =
+        rendered(input)
+            .replaceFirst(
+                "(<cac:(BillingReference|AdditionalDocumentReference|AccountingSupplierParty)>)",
+                "<cac:InvoicePeriod><cbc:DescriptionCode>432</cbc:DescriptionCode>"
+                    + "</cac:InvoicePeriod>$1");
+    assertThat(xml).contains("<cbc:DescriptionCode>432</cbc:DescriptionCode>");
+    DocumentValidator.Report report = validate(xml, input);
+    System.out.println("CIPHER BT-8: " + report.verdict() + " " + report.findings());
+    assertThat(report.archivable()).isFalse();
+  }
 }

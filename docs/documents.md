@@ -73,14 +73,42 @@ an XRechnung invoice now raises no finding at all.
 
 ### The date rule (`EINVOICE-DATES`)
 
-After the schema and the schematron pass, the module's own rule compares the document with the
-allocation. It reads four dates, all direct children of the root: BT-2 (`cbc:IssueDate`), BT-7
-(`cbc:TaxPointDate`), BT-72 (`cac:Delivery/cbc:ActualDeliveryDate`) and BG-14
-(`cac:InvoicePeriod/cbc:StartDate` and `cbc:EndDate`). BT-2, BT-72 and BG-14 must equal the
-allocated day or period, as exact strings. BT-7 must be absent, because no allocation gives it.
-Example: BT-2 and BT-72 are right and BT-7 is 30 days before the supply day: the document is
-refused. Line periods (BG-26) are not compared; they are not allocated. Given no allocation input,
-the validator answers `NOT_EVALUATED` with this rule id, and the document is not archived.
+The rule compares the document's dates with the allocation: the number, the issue date and the
+supply date or period the allocator recorded under the series lock. **It runs in the unit of work,
+after the validator and immediately before the archive, whatever renderer and validator are
+wired.** A host validator bean cannot skip it. The module's own validator also calls the same rule
+after a passing schematron, so a direct call to `En16931DocumentValidator.validate` keeps it.
+
+The reader (`UblDocumentDates`) reads only the root's direct children, by namespace and name, and
+the direct children of the two date containers:
+
+| path | term | rule |
+|---|---|---|
+| `/*/cbc:IssueDate` | BT-2 | equals the allocated issue date |
+| `/*/cbc:TaxPointDate` | BT-7 | refused: no allocation gives it |
+| `/*/cac:Delivery` | container | refused when the allocation has no supply date |
+| `/*/cac:Delivery/cbc:ActualDeliveryDate` | BT-72 | equals the recorded supply date |
+| `/*/cac:InvoicePeriod` | BG-14 | refused when the allocation has no period |
+| `/*/cac:InvoicePeriod/cbc:StartDate`, `cbc:EndDate` | BT-73, BT-74 | equal the recorded period |
+| `/*/cac:InvoicePeriod/cbc:DescriptionCode` | BT-8 | refused: it moves the VAT point like BT-7 |
+
+Dates compare as exact text: `2026-01-10+14:00` and ` 2026-01-10` are not `2026-01-10`. Nested
+copies are not read: the earlier invoice's date in `cac:BillingReference` (BT-26), line periods
+(BG-26) and line deliveries. Any of the elements above twice is ambiguous; a root other than UBL
+`Invoice` or `CreditNote`, a parse error, a `DOCTYPE`, or a date with anything but text inside is
+unreadable. Both answer `NOT_EVALUATED` with rule `EINVOICE-DATES`, and nothing is archived.
+
+Examples. Numbered 10 January, BT-2 `2026-01-03`: refused (`VALIDATION_REFUSED`). BT-2 and BT-72
+right, BT-7 30 days earlier: refused. A first `cac:Delivery` with only an address and a second with
+a date: `NOT_EVALUATED`. A CII document from a custom renderer: `NOT_EVALUATED`.
+
+Limits. A host renderer cannot add a deliver-to address (BG-13) in a `cac:Delivery` when the
+allocation carries a period instead of a supply date; the module's renderer never does. Code that
+calls the `ArchiveStore` bean directly, outside the unit of work, is the host's own and is not
+checked. A refusal on the retry after an archive failure is not written on the issuance row:
+the row stays `FAILED_ARCHIVE` and the event ends `FAILED_ISSUANCE` with `DEI-113`; nothing is
+archived. A host that builds `IssuanceUnitOfWork` itself passes `new UblDocumentDates()`; any other
+reader is logged as a WARN at every startup.
 
 ### The XSLT processor
 

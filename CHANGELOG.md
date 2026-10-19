@@ -52,6 +52,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The date check is part of the unit of work (D-PR36-6).** EINVOICE-DATES used to live only in
+  the module's validator, so a host `DocumentValidator` bean (the starter's backs off) removed it.
+  Now `IssuanceUnitOfWork` reads the dates from the exact bytes to be archived and compares them
+  with the allocation, after the validator and before the archive, on every path. Example: a host
+  validator that answers `PASSED` without reading can no longer archive an invoice numbered on
+  10 January and dated 3 January. The rule also refuses a VAT point date code (BT-8), a delivery
+  or invoicing period the allocation did not give, and any of these elements twice. The
+  validator, the date reader and the archive each get their own copy of the bytes, so a port that
+  keeps its array and rewrites it cannot change what is archived. A non-UBL document is refused.
+- **BREAKING CHANGE: `IssuanceUnitOfWork` takes a `DocumentDates` reader.** A host that builds the
+  unit of work by hand adds one argument after the validator: `new UblDocumentDates()` (package
+  `com.housedevinci.einvoice.adapter.validation`). There is no constructor without it: one that
+  skipped the check would be the defect again. Any other reader works, and is logged as a WARN at
+  every startup. The starter builds the reader itself; it is not a bean.
 - **Upgrade from 0.1.x.** The bundled schema script upgrades a 0.1.x database in place, as the
   schema owner, in one transaction, rewriting no number, hash or archived byte. Stop every 0.1.x
   instance first; see "Upgrading a 0.1.x database to format 2" in `docs/index.md`. The runtime role
