@@ -63,7 +63,40 @@ public interface IssuanceEventReader {
       String voidReason,
       String voidRuleId,
       String documentType,
-      String correctedIdentity) {
+      String correctedIdentity,
+      String datingIdentity) {
+
+    public DisposedIssuance {
+      datingIdentity = datingIdentity == null ? "" : datingIdentity;
+    }
+
+    /** A row with no dating: the shape before 0.2.0. */
+    public DisposedIssuance(
+        String sellerId,
+        String mode,
+        String series,
+        int fiscalYear,
+        String stripeInvoiceId,
+        String legalNumber,
+        String state,
+        String voidReason,
+        String voidRuleId,
+        String documentType,
+        String correctedIdentity) {
+      this(
+          sellerId,
+          mode,
+          series,
+          fiscalYear,
+          stripeInvoiceId,
+          legalNumber,
+          state,
+          voidReason,
+          voidRuleId,
+          documentType,
+          correctedIdentity,
+          "");
+    }
 
     /** A 0.1.0-shaped invoice row, for callers that predate the document type. */
     public DisposedIssuance(

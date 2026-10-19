@@ -4,7 +4,6 @@ import static com.housedevinci.einvoice.adapter.jdbc.DocumentSeriesFixture.MARCH
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
-import com.housedevinci.einvoice.application.AllocationRequest;
 import com.housedevinci.einvoice.application.IssuanceChainVerifier;
 import com.housedevinci.einvoice.application.IssuanceChainVerifier.Status;
 import com.housedevinci.einvoice.domain.EInvoiceException;
@@ -222,38 +221,38 @@ class CipherProbePr33Test {
   // ------------------------------------------------------------------ F-3 (LOW)
 
   /**
-   * The series' latest date only moves forward and nothing lowers it. The allocator takes BT-2 as a
-   * date from the caller and never checks it against the instant it was derived from, so one direct
-   * call with a far date moves {@code last_issue_date} to it for good: every later invoice of the
-   * series is then an open DEI-127, and every later credit note of a credit series is refused. No
-   * time zone puts 2026-03-10T10:00Z on 1 January 2099.
+   * D-A1-C04, rewritten for D-PS1-42. The request no longer carries a date at all - BT-2 is the
+   * numbering day, read under the series lock - so a far date can no longer come from a caller. It
+   * can still come from a hand UPDATE that moves {@code next_number} and {@code last_issue_date} in
+   * one statement (the series guard allows it) or from a forward jump of the database clock. Then
+   * every later invoice would wait until that day. The allocator refuses with its own code, names
+   * the series in a finding, and moves nothing.
    */
   @Test
-  void probe_an_issue_date_no_zone_can_derive_from_issued_at_never_moves_the_series_date() {
+  void probe_a_future_last_issue_date_refuses_with_its_own_code() {
     DocumentSeriesFixture f = DocumentSeriesFixture.shared("pr33far");
     f.invoice("in_first", MARCH_10);
+    PostgresSupport.execute(
+        "UPDATE einvoice_series SET next_number = next_number + 1,"
+            + " last_issue_date = DATE '2099-01-01' WHERE seller_id = '"
+            + f.seller
+            + "' AND series = 'INV' AND mode = 'live'");
+    long before = f.nextNumber("INV");
 
-    Throwable far =
-        catchThrowable(
-            () ->
-                f.store.allocate(
-                    new AllocationRequest(
-                        f.invoices(Mode.LIVE),
-                        "in_far",
-                        "",
-                        "S-far",
-                        MARCH_10,
-                        LocalDate.of(2099, 1, 1),
-                        "r1")));
+    Throwable far = catchThrowable(() -> f.invoice("in_far", MARCH_10));
 
     assertThat(far).isInstanceOf(EInvoiceException.class);
-    assertThat(((EInvoiceException) far).code()).isEqualTo(ErrorCodes.INVALID);
+    assertThat(((EInvoiceException) far).code()).isEqualTo(ErrorCodes.SERIES_DATE_IN_FUTURE);
+    assertThat(f.nextNumber("INV")).isEqualTo(before);
+    assertThat(f.rows()).isEqualTo(1L);
     assertThat(
             f.scalar(
-                "SELECT count(*) FROM einvoice_series WHERE seller_id = '"
+                "SELECT count(*) FROM einvoice_finding WHERE seller_id = '"
                     + f.seller
-                    + "' AND last_issue_date > DATE '2026-12-31'"))
-        .isZero();
+                    + "' AND code = '"
+                    + ErrorCodes.SERIES_DATE_IN_FUTURE
+                    + "' AND subject_id = '380/INV/2026'"))
+        .isEqualTo(1L);
   }
 
   // ------------------------------------------------------------------ F-4 (LOW)
@@ -482,7 +481,7 @@ class CipherProbePr33Test {
     }
     JdbcSupport.initializeSchema(ds, Optional.of(ZoneId.of("Europe/Paris")));
     JdbcIssuanceStore store =
-        new JdbcIssuanceStore(
+        TestStores.store(
             ds,
             DocumentSeriesFixture.CHAIN,
             Map.of(

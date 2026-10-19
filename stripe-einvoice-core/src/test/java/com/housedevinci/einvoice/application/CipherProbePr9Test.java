@@ -33,6 +33,10 @@ class CipherProbePr9Test {
 
   /** The renderer of the builder's own probe: refuses until the profile is corrected. */
   private static final class RepairableRenderer implements DocumentRenderer {
+    @Override
+    public boolean carriesSupplyDate() {
+      return true;
+    }
 
     private final DeterministicRenderer delegate = new DeterministicRenderer();
     private boolean repaired;

@@ -374,7 +374,7 @@ class IssuanceUnitOfWorkTest {
   }
 
   @Test
-  void with_no_cutoff_configured_a_late_invoice_is_numbered_in_its_own_fiscal_year() {
+  void with_no_cutoff_configured_a_late_invoice_is_numbered_in_the_year_it_is_issued() {
     IssuanceTestHarness harness = IssuanceTestHarness.create();
     harness.source().with(TestInvoices.finalised("in_late_ok"));
     harness.moveClockTo(Instant.parse("2027-06-01T10:00:00Z"));
@@ -383,25 +383,35 @@ class IssuanceUnitOfWorkTest {
         harness.unitOfWork().process(harness.receive("invoice.finalized", "in_late_ok"));
 
     assertThat(outcome.state()).isEqualTo(InboundState.COMPLETED);
-    // The number belongs to the year of the sale, not to the year of the processing.
-    assertThat(outcome.legalNumber()).isEqualTo("INV-2026-000001");
+    // D-PS1-41: the issue date is the numbering day, so the number belongs to that day's fiscal
+    // year. The sale's own day travels as the supply date.
+    assertThat(outcome.legalNumber()).isEqualTo("INV-2027-000001");
+    String document = new String(harness.archivedBytes("in_late_ok"), StandardCharsets.UTF_8);
+    assertThat(document).contains("<IssueDate>2027-06-01</IssueDate>");
+    assertThat(document).contains("<Delivery>2026-01-16</Delivery>");
   }
 
   @Test
   void the_issue_date_follows_the_sellers_tax_zone_and_not_the_containers() {
-    // Finalised at 23:30 UTC on 15 January: 16 January in Tokyo, 15 January in Paris. The VAT
-    // period, and on a month boundary the declaration, follow from which of the two is used.
+    // Finalised at 23:30 UTC on 15 January and numbered at 23:45 UTC: 16 January in Paris, 15
+    // January in the Azores. The VAT period, and on a month boundary the declaration, follow from
+    // which of the two is used, for the issue date (the numbering instant) and the supply date
+    // (the finalisation instant) alike.
     IssuanceTestHarness paris = IssuanceTestHarness.createInZone("Europe/Paris");
+    paris.moveClockTo(Instant.parse("2026-01-15T23:45:00Z"));
     paris.source().with(TestInvoices.finalised("in_zone"));
     paris.unitOfWork().process(paris.receive("invoice.finalized", "in_zone"));
     assertThat(new String(paris.archivedBytes("in_zone"), StandardCharsets.UTF_8))
-        .contains("<IssueDate>2026-01-16</IssueDate>");
+        .contains("<IssueDate>2026-01-16</IssueDate>")
+        .contains("<Delivery>2026-01-16</Delivery>");
 
     IssuanceTestHarness lisbon = IssuanceTestHarness.createInZone("Atlantic/Azores");
+    lisbon.moveClockTo(Instant.parse("2026-01-15T23:45:00Z"));
     lisbon.source().with(TestInvoices.finalised("in_zone"));
     lisbon.unitOfWork().process(lisbon.receive("invoice.finalized", "in_zone"));
     assertThat(new String(lisbon.archivedBytes("in_zone"), StandardCharsets.UTF_8))
-        .contains("<IssueDate>2026-01-15</IssueDate>");
+        .contains("<IssueDate>2026-01-15</IssueDate>")
+        .contains("<Delivery>2026-01-15</Delivery>");
   }
 
   @Test

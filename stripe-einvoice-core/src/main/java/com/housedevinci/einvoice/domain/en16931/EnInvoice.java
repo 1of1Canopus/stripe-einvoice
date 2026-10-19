@@ -22,7 +22,7 @@ import java.util.Optional;
  * else's stylesheet to remember.
  *
  * @param number BT-1, the legal number this module allocated
- * @param issueDate BT-2, derived in the seller's tax zone, never from a clock
+ * @param issueDate BT-2: the day the number was given, in the seller's tax zone (D-PS1-27)
  * @param dueDate BT-9, optional
  * @param typeCode BT-3
  * @param currency BT-5
@@ -42,6 +42,8 @@ import java.util.Optional;
  * @param taxTotal BT-110
  * @param taxInclusiveTotal BT-112
  * @param payableTotal BT-115
+ * @param deliveryDate BT-72, optional; never together with {@code invoicePeriod}
+ * @param invoicePeriod BG-14, optional
  */
 public record EnInvoice(
     String number,
@@ -63,7 +65,9 @@ public record EnInvoice(
     Money taxExclusiveTotal,
     Money taxTotal,
     Money taxInclusiveTotal,
-    Money payableTotal) {
+    Money payableTotal,
+    LocalDate deliveryDate,
+    com.housedevinci.einvoice.domain.SupplyPeriod invoicePeriod) {
 
   public EnInvoice {
     // One body, two passes. BT-1 is the only rule that needs the number; everything else - every
@@ -91,7 +95,9 @@ public record EnInvoice(
             taxExclusiveTotal,
             taxTotal,
             taxInclusiveTotal,
-            payableTotal);
+            payableTotal,
+            deliveryDate,
+            invoicePeriod);
     issueDate = body.issueDate();
     dueDate = body.dueDate();
     typeCode = body.typeCode();
@@ -111,6 +117,55 @@ public record EnInvoice(
     taxTotal = body.taxTotal();
     taxInclusiveTotal = body.taxInclusiveTotal();
     payableTotal = body.payableTotal();
+    deliveryDate = body.deliveryDate();
+    invoicePeriod = body.invoicePeriod();
+  }
+
+  /** A document with no supply date and no invoicing period (a credit note in this edition). */
+  public EnInvoice(
+      String number,
+      LocalDate issueDate,
+      LocalDate dueDate,
+      DocumentTypeCode typeCode,
+      String currency,
+      String buyerReference,
+      String note,
+      String precedingReference,
+      LocalDate precedingReferenceDate,
+      String upstreamNumber,
+      Party seller,
+      Party buyer,
+      PaymentInstruction payment,
+      List<DocumentLine> lines,
+      List<TaxSubtotal> taxSubtotals,
+      Money lineTotal,
+      Money taxExclusiveTotal,
+      Money taxTotal,
+      Money taxInclusiveTotal,
+      Money payableTotal) {
+    this(
+        number,
+        issueDate,
+        dueDate,
+        typeCode,
+        currency,
+        buyerReference,
+        note,
+        precedingReference,
+        precedingReferenceDate,
+        upstreamNumber,
+        seller,
+        buyer,
+        payment,
+        lines,
+        taxSubtotals,
+        lineTotal,
+        taxExclusiveTotal,
+        taxTotal,
+        taxInclusiveTotal,
+        payableTotal,
+        null,
+        null);
   }
 
   /** This document without its number: the stage the preflight runs, for a caller that wants it. */
@@ -134,11 +189,23 @@ public record EnInvoice(
         taxExclusiveTotal,
         taxTotal,
         taxInclusiveTotal,
-        payableTotal);
+        payableTotal,
+        deliveryDate,
+        invoicePeriod);
   }
 
   public Optional<LocalDate> dueDateValue() {
     return Optional.ofNullable(dueDate);
+  }
+
+  /** BT-72, the actual delivery date: a proxy, the day Stripe finalised the invoice. */
+  public Optional<LocalDate> deliveryDateValue() {
+    return Optional.ofNullable(deliveryDate);
+  }
+
+  /** BG-14, the invoicing period, when every line names the same service period. */
+  public Optional<com.housedevinci.einvoice.domain.SupplyPeriod> invoicePeriodValue() {
+    return Optional.ofNullable(invoicePeriod);
   }
 
   public Optional<String> buyerReferenceValue() {

@@ -20,6 +20,11 @@ class CipherProbePr7bDispositionTest {
   /** Passes the preflight, refuses at render - the renderer-fault case, both catch paths. */
   private record LateRefusal(boolean unchecked) implements DocumentRenderer {
     @Override
+    public boolean carriesSupplyDate() {
+      return true;
+    }
+
+    @Override
     public RenderedDocument render(DocumentInput input) {
       if (unchecked) {
         throw new IllegalStateException("a third-party renderer blew up");

@@ -14,7 +14,6 @@ import com.housedevinci.einvoice.domain.IssuanceState;
 import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.SeriesDefinition;
 import com.housedevinci.einvoice.domain.en16931.DocumentTypeCode;
-import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
@@ -49,7 +48,7 @@ class CipherProbeDocumentSeriesTest {
   void probe_an_unconfigured_seller_and_type_refuses_and_consumes_no_number() {
     String seller = PostgresSupport.freshSeller("untyped");
     JdbcIssuanceStore invoicesOnly =
-        new JdbcIssuanceStore(
+        TestStores.store(
             PostgresSupport.dataSource(),
             DocumentSeriesFixture.CHAIN,
             Map.of(
@@ -67,7 +66,9 @@ class CipherProbeDocumentSeriesTest {
     assertThatThrownBy(
             () ->
                 invoicesOnly.allocateTyped(
-                    request(asCredit, "cn_untyped", MARCH_10), Optional.of(target.id())))
+                    request(asCredit, "cn_untyped", MARCH_10),
+                    Optional.of(target.id()),
+                    DocumentSeriesFixture.creditDate(asCredit, MARCH_10)))
         .extracting("code")
         .isEqualTo(ErrorCodes.SERIES_NOT_CONFIGURED);
     assertThat(f.nextNumber("INV")).isEqualTo(2L);
@@ -118,13 +119,17 @@ class CipherProbeDocumentSeriesTest {
     assertThatThrownBy(
             () ->
                 f.store.allocateTyped(
-                    request(f.credits(Mode.LIVE), "cn_none", MARCH_10), Optional.empty()))
+                    request(f.credits(Mode.LIVE), "cn_none", MARCH_10),
+                    Optional.empty(),
+                    DocumentSeriesFixture.creditDate(f.credits(Mode.LIVE), MARCH_10)))
         .extracting("code")
         .isEqualTo(ErrorCodes.CREDIT_TARGET_INVALID);
     assertThatThrownBy(
             () ->
                 f.store.allocateTyped(
-                    request(f.invoices(Mode.LIVE), "in_with", MARCH_10), Optional.of(target.id())))
+                    request(f.invoices(Mode.LIVE), "in_with", MARCH_10),
+                    Optional.of(target.id()),
+                    Optional.empty()))
         .extracting("code")
         .isEqualTo(ErrorCodes.CREDIT_TARGET_INVALID);
     assertThat(f.nextNumber("INV")).isEqualTo(2L);
@@ -251,31 +256,44 @@ class CipherProbeDocumentSeriesTest {
   }
 
   @Test
-  void probe_an_out_of_order_invoice_is_numbered_recorded_and_last_issue_date_does_not_go_back() {
+  void probe_an_invoice_finalised_earlier_is_numbered_dated_today_and_never_out_of_order() {
+    // D-PS1-38 as rewritten by D-PS1-27: a sale still gets its invoice, but its issue date is the
+    // numbering day, so the series' dates cannot go backwards and DEI-127 is never raised for an
+    // invoice. The late supply is recorded instead: DEI-137 names the number. The fixture clock
+    // is 20 March.
     DocumentSeriesFixture f = DocumentSeriesFixture.shared("outoforder");
-    f.invoice("in_march_10", MARCH_10);
-    assertThat(lastIssueDate(f, "INV")).isEqualTo("2026-03-10");
-    assertThat(openFindings(f)).isZero();
+    Issuance first = f.invoice("in_march_10", MARCH_10);
+    assertThat(lastIssueDate(f, "INV")).isEqualTo("2026-03-20");
 
     Issuance late = f.invoice("in_march_3", MARCH_3);
 
     assertThat(late.legalNumber().counter()).as("a sale gets its invoice").isEqualTo(2L);
-    assertThat(lastIssueDate(f, "INV")).as("never backwards").isEqualTo("2026-03-10");
+    assertThat(late.dating().orElseThrow().issueDate())
+        .isEqualTo(java.time.LocalDate.parse("2026-03-20"));
+    assertThat(late.dating().orElseThrow().supplyDate())
+        .contains(java.time.LocalDate.parse("2026-03-03"));
+    assertThat(late.dating().orElseThrow().previousNumber()).contains(first.legalNumber().value());
+    assertThat(lastIssueDate(f, "INV")).as("never backwards").isEqualTo("2026-03-20");
     assertThat(
             f.scalar(
                 "SELECT count(*) FROM einvoice_finding WHERE seller_id = '"
                     + f.seller
                     + "' AND code = '"
                     + ErrorCodes.ISSUE_DATE_OUT_OF_ORDER
+                    + "'"))
+        .as("an invoice is never out of date order")
+        .isZero();
+    assertThat(
+            f.scalar(
+                "SELECT count(*) FROM einvoice_finding WHERE seller_id = '"
+                    + f.seller
+                    + "' AND code = '"
+                    + ErrorCodes.ISSUED_LATE
                     + "' AND subject_id = '"
                     + late.legalNumber().value()
                     + "' AND acknowledged_at IS NULL"))
-        .as("an open finding names the number")
+        .as("an open finding names the late number")
         .isEqualTo(1L);
-    // an in-order invoice afterwards raises nothing new and moves the date forward
-    f.invoice("in_march_12", Instant.parse("2026-03-12T10:00:00Z"));
-    assertThat(openFindings(f)).isEqualTo(1L);
-    assertThat(lastIssueDate(f, "INV")).isEqualTo("2026-03-12");
   }
 
   @Test
@@ -352,7 +370,7 @@ class CipherProbeDocumentSeriesTest {
     SeriesDefinition inv = DocumentSeriesFixture.INVOICES;
     assertThatThrownBy(
             () ->
-                new JdbcIssuanceStore(
+                TestStores.store(
                     PostgresSupport.dataSource(),
                     DocumentSeriesFixture.CHAIN,
                     Map.of(
@@ -367,7 +385,7 @@ class CipherProbeDocumentSeriesTest {
     // probe 7-2, first half: "INV-2026-" and "INV-2026-0" can render the same string
     assertThatThrownBy(
             () ->
-                new JdbcIssuanceStore(
+                TestStores.store(
                     PostgresSupport.dataSource(),
                     DocumentSeriesFixture.CHAIN,
                     Map.of(

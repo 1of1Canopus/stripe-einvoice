@@ -298,7 +298,10 @@ public final class IssuanceChainVerifier {
                     + "|"
                     + d.documentType()
                     + "|"
-                    + d.correctedIdentity())
+                    + d.correctedIdentity()
+                    // D-PR36-2: the row's dates are what the report shows and a resume renders.
+                    + "|"
+                    + d.datingIdentity())
         .filter(key -> !chained.contains(key))
         .count();
   }
@@ -338,7 +341,9 @@ public final class IssuanceChainVerifier {
                         + t.fiscalYear()
                         + "/"
                         + t.legalNumber())
-            .orElse("");
+            .orElse("")
+        + "|"
+        + com.housedevinci.einvoice.domain.IssueDating.identity(e.dating());
   }
 
   private IssuanceChain chainForRow(boolean expectKeyed, String rowKeyId) {

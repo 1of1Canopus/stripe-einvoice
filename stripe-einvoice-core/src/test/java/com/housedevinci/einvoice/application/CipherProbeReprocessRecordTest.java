@@ -35,6 +35,10 @@ class CipherProbeReprocessRecordTest {
   private static final String REASON = "seller VAT identifier corrected in the profile";
 
   private static final class RepairableRenderer implements DocumentRenderer {
+    @Override
+    public boolean carriesSupplyDate() {
+      return true;
+    }
 
     private final DeterministicRenderer delegate = new DeterministicRenderer();
     private boolean repaired;

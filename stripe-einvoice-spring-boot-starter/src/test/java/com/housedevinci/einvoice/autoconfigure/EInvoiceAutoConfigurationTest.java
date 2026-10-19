@@ -1,6 +1,7 @@
 package com.housedevinci.einvoice.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.housedevinci.einvoice.application.IssuanceChainVerifier;
 import com.housedevinci.einvoice.domain.ErrorCodes;
@@ -180,19 +181,65 @@ class EInvoiceAutoConfigurationTest {
             });
   }
 
+  /**
+   * D-PS1-46. The host's clock is the source of every "now" except the issue instant, which is the
+   * database's. The two must agree before a legal date is written: a host clock months away from
+   * the database refuses with DEI-132 and numbers nothing.
+   */
   @Test
-  void a_host_supplied_clock_is_the_only_source_of_now() {
+  void a_host_supplied_clock_must_agree_with_the_database_before_an_invoice_is_dated() {
     String seller = seller();
     Instant fixed = Instant.parse("2026-06-01T12:00:00Z");
     runner(validConfiguration(seller))
         .withBean(Clock.class, () -> Clock.fixed(fixed, ZoneOffset.UTC))
         .run(
             context -> {
+              IssuanceNumberingService numbering = context.getBean(IssuanceNumberingService.class);
+              assertThatThrownBy(
+                      () -> numbering.allocate("in_clock", "", "STRIPE-C", fixed.minusSeconds(60)))
+                  .extracting("code")
+                  .isEqualTo(ErrorCodes.ISSUE_CLOCK_BEHIND_SERIES);
+              assertThat(numbering.find("in_clock")).isEmpty();
+            });
+  }
+
+  /** The agreeing case: the host's clock is the real one, the issue instant the database's. */
+  @Test
+  void the_issue_instant_is_the_database_clock_and_the_issue_date_its_day_in_the_tax_zone() {
+    String seller = seller();
+    runner(validConfiguration(seller))
+        .run(
+            context -> {
+              Instant before = Instant.now();
               Issuance issuance =
                   context
                       .getBean(IssuanceNumberingService.class)
-                      .allocate("in_clock", "", "STRIPE-C", fixed);
-              assertThat(issuance.allocatedAt()).isEqualTo(fixed);
+                      .allocate("in_db_clock", "", "STRIPE-D", before.minusSeconds(60));
+              assertThat(issuance.allocatedAt())
+                  .isBetween(before.minusSeconds(60), Instant.now().plusSeconds(60));
+              assertThat(issuance.dating().orElseThrow().issueDate())
+                  .isEqualTo(
+                      java.time.LocalDate.ofInstant(
+                          issuance.allocatedAt(), java.time.ZoneId.of("Europe/Paris")));
+            });
+  }
+
+  /** T-regression-bound: a bound above one hour is refused at startup, by name. */
+  @Test
+  void a_max_clock_regression_above_one_hour_refuses_startup() {
+    String seller = seller();
+    String[] properties =
+        java.util.stream.Stream.concat(
+                java.util.Arrays.stream(validConfiguration(seller)),
+                java.util.stream.Stream.of("einvoice.numbering.max-clock-regression=2h"))
+            .toArray(String[]::new);
+    runner(properties)
+        .run(
+            context -> {
+              assertThat(context).hasFailed();
+              assertThat(context.getStartupFailure())
+                  .rootCause()
+                  .hasMessageContaining("einvoice.numbering.max-clock-regression");
             });
   }
 

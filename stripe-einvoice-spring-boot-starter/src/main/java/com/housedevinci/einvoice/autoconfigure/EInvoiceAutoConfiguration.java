@@ -126,13 +126,18 @@ public class EInvoiceAutoConfiguration {
             properties.getNumbering().getSeries(),
             Mode.of(properties.getMode())),
         definition);
+    // The issue date of every invoice is the database clock's day when its number is given, in
+    // the seller's tax zone, and the bound on how far that clock may disagree is checked here, at
+    // startup, by the store's constructor (D-PS1-27, design 5.2).
     return new JdbcIssuanceStore(
         unitOfWork,
         dataSource,
         chain,
         series,
+        java.time.ZoneId.of(properties.getSeller().getTaxZone()),
         clock,
-        properties.getNumbering().getAllocationTimeout());
+        properties.getNumbering().getAllocationTimeout(),
+        properties.getNumbering().getMaxClockRegression());
   }
 
   @Bean

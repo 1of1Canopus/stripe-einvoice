@@ -306,6 +306,11 @@ class CipherProbePreflightTest {
     DocumentRenderer broken =
         new DocumentRenderer() {
           @Override
+          public boolean carriesSupplyDate() {
+            return true;
+          }
+
+          @Override
           public RenderedDocument render(DocumentInput input) {
             throw new IllegalStateException("never reached");
           }

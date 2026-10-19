@@ -44,7 +44,7 @@ final class DocumentSeriesFixture {
           new JdbcIssuanceStore.SeriesId(seller, "CN", mode, DocumentTypeCode.CREDIT_NOTE),
           CREDITS);
     }
-    this.store = new JdbcIssuanceStore(dataSource, CHAIN, series, CLOCK);
+    this.store = TestStores.store(dataSource, CHAIN, series, CLOCK);
   }
 
   static DocumentSeriesFixture shared(String hint) {
@@ -61,8 +61,14 @@ final class DocumentSeriesFixture {
   }
 
   static AllocationRequest request(SeriesKey key, String sourceId, Instant at) {
-    return new AllocationRequest(
-        key, sourceId, "", "S-" + sourceId, at, LocalDate.ofInstant(at, ZoneOffset.UTC), "r1");
+    return new AllocationRequest(key.scope(), sourceId, "", "S-" + sourceId, at, "r1");
+  }
+
+  /** A credit note's caller date (T9, unchanged); an invoice passes none. */
+  static Optional<LocalDate> creditDate(SeriesKey key, Instant at) {
+    return key.documentType().isCreditNote()
+        ? Optional.of(LocalDate.ofInstant(at, ZoneOffset.UTC))
+        : Optional.empty();
   }
 
   Issuance invoice(String id, Instant at) {
@@ -90,7 +96,10 @@ final class DocumentSeriesFixture {
   }
 
   Issuance credit(String id, Instant at, long target) {
-    return store.allocateTyped(request(credits(Mode.LIVE), id, at), Optional.of(target));
+    return store.allocateTyped(
+        request(credits(Mode.LIVE), id, at),
+        Optional.of(target),
+        creditDate(credits(Mode.LIVE), at));
   }
 
   static String sha(String seed) {

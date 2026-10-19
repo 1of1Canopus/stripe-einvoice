@@ -95,7 +95,7 @@ class CipherProbePr5Test {
       PreflightReport report = renderer.preflight(mapping);
       String renderCode = null;
       try {
-        renderer.render(new DocumentInput(mapping, DocumentFixtures.NUMBER));
+        renderer.render(DocumentInputs.numberedOnSupplyDay(mapping, DocumentFixtures.NUMBER));
       } catch (com.housedevinci.einvoice.domain.EInvoiceException e) {
         renderCode = e.code();
       }

@@ -28,11 +28,12 @@ class OfficialValidatorTest {
     return renderer.render(input).bytes();
   }
 
-  private static DocumentValidator.Report validate(byte[] bytes, UblProfile profile) {
+  private static DocumentValidator.Report validate(
+      byte[] bytes, DocumentInput input, UblProfile profile) {
     try (En16931DocumentValidator validator =
         new En16931DocumentValidator(
             profile, SecureXml.DEFAULT_XSLT2_PROCESSOR, Duration.ofSeconds(60), 2)) {
-      return validator.validate(bytes, null);
+      return validator.validate(bytes, input);
     }
   }
 
@@ -46,8 +47,8 @@ class OfficialValidatorTest {
 
   /**
    * Clean means: every rule ran, and no rule fired above the {@code information} flag. A finding
-   * that is only informational is reported rather than suppressed - {@code BR-DE-TMP-32} is the one
-   * this edition currently carries, and it has a test of its own so it cannot go unnoticed.
+   * that is only informational is reported rather than suppressed - {@code BR-DE-TMP-32} was the
+   * one this edition currently carries, and it has a test of its own so it cannot go unnoticed.
    */
   private static void assertClean(DocumentInput input, SellerProfile seller, UblProfile profile) {
     byte[] bytes = render(input, seller, profile);
@@ -56,7 +57,8 @@ class OfficialValidatorTest {
         .as("%s findings on %s", profile.displayName(), input.invoice().id())
         .allMatch(finding -> !finding.fatal(), "informational only");
     assertThat(report.verdict()).isEqualTo(DocumentValidator.Verdict.PASSED);
-    assertThat(validate(bytes, profile).verdict()).isEqualTo(DocumentValidator.Verdict.PASSED);
+    assertThat(validate(bytes, input, profile).verdict())
+        .isEqualTo(DocumentValidator.Verdict.PASSED);
     assertThat(new String(bytes, StandardCharsets.UTF_8)).contains(profile.customizationId());
   }
 
@@ -93,19 +95,18 @@ class OfficialValidatorTest {
   }
 
   @Test
-  void the_one_informational_finding_this_edition_carries_is_named_rather_than_silenced() {
-    // BR-DE-TMP-32 asks an invoice to state a delivery date or an invoicing period. This edition
-    // carries neither, because the authoritative invoice this module reads does not carry a line
-    // period yet. The flag is `information`, so the document is valid; the finding is reported,
-    // not filtered, and the documents page says so in words.
+  void an_invoice_with_its_supply_date_is_clean_under_xrechnung_with_no_information_flag() {
+    // T-supply-xrechnung (D-PS1-44). BR-DE-TMP-32 asked an invoice to state a delivery date or an
+    // invoicing period. Since the issue date became the numbering day, every invoice carries the
+    // supply date (BT-72), so the informational flag the 0.1.x documents raised is gone.
     byte[] bytes =
         render(
             DocumentFixtures.germanStandardRated(),
             DocumentFixtures.germanSeller(),
             UblProfile.XRECHNUNG_UBL);
-    assertThat(detail(bytes, UblProfile.XRECHNUNG_UBL).findings())
-        .extracting(SchematronValidator.Finding::ruleId)
-        .containsExactly("BR-DE-TMP-32");
+    assertThat(new String(bytes, java.nio.charset.StandardCharsets.UTF_8))
+        .contains("<cac:Delivery><cbc:ActualDeliveryDate>");
+    assertThat(detail(bytes, UblProfile.XRECHNUNG_UBL).findings()).isEmpty();
   }
 
   @Test

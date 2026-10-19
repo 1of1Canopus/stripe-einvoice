@@ -36,6 +36,10 @@ class CipherProbeReprocessTest {
    * application, not of the invoice.
    */
   private static final class RepairableRenderer implements DocumentRenderer {
+    @Override
+    public boolean carriesSupplyDate() {
+      return true;
+    }
 
     private final DeterministicRenderer delegate = new DeterministicRenderer();
     private boolean repaired;
@@ -228,12 +232,11 @@ class CipherProbeReprocessTest {
         .store()
         .allocate(
             new AllocationRequest(
-                harness.seriesKey(),
+                harness.seriesKey().scope(),
                 invoice.id(),
                 invoice.accountId(),
                 invoice.number(),
                 invoice.finalizedAt(),
-                java.time.LocalDate.ofInstant(invoice.finalizedAt(), java.time.ZoneOffset.UTC),
                 "fr-2026.1"));
     long numberedBefore = harness.numberedRows();
 

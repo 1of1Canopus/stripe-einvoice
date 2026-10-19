@@ -11,6 +11,7 @@ import com.housedevinci.einvoice.application.NumberVoider;
 import com.housedevinci.einvoice.application.VoidRequest;
 import com.housedevinci.einvoice.domain.ComplianceFinding;
 import com.housedevinci.einvoice.domain.CorrectionTarget;
+import com.housedevinci.einvoice.domain.DateGapCause;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.Issuance;
@@ -18,11 +19,15 @@ import com.housedevinci.einvoice.domain.IssuanceAnchor;
 import com.housedevinci.einvoice.domain.IssuanceChain;
 import com.housedevinci.einvoice.domain.IssuanceEvent;
 import com.housedevinci.einvoice.domain.IssuanceState;
+import com.housedevinci.einvoice.domain.IssueClockException;
+import com.housedevinci.einvoice.domain.IssueDating;
 import com.housedevinci.einvoice.domain.LegalNumber;
 import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.SeriesDefinition;
 import com.housedevinci.einvoice.domain.SeriesKey;
 import com.housedevinci.einvoice.domain.SeriesReport;
+import com.housedevinci.einvoice.domain.SeriesScope;
+import com.housedevinci.einvoice.domain.SupplyPeriod;
 import com.housedevinci.einvoice.domain.Timestamps;
 import com.housedevinci.einvoice.domain.en16931.DocumentTypeCode;
 import java.sql.Connection;
@@ -35,6 +40,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -71,11 +77,17 @@ public final class JdbcIssuanceStore
 
   private static final Logger log = LoggerFactory.getLogger(JdbcIssuanceStore.class);
 
+  /** The dates a number was given with (D-PS1-27): the same columns on the row and the event. */
+  static final String DATING_COLUMNS =
+      "issue_date, supply_date, supply_period_start, supply_period_end, prev_legal_number,"
+          + " prev_issue_date, date_gap_cause";
+
   static final String SELECT_ISSUANCE_COLUMNS =
       "id, seller_id, mode, stripe_invoice_id, stripe_account_id, stripe_number, series,"
           + " fiscal_year, legal_number, counter, issued_at, allocated_at, document_sha256,"
           + " archive_key, rule_pack_version, state, void_reason, void_rule_id, document_type,"
-          + " corrects_issuance_id";
+          + " corrects_issuance_id, "
+          + DATING_COLUMNS;
 
   static final String FIND_BY_SOURCE_FOR_UPDATE =
       "SELECT "
@@ -98,15 +110,17 @@ public final class JdbcIssuanceStore
   // creation, so it already differs per fiscal year - the allocator does not need to know that
   // here.
   //
-  // D-PS1-38: an invoice is numbered whatever its date - a sale must get its invoice - and the
-  // series keeps the later of the two dates with GREATEST, so last_issue_date never goes back and
-  // the series guard (which refuses a backwards date for every type) is never fought. An earlier
-  // date is recorded as a finding by the caller of this statement.
+  // D-PS1-27, design 5.1 step 6: the issue day is the numbering day, read under the row lock, and
+  // the statement refuses one earlier than the series' latest date, inside itself, so no
+  // read-then-write window exists. The checks before it name the cause of a refusal; this
+  // predicate is what holds if one of them is ever wrong. GREATEST and the series guard stay as
+  // D-PS1-38 built them. A NULL date is accepted only on a series that has numbered nothing.
   static final String ALLOCATE =
       "UPDATE einvoice_series SET next_number = next_number + 1,"
           + " last_issue_date = GREATEST(last_issue_date, ?), updated_at = ?"
           + " WHERE seller_id = ? AND document_type = ? AND series = ? AND fiscal_year = ?"
           + " AND mode = ? AND next_number <= (power(10, width)::bigint - 1)"
+          + " AND ((last_issue_date IS NULL AND next_number = 1) OR last_issue_date <= ?)"
           + " RETURNING next_number - 1, prefix, width";
 
   // T9: a credit note is numbered only in date order. The predicate is in the counter statement
@@ -123,7 +137,7 @@ public final class JdbcIssuanceStore
   // The row lock, taken by its own statement before the counter moves, so the date the series
   // held before this allocation is read under the same lock the counter is moved under.
   static final String LOCK_SERIES =
-      "SELECT last_issue_date FROM einvoice_series"
+      "SELECT next_number, last_issue_date, prefix, width FROM einvoice_series"
           + " WHERE seller_id = ? AND document_type = ? AND series = ? AND fiscal_year = ?"
           + " AND mode = ? FOR UPDATE";
 
@@ -156,8 +170,9 @@ public final class JdbcIssuanceStore
   static final String INSERT_ISSUANCE =
       "INSERT INTO einvoice_issuance (seller_id, mode, stripe_invoice_id, stripe_account_id,"
           + " stripe_number, series, fiscal_year, legal_number, counter, issued_at, allocated_at,"
-          + " rule_pack_version, state, document_type, corrects_issuance_id)"
-          + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id";
+          + " rule_pack_version, state, document_type, corrects_issuance_id, "
+          + DATING_COLUMNS
+          + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id";
 
   static final String MARK_ARCHIVING =
       "UPDATE einvoice_issuance SET state = ?, document_sha256 = ?, archive_key = ?"
@@ -182,19 +197,30 @@ public final class JdbcIssuanceStore
 
   static final String SERIES_LINES =
       "SELECT counter, legal_number, state, stripe_invoice_id, issued_at, allocated_at,"
-          + " void_reason, void_rule_id FROM einvoice_issuance"
+          + " void_reason, void_rule_id, "
+          + DATING_COLUMNS
+          + " FROM einvoice_issuance"
           + " WHERE seller_id = ? AND document_type = ? AND series = ? AND fiscal_year = ?"
           + " AND mode = ? ORDER BY counter";
 
   /** D1-05's default when a caller does not configure one, matching the property's own default. */
   public static final Duration DEFAULT_ALLOCATION_TIMEOUT = Duration.ofSeconds(5);
 
+  /** Design 5.2's default for {@code einvoice.numbering.max-clock-regression}. */
+  public static final Duration DEFAULT_MAX_CLOCK_REGRESSION = Duration.ofMinutes(5);
+
+  /** The largest {@code max-clock-regression} accepted (design 5.2). */
+  public static final Duration MAX_CLOCK_REGRESSION_BOUND = Duration.ofHours(1);
+
   private final JdbcUnitOfWork unitOfWork;
   private final DataSource dataSource;
   private final IssuanceChain chain;
   private final Map<SeriesId, SeriesDefinition> series;
+  private final ZoneId taxZone;
   private final Clock clock;
   private final Duration allocationTimeout;
+  private final Duration maxClockRegression;
+  private final IssueClock issueClock;
 
   /**
    * The configuration key of a series, before a fiscal year is known: one per seller, document type
@@ -219,14 +245,16 @@ public final class JdbcIssuanceStore
       DataSource dataSource,
       IssuanceChain chain,
       Map<SeriesId, SeriesDefinition> series,
+      ZoneId taxZone,
       Clock clock) {
-    this(dataSource, chain, series, clock, DEFAULT_ALLOCATION_TIMEOUT);
+    this(dataSource, chain, series, taxZone, clock, DEFAULT_ALLOCATION_TIMEOUT);
   }
 
   public JdbcIssuanceStore(
       DataSource dataSource,
       IssuanceChain chain,
       Map<SeriesId, SeriesDefinition> series,
+      ZoneId taxZone,
       Clock clock,
       Duration allocationTimeout) {
     this(
@@ -234,32 +262,89 @@ public final class JdbcIssuanceStore
         dataSource,
         chain,
         series,
+        taxZone,
         clock,
-        allocationTimeout);
+        allocationTimeout,
+        DEFAULT_MAX_CLOCK_REGRESSION);
   }
 
   /**
-   * The canonical constructor: every statement this store issues runs through {@code unitOfWork}
-   * (T-01), including the reads, so a host that allocates and then reads inside one transaction
-   * sees its own uncommitted row.
+   * The canonical public constructor: every statement this store issues runs through {@code
+   * unitOfWork} (T-01), including the reads, so a host that allocates and then reads inside one
+   * transaction sees its own uncommitted row.
    *
-   * <p>{@code dataSource} is kept for one thing only: {@link #openSeries(SeriesKey)}, which the
-   * startup check calls before any host transaction exists and which must not join one.
+   * <p>{@code dataSource} is kept for two things only: {@link #openSeries(SeriesKey)} and {@link
+   * #checkSeriesDates()}, which the startup check calls before any host transaction exists, and the
+   * findings a refused allocation records, which must outlive the rollback of the refusal.
+   *
+   * @param taxZone the seller's tax zone: every instant becomes a date here, once, in Java
+   * @param clock the application clock, for every "now" except the issue instant, which comes from
+   *     the database; the two must agree within {@code maxClockRegression} (D-PS1-46)
+   * @param maxClockRegression how far the issue clock may run behind the series, or apart from the
+   *     application clock, before the refusal raises a finding; at most one hour
    */
   public JdbcIssuanceStore(
       JdbcUnitOfWork unitOfWork,
       DataSource dataSource,
       IssuanceChain chain,
       Map<SeriesId, SeriesDefinition> series,
+      ZoneId taxZone,
       Clock clock,
-      Duration allocationTimeout) {
+      Duration allocationTimeout,
+      Duration maxClockRegression) {
+    this(
+        unitOfWork,
+        dataSource,
+        chain,
+        series,
+        taxZone,
+        clock,
+        allocationTimeout,
+        maxClockRegression,
+        IssueClock.DATABASE);
+  }
+
+  /** Package-private: a test in this package may shift the issue clock (see {@link IssueClock}). */
+  JdbcIssuanceStore(
+      JdbcUnitOfWork unitOfWork,
+      DataSource dataSource,
+      IssuanceChain chain,
+      Map<SeriesId, SeriesDefinition> series,
+      ZoneId taxZone,
+      Clock clock,
+      Duration allocationTimeout,
+      Duration maxClockRegression,
+      IssueClock issueClock) {
     this.unitOfWork = Objects.requireNonNull(unitOfWork, "unitOfWork");
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     this.chain = Objects.requireNonNull(chain, "chain");
     this.series = Map.copyOf(series);
+    this.taxZone = Objects.requireNonNull(taxZone, "taxZone");
     this.clock = Objects.requireNonNull(clock, "clock");
     refuseAmbiguousSeries(this.series);
     this.allocationTimeout = Objects.requireNonNull(allocationTimeout, "allocationTimeout");
+    this.maxClockRegression = requireRegressionBound(maxClockRegression);
+    this.issueClock = Objects.requireNonNull(issueClock, "issueClock");
+  }
+
+  /** The bound of design 5.2: above zero, and at most one hour. */
+  public static Duration requireRegressionBound(Duration maxClockRegression) {
+    if (maxClockRegression == null
+        || maxClockRegression.isNegative()
+        || maxClockRegression.isZero()
+        || maxClockRegression.compareTo(MAX_CLOCK_REGRESSION_BOUND) > 0) {
+      throw new EInvoiceException(
+          ErrorCodes.CONFIG,
+          "einvoice.numbering.max-clock-regression must be above zero and at most "
+              + MAX_CLOCK_REGRESSION_BOUND
+              + ". A wider bound would let a wrong clock date real invoices for longer.");
+    }
+    return maxClockRegression;
+  }
+
+  /** The tax zone every date of this store is derived in. */
+  public ZoneId taxZone() {
+    return taxZone;
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -272,18 +357,27 @@ public final class JdbcIssuanceStore
    * carries no credit lines, no target and no amounts, so nothing could check a credit note behind
    * it, and a credit-note number with no document is a hole in a legal series. Credit-note numbers
    * are allocated only by the pipeline that produces the document.
+   *
+   * <p><b>The issue date is the numbering day (D-PS1-27).</b> Inside the allocation transaction, in
+   * this order: a first read of the database clock picks the fiscal year, the series row is created
+   * if needed and locked by its own statement, the clock is read again, and only that second
+   * reading, turned into a date once in the tax zone, becomes BT-2. Numbers and dates of one series
+   * then go up together by construction, whatever retried, parked or waited before. What is left to
+   * refuse is a clock that cannot be trusted: {@link ErrorCodes#ISSUE_YEAR_CHANGED}, {@link
+   * ErrorCodes#ISSUE_CLOCK_BEHIND_SERIES} and {@link ErrorCodes#SERIES_DATE_IN_FUTURE}, each before
+   * the counter moves.
    */
   @Override
   public Issuance allocate(AllocationRequest request) {
-    if (request.seriesKey().documentType() != DocumentTypeCode.COMMERCIAL_INVOICE) {
+    if (request.scope().documentType() != DocumentTypeCode.COMMERCIAL_INVOICE) {
       throw new EInvoiceException(
           ErrorCodes.DOCUMENT_TYPE_NOT_ISSUABLE,
           "this allocator numbers invoices (380) only. A number of type "
-              + request.seriesKey().documentTypeCode()
+              + request.scope().documentType().code()
               + " is allocated only by the pipeline that produces that document; allocating one"
               + " here would leave a number no document will ever carry.");
     }
-    return allocateTyped(request, Optional.empty());
+    return allocateTyped(request, Optional.empty(), Optional.empty());
   }
 
   /**
@@ -297,65 +391,383 @@ public final class JdbcIssuanceStore
    * consumes no number; the insert guard in the database checks the same thing again for every
    * writer.
    *
+   * <p>A credit note keeps the dating rule it had (T9, unchanged by the date-order change): its
+   * issue date is the caller's, and its series refuses an earlier one. Whether a credit note's
+   * issue date should also be its numbering day is open (D-PS1-43).
+   *
    * @param correctsIssuanceId the row id of the corrected invoice: present for a credit note,
    *     absent for an invoice
+   * @param creditNoteDate the credit note's issue date: present for a credit note, absent for an
+   *     invoice
    */
-  Issuance allocateTyped(AllocationRequest request, Optional<Long> correctsIssuanceId) {
-    SeriesKey key = request.seriesKey();
+  Issuance allocateTyped(
+      AllocationRequest request,
+      Optional<Long> correctsIssuanceId,
+      Optional<LocalDate> creditNoteDate) {
+    SeriesScope scope = request.scope();
     Objects.requireNonNull(correctsIssuanceId, "correctsIssuanceId");
-    if (key.documentType().isCreditNote() != correctsIssuanceId.isPresent()) {
+    Objects.requireNonNull(creditNoteDate, "creditNoteDate");
+    boolean creditNote = scope.documentType().isCreditNote();
+    if (creditNote != correctsIssuanceId.isPresent()) {
       throw new EInvoiceException(
           ErrorCodes.CREDIT_TARGET_INVALID,
-          key.documentType().isCreditNote()
+          creditNote
               ? "a credit note must name the invoice it corrects"
               : "an invoice corrects no other document");
     }
-    SeriesDefinition definition = definitionFor(key);
-    return unitOfWork.inTransaction(
-        unit -> {
-          Connection c = unit.connection();
-          // D1-12: recorded as the very first thing this unit of work does, before the resume
-          // read and before the series-row insert, not just before the counter statement. A
-          // lock-order refusal is then raised before anything at all has run, which makes it
-          // non-poisoning under any predicate for "has this unit of work written" - belt and
-          // braces alongside the read/write classification below.
-          unit.locks().seriesRowLock();
-          // D1-05: bounds how long this transaction will wait on the series row's lock, so a
-          // blocked allocation gives up with a typed refusal rather than joining an unbounded
-          // queue. T-05: in a joined transaction the setting outlives this call, so the caller's
-          // previous value is restored on every path, including the failing ones.
-          String previousLockTimeout = unit.joined() ? currentLockTimeout(unit) : null;
-          setLockTimeout(unit);
-          try {
-            // Resume, never re-allocate. A row in any state returns its existing number; only a
-            // miss reaches the counter.
-            Optional<Issuance> existing =
-                findBySource(c, key.sellerId(), key.mode(), request.stripeInvoiceId(), true);
-            if (existing.isPresent()) {
-              return existing.get();
+    if (creditNote != creditNoteDate.isPresent()) {
+      throw new EInvoiceException(
+          ErrorCodes.INVALID,
+          creditNote
+              ? "a credit note is allocated with its issue date"
+              : "an invoice's issue date is its numbering day; no caller passes one");
+    }
+    SeriesDefinition definition = definitionFor(scope);
+    // Findings of a refusal must outlive the rollback of that refusal, so they are collected here
+    // and written on their own connection once the allocation transaction is over.
+    List<ComplianceFinding> refusalFindings = new ArrayList<>();
+    try {
+      return unitOfWork.inTransaction(
+          unit -> {
+            Connection c = unit.connection();
+            // D1-12: recorded as the very first thing this unit of work does, before the resume
+            // read and before the series-row insert, not just before the counter statement. A
+            // lock-order refusal is then raised before anything at all has run, which makes it
+            // non-poisoning under any predicate for "has this unit of work written".
+            unit.locks().seriesRowLock();
+            // D1-05: bounds how long this transaction will wait on the series row's lock. T-05: in
+            // a joined transaction the setting outlives this call, so the caller's previous value
+            // is restored on every path, including the failing ones.
+            String previousLockTimeout = unit.joined() ? currentLockTimeout(unit) : null;
+            setLockTimeout(unit);
+            try {
+              // Resume, never re-allocate. A row in any state returns its existing number, with
+              // the dates it was given; only a miss reaches the counter.
+              Optional<Issuance> existing =
+                  findBySource(c, scope.sellerId(), scope.mode(), request.stripeInvoiceId(), true);
+              if (existing.isPresent()) {
+                return existing.get();
+              }
+              if (creditNote) {
+                requireCorrectableInvoice(c, scope, correctsIssuanceId.get());
+                return allocateCreditNote(
+                    unit, request, definition, correctsIssuanceId.get(), creditNoteDate.get());
+              }
+              return allocateInvoice(unit, request, definition, refusalFindings);
+            } catch (SQLException e) {
+              if ("55P03".equals(e.getSQLState())) {
+                throw new EInvoiceException(
+                    ErrorCodes.ALLOCATION_TIMEOUT,
+                    "this allocation waited longer than einvoice.numbering.allocation-timeout ("
+                        + allocationTimeout
+                        + ") for the series row's lock and gave up rather than join an unbounded"
+                        + " queue",
+                    e);
+              }
+              throw e;
+            } finally {
+              restoreLockTimeout(unit, previousLockTimeout);
             }
-            if (correctsIssuanceId.isPresent()) {
-              requireCorrectableInvoice(c, key, correctsIssuanceId.get());
+          });
+    } finally {
+      recordOutsideTheAllocation(refusalFindings);
+    }
+  }
+
+  /**
+   * One invoice number, dated the day it is given (design 5.1 to 5.6).
+   *
+   * @param refusalFindings where a refusal leaves the finding it raises; written after rollback
+   */
+  private Issuance allocateInvoice(
+      JdbcUnitOfWork.Unit unit,
+      AllocationRequest request,
+      SeriesDefinition definition,
+      List<ComplianceFinding> refusalFindings)
+      throws SQLException {
+    Connection c = unit.connection();
+    SeriesScope scope = request.scope();
+    // 5.3, D-PS1-41: the first reading only picks the series. The row is created if this is a new
+    // fiscal year (N-01), then locked by its own statement.
+    int fiscalYear = fiscalYearOf(definition, dayOf(issueClock.read(c)));
+    SeriesKey key = scope.inFiscalYear(fiscalYear);
+    createSeriesRowForNewFiscalYear(c, key, definition);
+    LockedSeries locked = lockSeriesRow(c, key);
+    // 5.1, D-PS1-40: the reading that dates the invoice is taken after the lock is held, so a
+    // transaction that waited for the lock across midnight dates its invoice on the new day.
+    Instant at = issueClock.read(c);
+    LocalDate issueDay = dayOf(at);
+    if (fiscalYearOf(definition, issueDay) != fiscalYear) {
+      // Refused rather than rolled back and re-picked inside the call: the allocator may run in
+      // the host's own transaction (T-01), which it must not roll back. Nothing was numbered; the
+      // only side effect is the empty series row created above, which is harmless.
+      throw new EInvoiceException(
+          ErrorCodes.ISSUE_YEAR_CHANGED,
+          "the fiscal year changed while this allocation waited for its series; nothing was"
+              + " numbered. Retry in a new transaction: it picks the new year's series.");
+    }
+    refuseUntrustedClock(key, locked, at, issueDay, request.issuedAt(), refusalFindings);
+
+    LegalNumber number = moveCounter(c, key, definition, issueDay, at);
+    LocalDate supplyDay = dayOf(request.issuedAt());
+    Optional<SupplyPeriod> period = request.servicePeriod().map(this::supplyPeriodOf);
+    IssueDating draft =
+        new IssueDating(
+            issueDay,
+            at,
+            period.isPresent() ? Optional.empty() : Optional.of(supplyDay),
+            period,
+            locked.previousNumber(),
+            Optional.ofNullable(locked.lastIssueDate()),
+            Optional.empty());
+    // D-PR36-1: lateness is measured from the day Stripe finalised the invoice, for a delivery
+    // date and an invoicing period alike. One value feeds the cause and the finding.
+    long daysLate = draft.daysAfter(supplyDay);
+    DateGapCause cause =
+        JdbcDateGapCauses.derive(c, scope, request.stripeInvoiceId(), daysLate, supplyDay, taxZone);
+    IssueDating dating =
+        new IssueDating(
+            draft.issueDate(),
+            draft.allocatedAt(),
+            draft.supplyDate(),
+            draft.supplyPeriod(),
+            draft.previousNumber(),
+            draft.previousIssueDate(),
+            Optional.of(cause));
+    if (daysLate > 1) {
+      // Not a refusal: the number and a true issue date are given. The delay is not silent: an
+      // open finding names the number, in the same transaction as the number itself.
+      recordFinding(c, scope, ErrorCodes.ISSUED_LATE, number.value());
+      log.warn(
+          "einvoice: invoice {} in series {} was numbered {} days after its supply date (cause {});"
+              + " recorded as finding {}",
+          number.value(),
+          key.series(),
+          daysLate,
+          cause.wire(),
+          ErrorCodes.ISSUED_LATE);
+    }
+    return insertIssuance(c, key, request, number, Optional.empty(), dating);
+  }
+
+  /**
+   * The refusals of design 5.2, 5.4 and 5.8, D-PS1-42 and D-PS1-46, all under the row lock and
+   * before the counter moves. Each names the series in its finding; none can be released by a
+   * caller.
+   */
+  private void refuseUntrustedClock(
+      SeriesKey key,
+      LockedSeries locked,
+      Instant at,
+      LocalDate issueDay,
+      Instant finalizedAt,
+      List<ComplianceFinding> refusalFindings) {
+    LocalDate last = locked.lastIssueDate();
+    // 5.8, M9: a series that numbered rows and has no latest date cannot prove its order; the
+    // upgrade's backfill did not run. Never read as "anything goes".
+    if (last == null && locked.nextNumber() > 1) {
+      throw new EInvoiceException(
+          ErrorCodes.SCHEMA_UPGRADE_REFUSED,
+          "this series has numbered rows and no latest issue date, so the order of its dates cannot"
+              + " be checked. Run the bundled schema script with einvoice.tax_zone set.");
+    }
+    // D-PS1-46: two independent clocks must agree before a legal date is written. A database
+    // clock that is wrong forward would otherwise date real invoices on a day that has not come.
+    Duration apart = Duration.between(clock.instant(), at).abs();
+    if (apart.compareTo(maxClockRegression) > 0) {
+      refusalFindings.add(seriesFinding(key, ErrorCodes.ISSUE_CLOCK_BEHIND_SERIES));
+      throw new IssueClockException(
+          "the database clock and the application clock are "
+              + apart.toSeconds()
+              + " seconds apart, more than einvoice.numbering.max-clock-regression ("
+              + maxClockRegression
+              + "). Nothing was numbered. Fix whichever clock is wrong (NTP)"
+              + (apart.compareTo(Duration.ofDays(1)) > 0 ? ", then reprocess the event." : "."),
+          apart.compareTo(Duration.ofDays(1)) <= 0);
+    }
+    // D-PS1-42: a latest date more than one day ahead is not a clock that will catch up soon. A
+    // hand edit or a forward jump put it there; waiting would stop the series until that day.
+    if (last != null && last.isAfter(issueDay.plusDays(1))) {
+      refusalFindings.add(seriesFinding(key, ErrorCodes.SERIES_DATE_IN_FUTURE));
+      throw new EInvoiceException(
+          ErrorCodes.SERIES_DATE_IN_FUTURE,
+          "this series' latest issue date is more than one day after today on the database clock."
+              + " Nothing was numbered. First check the database and application clocks against"
+              + " an external time source (NTP): if both stepped back together, fix them and"
+              + " retry, and do not touch the series. Only if both clocks are right, look in the"
+              + " issuance chain for who moved the series row, then correct last_issue_date as"
+              + " the schema owner with a recorded reason.");
+    }
+    // 5.2: the issue day is earlier than a date this series already gave. Only a clock that
+    // stepped back does that; waiting fixes it, so a small regression retries.
+    if (last != null && issueDay.isBefore(last)) {
+      Duration behind = Duration.between(at, last.atStartOfDay(taxZone).toInstant());
+      throw regression(key, behind, "behind the latest issue date of this series", refusalFindings);
+    }
+    // The invoice was finalised later than the database clock says it is now: this clock is behind
+    // Stripe's. An issue date before the supply date would be untrue, so it waits as well.
+    if (finalizedAt.isAfter(at)) {
+      Duration behind = Duration.between(at, finalizedAt);
+      throw regression(key, behind, "behind the invoice's own finalisation time", refusalFindings);
+    }
+  }
+
+  private IssueClockException regression(
+      SeriesKey key, Duration behind, String what, List<ComplianceFinding> refusalFindings) {
+    boolean retryable = behind.compareTo(Duration.ofDays(1)) <= 0;
+    if (behind.compareTo(maxClockRegression) >= 0) {
+      refusalFindings.add(seriesFinding(key, ErrorCodes.ISSUE_CLOCK_BEHIND_SERIES));
+    }
+    return new IssueClockException(
+        "the database clock is "
+            + behind.toSeconds()
+            + " seconds "
+            + what
+            + ". Nothing was numbered. "
+            + (retryable
+                ? "The allocation is retried once the clock has caught up."
+                : "Fix the database clock or the tax zone, then reprocess the event."),
+        retryable);
+  }
+
+  /** The counter statement of design 5.1 step 6, with the backward-date predicate inside it. */
+  private LegalNumber moveCounter(
+      Connection c, SeriesKey key, SeriesDefinition definition, LocalDate issueDay, Instant at)
+      throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(ALLOCATE)) {
+      int i = 1;
+      ps.setObject(i++, issueDay);
+      ps.setObject(i++, ts(at));
+      i = bindSeriesKey(ps, i, key);
+      ps.setObject(i, issueDay);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return LegalNumber.render(rs.getString(2), rs.getInt(3), rs.getLong(1));
+        }
+      }
+    }
+    // Every date predicate was already checked under this lock, so zero rows is the width.
+    throw exhausted(definition);
+  }
+
+  /** A credit note: the T9 rule exactly as before, with the caller's date. */
+  private Issuance allocateCreditNote(
+      JdbcUnitOfWork.Unit unit,
+      AllocationRequest request,
+      SeriesDefinition definition,
+      long correctsIssuanceId,
+      LocalDate issueDate)
+      throws SQLException {
+    Connection c = unit.connection();
+    SeriesKey key = request.scope().inFiscalYear(fiscalYearOf(definition, issueDate));
+    createSeriesRowForNewFiscalYear(c, key, definition);
+    lockSeriesRow(c, key);
+    Instant now = Timestamps.toStorage(clock.instant());
+    try (PreparedStatement ps = c.prepareStatement(ALLOCATE_IN_DATE_ORDER)) {
+      int i = 1;
+      ps.setObject(i++, issueDate);
+      ps.setObject(i++, ts(now));
+      i = bindSeriesKey(ps, i, key);
+      ps.setObject(i, issueDate);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          LegalNumber number = LegalNumber.render(rs.getString(2), rs.getInt(3), rs.getLong(1));
+          return insertIssuance(
+              c,
+              key,
+              request,
+              number,
+              Optional.of(correctsIssuanceId),
+              IssueDating.ofCreditNote(issueDate, now));
+        }
+      }
+    }
+    throw exhaustedOrOutOfOrder(c, key, definition, issueDate);
+  }
+
+  private int fiscalYearOf(SeriesDefinition definition, LocalDate day) {
+    return definition.resetPerFiscalYear() ? day.getYear() : SeriesKey.CONTINUOUS;
+  }
+
+  /** The one place an instant becomes a calendar date (design 5.1 step 5). */
+  private LocalDate dayOf(Instant instant) {
+    return LocalDate.ofInstant(instant, taxZone);
+  }
+
+  /** Stripe's period is start-inclusive and end-exclusive; BG-14's end day is included. */
+  private SupplyPeriod supplyPeriodOf(AllocationRequest.ServicePeriod period) {
+    LocalDate start = dayOf(period.start());
+    LocalDate end = dayOf(period.end().minusSeconds(1));
+    return new SupplyPeriod(start, end.isBefore(start) ? start : end);
+  }
+
+  private static ComplianceFinding seriesFinding(SeriesKey key, String code) {
+    return ComplianceFinding.of(
+        key.sellerId(),
+        key.mode(),
+        code,
+        seriesSubject(key),
+        Instant.EPOCH); // timestamps are set when the finding is written
+  }
+
+  /**
+   * The subject a series finding names: type, series and fiscal year (seller and mode are keys).
+   */
+  static String seriesSubject(SeriesKey key) {
+    return key.documentTypeCode() + "/" + key.series() + "/" + key.fiscalYear();
+  }
+
+  private void recordFinding(Connection c, SeriesScope scope, String code, String subject)
+      throws SQLException {
+    Instant now = Timestamps.toStorage(clock.instant());
+    ComplianceFinding finding =
+        ComplianceFinding.of(scope.sellerId(), scope.mode(), code, subject, now);
+    writeFinding(c, finding);
+  }
+
+  private static void writeFinding(Connection c, ComplianceFinding finding) throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(RECORD_FINDING)) {
+      int i = 1;
+      ps.setString(i++, finding.sellerId());
+      ps.setString(i++, finding.mode().wire());
+      ps.setString(i++, finding.code());
+      ps.setString(i++, finding.subjectId());
+      ps.setObject(i++, ts(finding.firstSeen()));
+      ps.setObject(i, ts(finding.lastSeen()));
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Writes the findings a refused allocation raised, on a connection of its own, after the
+   * allocation transaction has rolled back. Best effort by design: the refusal itself is what the
+   * caller must see, so a failure here is logged and never replaces it.
+   */
+  private void recordOutsideTheAllocation(List<ComplianceFinding> findings) {
+    if (findings.isEmpty()) {
+      return;
+    }
+    Instant now = Timestamps.toStorage(clock.instant());
+    try {
+      JdbcSupport.withConnection(
+          dataSource,
+          c -> {
+            for (ComplianceFinding f : findings) {
+              writeFinding(
+                  c, ComplianceFinding.of(f.sellerId(), f.mode(), f.code(), f.subjectId(), now));
             }
-            createSeriesRowForNewFiscalYear(c, key, definition);
-            LegalNumber number = nextNumber(unit, key, definition, request.issueDate());
-            Instant allocatedAt = Timestamps.toStorage(clock.instant());
-            return insertIssuance(c, request, number, allocatedAt, correctsIssuanceId);
-          } catch (SQLException e) {
-            if ("55P03".equals(e.getSQLState())) {
-              throw new EInvoiceException(
-                  ErrorCodes.ALLOCATION_TIMEOUT,
-                  "this allocation waited longer than einvoice.numbering.allocation-timeout ("
-                      + allocationTimeout
-                      + ") for the series row's lock and gave up rather than join an unbounded"
-                      + " queue",
-                  e);
-            }
-            throw e;
-          } finally {
-            restoreLockTimeout(unit, previousLockTimeout);
-          }
-        });
+            return null;
+          });
+      for (ComplianceFinding f : findings) {
+        log.warn(
+            "einvoice: numbering refused for series {} ({}); recorded as finding {}",
+            f.subjectId(),
+            f.code(),
+            f.code());
+      }
+    } catch (EInvoiceException e) {
+      log.warn("einvoice: could not record the finding of a refused allocation ({})", e.code());
+    }
   }
 
   /**
@@ -398,6 +810,10 @@ public final class JdbcIssuanceStore
   }
 
   private SeriesDefinition definitionFor(SeriesKey key) {
+    return definitionFor(key.scope());
+  }
+
+  private SeriesDefinition definitionFor(SeriesScope key) {
     SeriesDefinition definition =
         series.get(new SeriesId(key.sellerId(), key.series(), key.mode(), key.documentType()));
     if (definition == null) {
@@ -468,43 +884,17 @@ public final class JdbcIssuanceStore
   }
 
   /**
-   * D1-03. Renders from the row's own {@code prefix} and {@code width}, read in the same statement
-   * as the counter, never from today's configured {@link SeriesDefinition}: the row is immutable on
-   * those two columns once it exists (the trigger says so), so this is the only way the rendered
-   * format cannot drift from what a restart with an edited property would otherwise produce.
+   * The series row under its lock, read by its own statement before anything is dated (5.1 step 3):
+   * the counter, the latest issue date, and the format to render the previous number with.
    */
-  private LegalNumber nextNumber(
-      JdbcUnitOfWork.Unit unit, SeriesKey key, SeriesDefinition definition, LocalDate issueDate)
-      throws SQLException {
-    Connection c = unit.connection();
-    // T-02, D1-12: the ledger entry for this lock is recorded at the head of allocate()'s unit of
-    // work, before the resume read, not here - a transaction that already holds the chain lock
-    // must be refused before it does anything at all, not only once it reaches the counter.
-    Optional<LocalDate> previousDate = lockSeriesRow(c, key);
-    boolean inDateOrder = key.documentType().isCreditNote();
-    try (PreparedStatement ps =
-        c.prepareStatement(inDateOrder ? ALLOCATE_IN_DATE_ORDER : ALLOCATE)) {
-      int i = 1;
-      ps.setObject(i++, issueDate);
-      ps.setObject(i++, ts(Timestamps.toStorage(clock.instant())));
-      i = bindSeriesKey(ps, i, key);
-      if (inDateOrder) {
-        ps.setObject(i, issueDate);
-      }
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          long counter = rs.getLong(1);
-          String prefix = rs.getString(2);
-          int width = rs.getInt(3);
-          LegalNumber number = LegalNumber.render(prefix, width, counter);
-          if (previousDate.isPresent() && issueDate.isBefore(previousDate.get())) {
-            recordOutOfOrder(c, key, number);
-          }
-          return number;
-        }
-      }
+  private record LockedSeries(long nextNumber, LocalDate lastIssueDate, String prefix, int width) {
+
+    /** The number given just before this allocation, absent for the first of a series. */
+    Optional<String> previousNumber() {
+      return nextNumber > 1
+          ? Optional.of(LegalNumber.render(prefix, width, nextNumber - 1).value())
+          : Optional.empty();
     }
-    throw exhaustedOutOfOrderOrUnconfigured(c, key, definition, issueDate);
   }
 
   private static int bindSeriesKey(PreparedStatement ps, int start, SeriesKey key)
@@ -518,8 +908,7 @@ public final class JdbcIssuanceStore
     return i;
   }
 
-  private static Optional<LocalDate> lockSeriesRow(Connection c, SeriesKey key)
-      throws SQLException {
+  private static LockedSeries lockSeriesRow(Connection c, SeriesKey key) throws SQLException {
     try (PreparedStatement ps = c.prepareStatement(LOCK_SERIES)) {
       bindSeriesKey(ps, 1, key);
       try (ResultSet rs = ps.executeQuery()) {
@@ -528,40 +917,13 @@ public final class JdbcIssuanceStore
               ErrorCodes.SERIES_NOT_CONFIGURED,
               "the numbering series row disappeared between its creation and this allocation");
         }
-        return Optional.ofNullable(rs.getObject(1, LocalDate.class));
+        return new LockedSeries(
+            rs.getLong("next_number"),
+            rs.getObject("last_issue_date", LocalDate.class),
+            rs.getString("prefix"),
+            rs.getInt("width"));
       }
     }
-  }
-
-  /**
-   * D-PS1-27, D-PS1-38. An invoice whose date is earlier than the latest date its series already
-   * numbered is still numbered: a sale must get its invoice, and the remedy for the order of dates
-   * is a separate design. What this adds is that the fact is not silent. An open finding names the
-   * number, in the same transaction as the number itself, so the two commit or roll back together.
-   * A credit note never reaches this: its statement refuses the earlier date (T9).
-   */
-  private void recordOutOfOrder(Connection c, SeriesKey key, LegalNumber number)
-      throws SQLException {
-    Instant now = Timestamps.toStorage(clock.instant());
-    ComplianceFinding finding =
-        ComplianceFinding.of(
-            key.sellerId(), key.mode(), ErrorCodes.ISSUE_DATE_OUT_OF_ORDER, number.value(), now);
-    try (PreparedStatement ps = c.prepareStatement(RECORD_FINDING)) {
-      int i = 1;
-      ps.setString(i++, finding.sellerId());
-      ps.setString(i++, finding.mode().wire());
-      ps.setString(i++, finding.code());
-      ps.setString(i++, finding.subjectId());
-      ps.setObject(i++, ts(finding.firstSeen()));
-      ps.setObject(i, ts(finding.lastSeen()));
-      ps.executeUpdate();
-    }
-    log.warn(
-        "einvoice: invoice {} in series {} is dated before the latest date that series already"
-            + " numbered; numbered anyway and recorded as finding {}",
-        number.value(),
-        key.series(),
-        ErrorCodes.ISSUE_DATE_OUT_OF_ORDER);
   }
 
   /**
@@ -571,7 +933,7 @@ public final class JdbcIssuanceStore
    * lock is needed for this to stay true; the cap on what a credit may credit is not this method's
    * job.
    */
-  private static void requireCorrectableInvoice(Connection c, SeriesKey key, long targetId)
+  private static void requireCorrectableInvoice(Connection c, SeriesScope key, long targetId)
       throws SQLException {
     String legalNumber;
     String sha;
@@ -618,7 +980,16 @@ public final class JdbcIssuanceStore
     return value == null ? "" : value.strip();
   }
 
-  private EInvoiceException exhaustedOutOfOrderOrUnconfigured(
+  private static EInvoiceException exhausted(SeriesDefinition definition) {
+    return new EInvoiceException(
+        ErrorCodes.SERIES_EXHAUSTED,
+        "this numbering series has handed out every number its configured width of "
+            + definition.width()
+            + " can render. Widening it changes the format of a legal number mid-series, so"
+            + " it needs an operator's decision and a new series, not a wider pad.");
+  }
+
+  private EInvoiceException exhaustedOrOutOfOrder(
       Connection c, SeriesKey key, SeriesDefinition definition, LocalDate issueDate)
       throws SQLException {
     try (PreparedStatement ps = c.prepareStatement(READ_SERIES)) {
@@ -626,19 +997,14 @@ public final class JdbcIssuanceStore
       try (ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
           LocalDate last = rs.getObject("last_issue_date", LocalDate.class);
-          if (key.documentType().isCreditNote() && last != null && issueDate.isBefore(last)) {
+          if (last != null && issueDate.isBefore(last)) {
             return new EInvoiceException(
                 ErrorCodes.ISSUE_DATE_OUT_OF_ORDER,
                 "this credit note is dated before the latest date its series already numbered;"
                     + " numbering it would make the dates of the series go backwards. Void it"
                     + " upstream and create a new one, which takes today's date.");
           }
-          return new EInvoiceException(
-              ErrorCodes.SERIES_EXHAUSTED,
-              "this numbering series has handed out every number its configured width of "
-                  + definition.width()
-                  + " can render. Widening it changes the format of a legal number mid-series, so"
-                  + " it needs an operator's decision and a new series, not a wider pad.");
+          return exhausted(definition);
         }
       }
     }
@@ -649,12 +1015,12 @@ public final class JdbcIssuanceStore
 
   private Issuance insertIssuance(
       Connection c,
+      SeriesKey key,
       AllocationRequest request,
       LegalNumber number,
-      Instant allocatedAt,
-      Optional<Long> correctsIssuanceId)
+      Optional<Long> correctsIssuanceId,
+      IssueDating dating)
       throws SQLException {
-    SeriesKey key = request.seriesKey();
     try (PreparedStatement ps = c.prepareStatement(INSERT_ISSUANCE)) {
       int i = 1;
       ps.setString(i++, key.sellerId());
@@ -667,15 +1033,16 @@ public final class JdbcIssuanceStore
       ps.setString(i++, number.value());
       ps.setLong(i++, number.counter());
       ps.setObject(i++, ts(Timestamps.toStorage(request.issuedAt())));
-      ps.setObject(i++, ts(allocatedAt));
+      ps.setObject(i++, ts(dating.allocatedAt()));
       ps.setString(i++, request.rulePackVersion());
       ps.setString(i++, IssuanceState.NUMBERED.name());
       ps.setString(i++, key.documentTypeCode());
       if (correctsIssuanceId.isPresent()) {
-        ps.setLong(i, correctsIssuanceId.get());
+        ps.setLong(i++, correctsIssuanceId.get());
       } else {
-        ps.setNull(i, java.sql.Types.BIGINT);
+        ps.setNull(i++, java.sql.Types.BIGINT);
       }
+      bindDating(ps, i, Optional.of(dating));
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
         return new Issuance(
@@ -686,14 +1053,15 @@ public final class JdbcIssuanceStore
             request.stripeNumber(),
             number,
             Timestamps.toStorage(request.issuedAt()),
-            allocatedAt,
+            dating.allocatedAt(),
             "",
             "",
             request.rulePackVersion(),
             IssuanceState.NUMBERED,
             "",
             "",
-            correctsIssuanceId);
+            correctsIssuanceId,
+            Optional.of(dating));
       }
     } catch (SQLException e) {
       if ("EIT01".equals(e.getSQLState())) {
@@ -729,6 +1097,52 @@ public final class JdbcIssuanceStore
     }
   }
 
+  /** The dating columns, in {@link #DATING_COLUMNS} order: shared by the row and the event. */
+  private static int bindDating(PreparedStatement ps, int start, Optional<IssueDating> dating)
+      throws SQLException {
+    int i = start;
+    IssueDating d = dating.orElse(null);
+    ps.setObject(i++, d == null ? null : d.issueDate(), java.sql.Types.DATE);
+    ps.setObject(i++, d == null ? null : d.supplyDate().orElse(null), java.sql.Types.DATE);
+    ps.setObject(
+        i++,
+        d == null ? null : d.supplyPeriod().map(SupplyPeriod::start).orElse(null),
+        java.sql.Types.DATE);
+    ps.setObject(
+        i++,
+        d == null ? null : d.supplyPeriod().map(SupplyPeriod::end).orElse(null),
+        java.sql.Types.DATE);
+    ps.setString(i++, d == null ? "" : d.previousNumber().orElse(""));
+    ps.setObject(i++, d == null ? null : d.previousIssueDate().orElse(null), java.sql.Types.DATE);
+    ps.setString(i++, d == null ? "" : d.cause().map(DateGapCause::wire).orElse(""));
+    return i;
+  }
+
+  /** The dating a row or an event carries; empty for one written before 0.2.0. */
+  private static Optional<IssueDating> readDating(ResultSet rs, Instant allocatedAt)
+      throws SQLException {
+    LocalDate issueDate = rs.getObject("issue_date", LocalDate.class);
+    if (issueDate == null || allocatedAt == null) {
+      return Optional.empty();
+    }
+    LocalDate start = rs.getObject("supply_period_start", LocalDate.class);
+    LocalDate end = rs.getObject("supply_period_end", LocalDate.class);
+    String cause = rs.getString("date_gap_cause");
+    return Optional.of(
+        new IssueDating(
+            issueDate,
+            allocatedAt,
+            Optional.ofNullable(rs.getObject("supply_date", LocalDate.class)),
+            start == null && end == null
+                ? Optional.empty()
+                : Optional.of(new SupplyPeriod(start, end)),
+            Optional.ofNullable(rs.getString("prev_legal_number")),
+            Optional.ofNullable(rs.getObject("prev_issue_date", LocalDate.class)),
+            cause == null || cause.isEmpty()
+                ? Optional.empty()
+                : Optional.of(DateGapCause.of(cause))));
+  }
+
   /**
    * Opens a series row if it does not exist yet, outside any allocation.
    *
@@ -751,6 +1165,80 @@ public final class JdbcIssuanceStore
           refuseIfRowDisagreesWithConfiguration(c, key, definition);
           return null;
         });
+  }
+
+  static final String SERIES_DATES_UNTRUSTED =
+      "SELECT seller_id, mode, document_type, series, fiscal_year, next_number, last_issue_date"
+          + " FROM einvoice_series WHERE seller_id = ANY (?)"
+          + " AND ((last_issue_date IS NULL AND next_number > 1) OR last_issue_date > ?)"
+          + " ORDER BY seller_id, mode, document_type, series, fiscal_year";
+
+  /**
+   * The startup half of design 5.4 and 5.8 (D-PS1-42): refuses to start when a configured seller's
+   * series carries a latest issue date more than one day after today on the database clock, with
+   * {@link ErrorCodes#SERIES_DATE_IN_FUTURE} and a finding per series, or has numbered rows and no
+   * latest date, with {@link ErrorCodes#SCHEMA_UPGRADE_REFUSED}. The same checks run before every
+   * allocation; this one makes the condition visible before the first invoice is refused.
+   *
+   * <p>On the {@code DataSource}, like {@link #openSeries(SeriesKey)}: it runs before a host
+   * transaction exists.
+   */
+  public void checkSeriesDates() {
+    String[] sellers =
+        series.keySet().stream().map(SeriesId::sellerId).distinct().sorted().toArray(String[]::new);
+    if (sellers.length == 0) {
+      return;
+    }
+    List<ComplianceFinding> future = new ArrayList<>();
+    boolean missing =
+        JdbcSupport.withConnection(
+            dataSource,
+            c -> {
+              LocalDate today = dayOf(issueClock.read(c));
+              boolean anyMissing = false;
+              try (PreparedStatement ps = c.prepareStatement(SERIES_DATES_UNTRUSTED)) {
+                ps.setArray(1, c.createArrayOf("varchar", sellers));
+                ps.setObject(2, today.plusDays(1));
+                try (ResultSet rs = ps.executeQuery()) {
+                  while (rs.next()) {
+                    SeriesKey key =
+                        new SeriesKey(
+                            rs.getString("seller_id"),
+                            rs.getString("series"),
+                            rs.getInt("fiscal_year"),
+                            Mode.of(rs.getString("mode")),
+                            DocumentTypeCode.of(rs.getString("document_type")));
+                    if (rs.getObject("last_issue_date", LocalDate.class) == null) {
+                      anyMissing = true;
+                    } else {
+                      future.add(seriesFinding(key, ErrorCodes.SERIES_DATE_IN_FUTURE));
+                    }
+                  }
+                }
+              }
+              return anyMissing;
+            });
+    recordOutsideTheAllocation(future);
+    if (missing) {
+      throw new EInvoiceException(
+          ErrorCodes.SCHEMA_UPGRADE_REFUSED,
+          "a numbering series has numbered rows and no latest issue date, so the order of its"
+              + " dates cannot be checked. Run the bundled schema script with einvoice.tax_zone"
+              + " set.");
+    }
+    if (!future.isEmpty()) {
+      throw new EInvoiceException(
+          ErrorCodes.SERIES_DATE_IN_FUTURE,
+          future.size()
+              + " numbering series carry a latest issue date more than one day after today on the"
+              + " database clock (findings "
+              + ErrorCodes.SERIES_DATE_IN_FUTURE
+              + " name them). First check the database and application clocks against an"
+              + " external time source (NTP): if both stepped back together, fix them and"
+              + " restart, and do not touch the series. Only if both clocks are right, look in"
+              + " the issuance chain for who moved each row, then correct last_issue_date as the"
+              + " schema owner with a recorded reason.");
+    }
   }
 
   /**
@@ -843,7 +1331,10 @@ public final class JdbcIssuanceStore
                   IssuanceState.VOID_UNUSED,
                   request.reason(),
                   request.ruleId(),
-                  issuance.correctsIssuanceId());
+                  issuance.correctsIssuanceId(),
+                  // The void event carries the dates the number was given with, like every other
+                  // event of the number; the verifier compares them with the row (D-PR36-2).
+                  issuance.dating());
           appendEvent(unit, voided, IssuanceEvent.voided(voided, clock.instant()));
           return voided;
         });
@@ -1077,8 +1568,9 @@ public final class JdbcIssuanceStore
                 + " issued_at, document_sha256, archive_key, rule_pack_version, void_reason,"
                 + " void_rule_id, chain_version, key_id, prev_hash, hash, document_type,"
                 + " corrects_issuance_id, corrects_seller_id, corrects_mode, corrects_series,"
-                + " corrects_fiscal_year, corrects_legal_number)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                + " corrects_fiscal_year, corrects_legal_number, allocated_at, "
+                + DATING_COLUMNS
+                + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       int i = 1;
       ps.setObject(i++, ts(linked.timestamp()));
       ps.setString(i++, linked.seriesKey().sellerId());
@@ -1110,15 +1602,17 @@ public final class JdbcIssuanceStore
         ps.setString(i++, t.mode().wire());
         ps.setString(i++, t.series());
         ps.setInt(i++, t.fiscalYear());
-        ps.setString(i, t.legalNumber());
+        ps.setString(i++, t.legalNumber());
       } else {
         ps.setNull(i++, java.sql.Types.BIGINT);
         ps.setNull(i++, java.sql.Types.VARCHAR);
         ps.setNull(i++, java.sql.Types.VARCHAR);
         ps.setNull(i++, java.sql.Types.VARCHAR);
         ps.setNull(i++, java.sql.Types.INTEGER);
-        ps.setNull(i, java.sql.Types.VARCHAR);
+        ps.setNull(i++, java.sql.Types.VARCHAR);
       }
+      ps.setObject(i++, ts(linked.dating().map(IssueDating::allocatedAt).orElse(null)));
+      bindDating(ps, i, linked.dating());
       ps.executeUpdate();
     }
   }
@@ -1221,6 +1715,7 @@ public final class JdbcIssuanceStore
           Connection c = unit.connection();
           List<SeriesReport.Line> lines = new ArrayList<>();
           long open = 0;
+          LocalDate latest = null;
           try (PreparedStatement ps = c.prepareStatement(SERIES_LINES)) {
             bindSeriesKey(ps, 1, key);
             try (ResultSet rs = ps.executeQuery()) {
@@ -1229,16 +1724,28 @@ public final class JdbcIssuanceStore
                 if (state.open()) {
                   open++;
                 }
+                Instant issuedAt = instant(rs.getObject("issued_at", OffsetDateTime.class));
+                Instant allocatedAt = instant(rs.getObject("allocated_at", OffsetDateTime.class));
+                Optional<IssueDating> dating = readDating(rs, allocatedAt);
+                // BT-2 as the document carries it: the numbering day, or on a 0.1.x line the
+                // finalisation day, which is how a late 0.1.x number carried an earlier date.
+                LocalDate issueDate =
+                    dating.map(IssueDating::issueDate).orElseGet(() -> dayOf(issuedAt));
+                boolean outOfOrder = latest != null && issueDate.isBefore(latest);
+                latest = latest == null || issueDate.isAfter(latest) ? issueDate : latest;
                 lines.add(
                     new SeriesReport.Line(
                         rs.getLong("counter"),
                         rs.getString("legal_number"),
                         state,
                         rs.getString("stripe_invoice_id"),
-                        instant(rs.getObject("issued_at", OffsetDateTime.class)),
-                        instant(rs.getObject("allocated_at", OffsetDateTime.class)),
+                        issuedAt,
+                        allocatedAt,
                         rs.getString("void_reason"),
-                        rs.getString("void_rule_id")));
+                        rs.getString("void_rule_id"),
+                        issueDate,
+                        dating,
+                        outOfOrder));
               }
             }
           }
@@ -1268,7 +1775,9 @@ public final class JdbcIssuanceStore
                       + " issued_at, document_sha256, archive_key, rule_pack_version, void_reason,"
                       + " void_rule_id, chain_version, key_id, prev_hash, hash, document_type,"
                       + " corrects_issuance_id, corrects_seller_id, corrects_mode,"
-                      + " corrects_series, corrects_fiscal_year, corrects_legal_number"
+                      + " corrects_series, corrects_fiscal_year, corrects_legal_number,"
+                      + " allocated_at, "
+                      + DATING_COLUMNS
                       + " FROM einvoice_issuance_event WHERE seq > ? ORDER BY seq LIMIT ?")) {
             ps.setLong(1, sequenceExclusive);
             ps.setInt(2, limit);
@@ -1296,7 +1805,9 @@ public final class JdbcIssuanceStore
                       "SELECT i.seller_id, i.mode, i.series, i.fiscal_year, i.stripe_invoice_id,"
                           + " i.legal_number, i.state, i.void_reason, i.void_rule_id,"
                           + " i.document_type, t.id, t.seller_id, t.mode, t.series,"
-                          + " t.fiscal_year, t.legal_number"
+                          + " t.fiscal_year, t.legal_number, i.allocated_at, i.issue_date,"
+                          + " i.supply_date, i.supply_period_start, i.supply_period_end,"
+                          + " i.prev_legal_number, i.prev_issue_date, i.date_gap_cause"
                           + " FROM einvoice_issuance i"
                           + " LEFT JOIN einvoice_issuance t ON t.id = i.corrects_issuance_id"
                           + " WHERE i.state IN ("
@@ -1316,7 +1827,10 @@ public final class JdbcIssuanceStore
                       rs.getString(8),
                       rs.getString(9),
                       rs.getString(10),
-                      targetIdentity(rs, 11)));
+                      targetIdentity(rs, 11),
+                      IssueDating.identity(
+                          readDating(
+                              rs, instant(rs.getObject("allocated_at", OffsetDateTime.class))))));
             }
           }
           return disposed;
@@ -1420,7 +1934,8 @@ public final class JdbcIssuanceStore
         IssuanceState.of(rs.getString("state")),
         rs.getString("void_reason"),
         rs.getString("void_rule_id"),
-        correctsIssuanceId);
+        correctsIssuanceId,
+        readDating(rs, instant(rs.getObject("allocated_at", OffsetDateTime.class))));
   }
 
   /**
@@ -1497,7 +2012,8 @@ public final class JdbcIssuanceStore
         rs.getString("key_id"),
         rs.getString("prev_hash"),
         rs.getString("hash"),
-        target);
+        target,
+        readDating(rs, instant(rs.getObject("allocated_at", OffsetDateTime.class))));
   }
 
   /**

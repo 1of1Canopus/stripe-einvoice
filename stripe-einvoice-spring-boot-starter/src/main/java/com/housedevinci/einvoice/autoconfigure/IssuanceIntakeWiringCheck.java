@@ -130,6 +130,22 @@ final class IssuanceIntakeWiringCheck implements InitializingBean {
                 + " a processor to the application, or set einvoice.issuance.enabled=false to run"
                 + " the numbering API only.");
       }
+      // D-PS1-44: the same class again. A renderer that cannot carry the supply date would see
+      // every invoice refused with DEI-280; that is a fact about the application, so it is told at
+      // startup, by name, rather than once per invoice.
+      DocumentRenderer renderer = beanFactory.getBean(DocumentRenderer.class);
+      if (!renderer.carriesSupplyDate() && intakeIsConfigured()) {
+        throw new EInvoiceException(
+            ErrorCodes.SUPPLY_DATE_NOT_CARRIED,
+            "einvoice.stripe.webhook-secrets is configured, or einvoice.issuance.enabled is"
+                + " explicitly true, so this application is set up to receive Stripe events - but"
+                + " the configured DocumentRenderer does not declare carriesSupplyDate(). An"
+                + " invoice is dated on the day its number is given, so a document without its"
+                + " supply date (BT-72) or invoicing period (BG-14) would hide when the sale"
+                + " happened, and every invoice would be refused. Write the supply fields of"
+                + " DocumentInput and return true from carriesSupplyDate(), or set"
+                + " einvoice.issuance.enabled=false to run the numbering API only.");
+      }
       return;
     }
     String missing = missingBeans(hasRenderer, hasValidator, hasSource);

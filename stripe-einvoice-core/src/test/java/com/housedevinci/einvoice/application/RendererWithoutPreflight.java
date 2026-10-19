@@ -6,6 +6,10 @@ package com.housedevinci.einvoice.application;
  * takes it.
  */
 public final class RendererWithoutPreflight implements DocumentRenderer {
+  @Override
+  public boolean carriesSupplyDate() {
+    return true;
+  }
 
   private final DeterministicRenderer delegate = new DeterministicRenderer();
 

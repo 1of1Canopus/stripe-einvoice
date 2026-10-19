@@ -70,10 +70,23 @@ class ConcurrentAllocationTest {
       throws Exception {
     // N-01's concurrent case: two fiscal years are opened by racing allocations, with no restart
     // and no startup seed. Both must start at 1 and neither may skip.
+    // Since D-PS1-41 the fiscal year is the numbering day's, so the two sides of the boundary are
+    // two application instances whose clocks sit on either side of midnight, sharing one database.
     String seller = PostgresSupport.freshSeller("boundary");
-    JdbcIssuanceStore store = PostgresSupport.store(seller, SIX, CLOCK, CHAIN);
-    Instant lastOfYear = Instant.parse("2026-12-31T23:59:30Z");
+    Instant lastOfYear = Instant.parse("2026-12-31T23:49:30Z");
     Instant firstOfYear = Instant.parse("2027-01-01T00:00:30Z");
+    JdbcIssuanceStore before =
+        PostgresSupport.store(
+            seller,
+            SIX,
+            java.time.Clock.fixed(lastOfYear.plusSeconds(30), java.time.ZoneOffset.UTC),
+            CHAIN);
+    JdbcIssuanceStore after =
+        PostgresSupport.store(
+            seller,
+            SIX,
+            java.time.Clock.fixed(firstOfYear.plusSeconds(10), java.time.ZoneOffset.UTC),
+            CHAIN);
     ConcurrentLinkedQueue<String> allocated = new ConcurrentLinkedQueue<>();
     CountDownLatch start = new CountDownLatch(1);
     CountDownLatch done = new CountDownLatch(50);
@@ -88,17 +101,17 @@ class ConcurrentAllocationTest {
                 start.await();
                 SeriesKey key = new SeriesKey(seller, "DEFAULT", newYear ? 2027 : 2026, Mode.LIVE);
                 Issuance issuance =
-                    store.allocate(
-                        new AllocationRequest(
-                            key,
-                            "in_boundary_" + n,
-                            "",
-                            "STRIPE",
-                            newYear ? firstOfYear : lastOfYear,
-                            java.time.LocalDate.ofInstant(
-                                newYear ? firstOfYear : lastOfYear, java.time.ZoneOffset.UTC),
-                            "fr"));
-                allocated.add(key.fiscalYear() + ":" + issuance.legalNumber().counter());
+                    (newYear ? after : before)
+                        .allocate(
+                            new AllocationRequest(
+                                key.scope(),
+                                "in_boundary_" + n,
+                                "",
+                                "STRIPE",
+                                newYear ? firstOfYear : lastOfYear,
+                                "fr"));
+                allocated.add(
+                    issuance.seriesKey().fiscalYear() + ":" + issuance.legalNumber().counter());
               } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
               } finally {
@@ -184,7 +197,7 @@ class ConcurrentAllocationTest {
               }
             });
     JdbcIssuanceStore store =
-        new JdbcIssuanceStore(
+        TestStores.store(
             failing,
             CHAIN,
             Map.of(new JdbcIssuanceStore.SeriesId(seller, "DEFAULT", Mode.LIVE), SIX),
@@ -223,7 +236,7 @@ class ConcurrentAllocationTest {
               }
             });
     JdbcIssuanceStore store =
-        new JdbcIssuanceStore(
+        TestStores.store(
             killing,
             CHAIN,
             Map.of(new JdbcIssuanceStore.SeriesId(seller, "DEFAULT", Mode.LIVE), SIX),
