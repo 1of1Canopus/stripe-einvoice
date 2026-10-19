@@ -199,7 +199,26 @@ module is where that is set out.
   runner that goes on after an error cannot mark an unfinished upgrade as format 2: the stamp sits
   in one final block that first checks every format-2 condition and refuses with `EIU03`
   (`DEI-134`) otherwise.
-- **The two insert guards read tables through the trigger's own schema.** A temporary table of the
+- **A series name is bound to its type by keys, not by a read (D-A1-C03).** The table
+  `einvoice_series_name` has one row per seller, mode and series name, and every series row points
+  at it through a foreign key that includes the document type. A check that reads rows inside a
+  trigger cannot see another transaction's uncommitted row, so it raced; a primary key does not.
+  The foreign key's own checks stay on after `DISABLE TRIGGER <name>` and `DISABLE TRIGGER USER`.
+  Only `DISABLE TRIGGER ALL` (superuser) or dropping the constraint turns them off, and the final
+  block of the script then refuses the format-2 stamp. The key is not tamper-proof against the table
+  owner: with both tables' guards disabled, one statement that rewrites the name row and its series
+  rows together passes it, because the key is checked at the end of the statement. The chain
+  verifier reports that rewrite as BROKEN. Run the application as a role that
+  owns nothing. Under REPEATABLE READ or SERIALIZABLE, a concurrent transaction can conflict with
+  the opening of a series: two transactions that open one new series, or two that open different
+  new series. The later one is aborted and ends as `DEI-117` ("a concurrent transaction conflicted
+  with this one while the series was being opened"); a host transaction that joined the allocator
+  retries itself.
+- **`EIU04` means the database was written by an unreleased build.** This database was written by
+  an unreleased build and binds a series name to two document types; rebuild it, or restore its
+  0.1.x copy, then start again. A 0.1.x database cannot hit it: every row there is an invoice. The
+  upgrade never picks one of the two types.
+- **The insert guard reads tables through the trigger's own schema.** A temporary table of the
   same name, which the runtime role may create, cannot stand in for the real one. Any later guard
   that reads a table must qualify it with `TG_TABLE_SCHEMA`.
 - **The backfill zone must be `UTC` or a region id with a slash.** An offset id such as `+02:00`
