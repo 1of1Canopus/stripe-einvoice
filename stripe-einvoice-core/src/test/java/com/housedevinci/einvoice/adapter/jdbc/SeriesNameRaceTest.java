@@ -36,6 +36,7 @@ import java.util.concurrent.TimeoutException;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
@@ -149,6 +150,25 @@ class SeriesNameRaceTest {
     return "none";
   }
 
+  /**
+   * A one-connection pool whose session pins how the foreign-key check reads the name table: a new
+   * backend, so no cached plan from another test applies.
+   */
+  private static HikariDataSource planned(String plan) {
+    HikariConfig config = new HikariConfig();
+    config.setJdbcUrl(PostgresSupport.jdbcUrl());
+    config.setUsername(PostgresSupport.username());
+    config.setPassword(PostgresSupport.password());
+    config.setMaximumPoolSize(1);
+    switch (plan) {
+      case "index" -> config.setConnectionInitSql("SET enable_seqscan = off");
+      case "seqscan" ->
+          config.setConnectionInitSql("SET enable_indexscan = off; SET enable_bitmapscan = off");
+      default -> {}
+    }
+    return new HikariDataSource(config);
+  }
+
   // ------------------------------------------------------------------ test 1 at three levels
 
   /**
@@ -201,23 +221,41 @@ class SeriesNameRaceTest {
   /**
    * Test 1b, the real raw-insert shape (R2): each writer inserts its name row and its year row in
    * one transaction. The second writer read the name key before the first committed, so its
-   * snapshot cannot show the first writer's row. It waits on the primary key while the first holds,
-   * then fails with {@code 23505} at every level (C4, measured), and the committed state is one
-   * name row of type {@code 380} and one year row.
+   * snapshot cannot show the first writer's row. It is seen waiting on the primary key while the
+   * first holds, and fails when the first commits. The committed state is one name row of type
+   * {@code 380} and one year row.
+   *
+   * <p>Which refusal (D-C03-B8): {@code 23505} at READ COMMITTED and REPEATABLE READ. At
+   * SERIALIZABLE it depends on how the first writer's foreign-key check (for its year row) read the
+   * name table, and the planner picks that from table size and statistics. Measured on the pinned
+   * image, 10 of 10 runs each: with an index scan the check's predicate locks are on index pages
+   * and the first writer's own row, and the second writer gets {@code 23505}; with a sequential
+   * scan the check locks the whole name table, the second writer's heap insert meets that lock, and
+   * with its earlier read of the first writer's uncommitted row that is a cycle, so it gets {@code
+   * 40001}. CI's large shared table took the sequential scan; small local runs took the index. Both
+   * are refusals. The test pins the plan in the first writer's own new session so each row has one
+   * answer.
    */
   @ParameterizedTest
-  @ValueSource(
-      ints = {
-        Connection.TRANSACTION_READ_COMMITTED,
-        Connection.TRANSACTION_REPEATABLE_READ,
-        Connection.TRANSACTION_SERIALIZABLE
-      })
-  void one_series_name_never_binds_two_types_when_each_writer_inserts_name_and_year_rows(int level)
-      throws Exception {
+  @CsvSource({
+    "READ_COMMITTED, default, 23505",
+    "REPEATABLE_READ, default, 23505",
+    "SERIALIZABLE, index, 23505",
+    "SERIALIZABLE, seqscan, 40001"
+  })
+  void one_series_name_never_binds_two_types_when_each_writer_inserts_name_and_year_rows(
+      String isolation, String plan, String expected) throws Exception {
+    int level =
+        switch (isolation) {
+          case "READ_COMMITTED" -> Connection.TRANSACTION_READ_COMMITTED;
+          case "REPEATABLE_READ" -> Connection.TRANSACTION_REPEATABLE_READ;
+          default -> Connection.TRANSACTION_SERIALIZABLE;
+        };
     String seller = PostgresSupport.freshSeller("c03t1b");
     DataSource ds = PostgresSupport.dataSource();
     String outcome;
-    try (Connection first = host(ds, level)) {
+    try (HikariDataSource firstPool = planned(plan);
+        Connection first = host(firstPool, level)) {
       exec(first, nameRow(seller, "380"));
       exec(first, yearRow(seller, "380", 2026));
       CompletableFuture<String> second =
@@ -249,7 +287,7 @@ class SeriesNameRaceTest {
       first.commit();
       outcome = second.get(WAIT.toSeconds(), TimeUnit.SECONDS);
     }
-    assertThat(outcome).as("C4, measured at every level").isEqualTo("23505");
+    assertThat(outcome).as("C4, measured per level and plan").isEqualTo(expected);
     assertThat(
             count(
                 "SELECT count(*) FROM einvoice_series_name WHERE seller_id = '"
