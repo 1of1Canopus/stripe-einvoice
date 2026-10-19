@@ -158,8 +158,8 @@ the same lock (see "The issue date is the numbering day").
 
 Per `(seller, series, fiscal year, mode)`, every allocated number with:
 
-- its disposition: `ISSUED`, `VOID_UNUSED` with its reason and rule id, or still open (`NUMBERED`,
-  `ARCHIVING`, `FAILED_ARCHIVE`);
+- its disposition: `ISSUED`, `VOID_UNUSED` with its reason and rule id, `FAILED_VALIDATION` with
+  its rule id, or still open (`NUMBERED`, `ARCHIVING`, `FAILED_ARCHIVE`);
 - the issue date (BT-2), the supply date or period, the allocation timestamp, and the cause of any
   day between supply and issue;
 - the Stripe invoice id it is bound to.
@@ -174,7 +174,7 @@ document, and both belong on the page.
 
 - **Privileged, and with no HTTP endpoint anywhere in this module.** Expose it yourself, behind your
   own authorization, or not at all.
-- Legal only from `NUMBERED`, `ARCHIVING` or `FAILED_VALIDATION`. From `ISSUED` it is refused twice:
+- Legal only from `NUMBERED`, `ARCHIVING`, `FAILED_ARCHIVE` or `FAILED_VALIDATION`. From `ISSUED` it is refused twice:
   by the state enum and by the database trigger.
 - The reason is mandatory, screened (NFC, no control characters beyond tab/newline/carriage return,
   no unpaired surrogates, not blank after collapsing, bounded at 500 characters) and length-bounded.
@@ -327,6 +327,7 @@ One Stripe event becomes one archived document, or none, and there is a record e
 | P1 claim | The legal number, in one transaction with the issuance row | Nothing: every data refusal already happened |
 | P2 render | The exact bytes, then validation of those exact bytes | `FAILED_VALIDATION` on the issuance row and a chained event carrying the rule id, for the operator's void |
 | P3 write | `ARCHIVING` with the hash and key, then the write-once PUT | `FAILED_ARCHIVE`; an outage is retried, a content conflict is not |
+| Resume | A row in `ARCHIVING` or `FAILED_ARCHIVE` with a recorded hash reads its own key before it renders | Same bytes: `ISSUED`, no render. Other bytes: `DEI-240`, not retried. Read failure: `FAILED_ARCHIVE`, retried. No object: P2 again, and a refusal is `FAILED_VALIDATION` with the first hash kept on the row |
 | P4 issue | `ISSUED` and the chained disposition, one transaction | Back to P3 on the retry, byte-identical, no second number |
 
 ## Replaying a refused event

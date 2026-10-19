@@ -95,6 +95,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A refusal on a resumed run is recorded (QUESTIONS 38, D-DD-B1).** A run that resumed a row in
+  `ARCHIVING` or `FAILED_ARCHIVE` and was then refused by the validator, the date check or the
+  renderer ended on `DEI-113` (illegal transition), with the number still open and re-enqueued by
+  the sweep. Two new edges, `ARCHIVING -> FAILED_VALIDATION` and `FAILED_ARCHIVE ->
+  FAILED_VALIDATION`, in the enum and in the database trigger, burn the number with its rule id
+  and a chained event. Example: `F-2026-0042`'s archive write times out on 10 January; after an
+  upgrade the retry renders BT-2 = 3 January; the event now ends on `DEI-250` with
+  `EINVOICE-DATES`, the row is `FAILED_VALIDATION`, and the sweep reports `DEI-279` instead of
+  re-enqueueing it.
+- **A resumed row reads its own archive key before it renders.** Same bytes as recorded: the number
+  is issued with no render, because the document already exists. Other bytes: `DEI-240`. A read
+  failure: retried, never a burn. No object: the run renders and checks again. A burn of a row that
+  had recorded a hash keeps that hash and logs both hashes at WARN.
+- **A burn writes the rule id and nothing else.** The trigger refuses a move to
+  `FAILED_VALIDATION` that also changes the document hash, the archive key or the void reason; the
+  void reason changes only with a move to `VOID_UNUSED`.
 - The reference guard now refuses the moved-private document names in any letter case (for
   example a lower-case copy of a private document), in content and in file names. The bare
   review and release words stay upper case only, because in lower case they are plain English.

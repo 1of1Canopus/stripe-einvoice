@@ -124,11 +124,35 @@ re-picked automatically, because neither is cured by an upgrade.
 | A refusal consumes no number | Every refusal that depends on data happens before the allocator is called |
 | One number never names two documents | The archive key carries the SHA-256 of the exact bytes and the store is write-once; the same input renders the same bytes under any time zone and any locale |
 | A crash leaves something a retry can finish | Four phases, each with a recorded state: claim, render, write (the row predicts the object before the PUT), issue (state and chained disposition in one transaction). A disposition a retry cannot finish - a burned number, a voided one - is recorded with its code instead of being retried |
+| A resumed run never burns a number whose document exists | A row that recorded its hash reads its own archive key before it renders again. Same bytes: the number is issued, with no render. Other bytes: a content conflict (`DEI-240`). The read fails: retried later. No object: the run renders, validates and checks dates again, and a refusal burns the number with its rule id |
 | A store that quietly overwrites is refused | At startup, with a real conditional write against a scratch key - not on the strength of a capability flag |
 | A sale with no document is noticed | A reconciliation sweep lists what Stripe finalised and re-enqueues anything with no issued document **and no recorded reason for it**, through the same idempotent path. A number that was burned or voided already has its reason, chained: it is reported under its own code and never re-enqueued. The sweep alerts and never repairs |
 | A redelivery returns the stored document | After checking the archived bytes against the recorded hash. A tampered archive is refused; a legitimate upstream edit is not |
 | Back-pressure costs latency, never an event | A bounded queue and a concurrency limit below your connection pool; past capacity the event stays `RECEIVED` and the sweeper takes it |
 | Buyer data has a retention | The raw signed bodies are nulled the moment an event can no longer run, and purged at `einvoice.inbound.retention` |
+
+### Issuance states
+
+| From | May move to |
+|---|---|
+| `NUMBERED` | `ARCHIVING`, `FAILED_ARCHIVE`, `FAILED_VALIDATION`, `VOID_UNUSED` |
+| `ARCHIVING` | `ISSUED`, `FAILED_ARCHIVE`, `FAILED_VALIDATION`, `VOID_UNUSED` |
+| `FAILED_ARCHIVE` | `ARCHIVING`, `FAILED_VALIDATION`, `VOID_UNUSED` |
+| `FAILED_VALIDATION` | `VOID_UNUSED` |
+| `ISSUED`, `VOID_UNUSED` | nothing |
+
+The same table is enforced twice: by the Java enum and by the database trigger.
+
+`FAILED_VALIDATION` is a burned number: the document was refused, the rule id is on the row and in
+the chain, and an operator voids it. The unit of work takes it from `ARCHIVING` or
+`FAILED_ARCHIVE` only when a resumed run found no object at the row's archive key (or the row had
+no key yet). The row then keeps any hash it recorded the first time. **That hash names the first bytes, which passed and were never archived; the rule
+id names the refusal of the later bytes.** The run logs both hashes at WARN, never the content.
+
+Example. `F-2026-0042` is numbered on 10 January. The archive write times out and nothing lands.
+The host upgrades; the retry renders BT-2 = 3 January; `EINVOICE-DATES` refuses. The event ends on
+`DEI-250` with that rule id, the row is `FAILED_VALIDATION`, nothing is archived, and the sweep
+reports `DEI-279` until an operator voids the number.
 
 ### What it needs from you
 
