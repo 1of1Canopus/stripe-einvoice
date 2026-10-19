@@ -158,6 +158,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- **One series name, one document type, under concurrent writers (D-A1-C03).** A series name was
+  bound to one type by a check inside the insert trigger. That check could not see a row another
+  transaction had not committed yet, so two writers that created series `RACE` for 2026 as an
+  invoice and for 2027 as a credit note at the same instant both committed. A new table,
+  `einvoice_series_name`, now holds one row per seller, mode and series name, with its type. Its
+  primary key makes a second writer of the same name wait and fail, at every isolation level, and
+  a foreign key from every series row carries the type. The race-prone check in the trigger is
+  gone. What the losing writer sees: `DEI-100` naming the series at READ COMMITTED; `DEI-117`
+  (retryable, fixed message) at REPEATABLE READ and SERIALIZABLE, where PostgreSQL aborts the
+  transaction. A raw insert of a series row of the other type fails on the foreign key (`23503`).
+  The runtime role needs the new grant `SELECT, INSERT` on `einvoice_series_name`
+  (`docs/schema-grants.sql`). The upgrade fills one name row per existing name, and refuses with
+  `EIU04` (`DEI-134`), changing nothing, a database that already binds one name to two types; only
+  an unreleased build can have written one. The final block of the script checks the name table,
+  its two guard triggers, and that the foreign key exists, carries the type, is validated and has
+  its own triggers enabled. An extra unique index on `einvoice_series_name` that its primary key
+  does not imply is refused with `DEI-136` and a fixed message, not reported as a retryable race
+  (D-PR40-4). Example: an operator adds `UNIQUE (seller_id, series)`; a seller who used `RACE` in
+  test mode gets `DEI-136` in live mode, not `DEI-117` for ever. The schema comment states the rule
+  for any further index on that table.
 - **The planted-operator exposure is stated for upgraded databases (D-ADV-1).** The exposure is
   any database where the application role may `CREATE` in schema `public`: the default on
   PostgreSQL 14 and older, and kept on 15 and newer after an upgrade or a dump restore. Only a

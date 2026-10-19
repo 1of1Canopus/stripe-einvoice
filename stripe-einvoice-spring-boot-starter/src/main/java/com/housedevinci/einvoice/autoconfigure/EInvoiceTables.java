@@ -36,6 +36,13 @@ public final class EInvoiceTables {
    */
   public static final String SCHEMA = "einvoice_schema";
 
+  /**
+   * The series names (D-A1-C03): one row per seller, mode and series name, with the one document
+   * type the name numbers. The runtime role holds {@code SELECT, INSERT}; a host entity mapped over
+   * it is refused like every other table here.
+   */
+  public static final String SERIES_NAME = "einvoice_series_name";
+
   public static final List<String> ALL =
       List.of(
           SERIES,
@@ -45,7 +52,8 @@ public final class EInvoiceTables {
           INBOUND_EVENT,
           FINDING,
           REPROCESS_REQUEST,
-          SCHEMA);
+          SCHEMA,
+          SERIES_NAME);
 
   private EInvoiceTables() {}
 

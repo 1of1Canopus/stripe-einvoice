@@ -104,7 +104,21 @@ public final class JdbcSupport {
           + "     AND tgrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_series'))"
           + " AND EXISTS (SELECT 1 FROM pg_trigger"
           + "   WHERE tgname = 'einvoice_schema_guard'"
-          + "     AND tgrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_schema'))";
+          + "     AND tgrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_schema'))"
+          // D-A1-C03: a database an unreleased build stamped at format 2 before the name table
+          // existed must run the script again, and meet its EIU04 pre-check.
+          + " AND to_regclass('einvoice_series_name') IS NOT NULL"
+          + " AND EXISTS (SELECT 1 FROM pg_trigger"
+          + "   WHERE tgname = 'einvoice_series_name_append_only'"
+          + "     AND tgrelid ="
+          + "       to_regclass(quote_ident(current_schema()) || '.einvoice_series_name'))"
+          + " AND EXISTS (SELECT 1 FROM pg_trigger"
+          + "   WHERE tgname = 'einvoice_series_name_no_truncate'"
+          + "     AND tgrelid ="
+          + "       to_regclass(quote_ident(current_schema()) || '.einvoice_series_name'))"
+          + " AND EXISTS (SELECT 1 FROM pg_constraint"
+          + "   WHERE conname = 'einvoice_series_name_fk' AND contype = 'f'"
+          + "     AND conrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_series'))";
 
   /**
    * The schema format this version of the module writes and reads: 2 since 0.2.0 (typed series, the
@@ -117,7 +131,7 @@ public final class JdbcSupport {
 
   /** This module's own SQLSTATEs raised by the schema script, mapped to {@code DEI-134}. */
   private static final java.util.Set<String> UPGRADE_REFUSALS =
-      java.util.Set.of("EIU01", "EIU02", "EIU03");
+      java.util.Set.of("EIU01", "EIU02", "EIU03", "EIU04");
 
   /** What the version row says. {@code 0} when the table exists without its row. */
   record SchemaVersion(boolean present, int formatVersion, int minCompatibleVersion) {

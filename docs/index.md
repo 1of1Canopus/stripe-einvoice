@@ -130,6 +130,14 @@ invoice, `381` for a credit note) is part of the series key, bound when the seri
 and immutable after that. One series name serves one type for a seller and mode, in every fiscal
 year, and a legal number is unique per seller and mode across all series.
 
+The binding of a name to its type lives in its own table, `einvoice_series_name`, one row per
+seller, mode and series name. Every series row points at it through a foreign key that includes the
+type. So two writers that create one name at the same instant, one as an invoice series and one as
+a credit-note series, cannot both commit, whatever their isolation level. The loser gets `DEI-100`
+naming the series at READ COMMITTED, and `DEI-117` (retryable) at REPEATABLE READ or SERIALIZABLE,
+where PostgreSQL aborts its transaction. If your own transaction joined the allocator, retry the
+whole transaction on `DEI-117`.
+
 This edition issues invoices only. The allocator refuses any other type with `DEI-123`, before it
 locks anything, because a credit-note number with no credit note behind it would be a hole in a
 legal series. The format is ready for credit notes so that adding them later changes no schema.
@@ -297,7 +305,11 @@ in place. It rewrites no number, no hash and no archived byte.
    was not upgraded stops startup with `DEI-136`.
 
 The upgrade refuses, by name and with no change, when existing rows break a format-2 rule: two rows
-of one seller and mode with the same legal number (`DEI-134`, with a count and no identifiers).
+of one seller and mode with the same legal number (`EIU01`), or one series name bound to two
+document types (`EIU04`). Both surface as `DEI-134`, with a count and no identifiers. A 0.1.x
+database cannot hit `EIU04`, because every row there is an invoice. If you see it, the database was
+written by an unreleased build and binds a series name to two document types; rebuild it, or restore
+its 0.1.x copy, then start again.
 
 Run the application as a role that does **not** own them - `docs/schema-grants.sql` has the grants.
 The triggers refuse the runtime role; nothing refuses a table owner, who can disable them, so the
