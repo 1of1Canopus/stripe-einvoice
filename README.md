@@ -154,6 +154,28 @@ The host upgrades; the retry renders BT-2 = 3 January; `EINVOICE-DATES` refuses.
 `DEI-250` with that rule id, the row is `FAILED_VALIDATION`, nothing is archived, and the sweep
 reports `DEI-279` until an operator voids the number.
 
+### Database connections: one session per connection
+
+Each issuance row is held under a session-level PostgreSQL advisory lock from the moment its
+archive write is announced until its outcome is recorded. Two workers never write and refuse the
+same number at once: the second one gets `DEI-245` and retries later.
+
+- **A pooler in transaction or statement mode is refused** (`DEI-104`), before any number is taken.
+  Under such a pooler a session lock is no lock at all. PgBouncer in session mode, or a direct
+  connection, works. There is no setting that turns this check off.
+- The connection pool needs at least two connections: the check opens two at once, the first time.
+- If a database connection dies while it holds the lock, PostgreSQL releases the lock at once. A
+  half-open TCP connection keeps it until the server notices: set `tcp_keepalives_idle`,
+  `tcp_keepalives_interval` and `tcp_keepalives_count` on the server (and `tcpKeepAlive=true` on
+  the JDBC URL) so that this takes seconds, not hours. Until then the row only retries; it is never
+  burned.
+
+### The filesystem archive and its mount point
+
+Mount the archive volume read-write and make the application fail to start when it is not mounted
+(for example a Kubernetes volume with no fallback directory). An empty directory where the volume
+should be looks like a new, empty archive to this version.
+
 ### What it needs from you
 
 The writer and the validator are the starter's, built from `einvoice.seller.*` and

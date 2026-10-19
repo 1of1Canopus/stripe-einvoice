@@ -108,6 +108,16 @@ All notable changes to this project are documented here. The format follows
   is issued with no render, because the document already exists. Other bytes: `DEI-240`. A read
   failure: retried, never a burn. No object: the run renders and checks again. A burn of a row that
   had recorded a hash keeps that hash and logs both hashes at WARN.
+- **Two workers can no longer burn a number whose archive write is in flight (D-RTR-7).** During a
+  rolling deploy, worker A wrote its ARCHIVING marker and was uploading; worker B resumed the row,
+  found no object yet, rendered other bytes, was refused and burned the number; A's document then
+  landed. The row is now held under a session-level advisory lock from just before the marker until
+  the outcome is recorded. A second worker gets `DEI-245` and retries; it reads, renders and writes
+  nothing. **Breaking for hand-wired hosts:** `IssuanceUnitOfWork` takes an `IssuanceRowLock` after
+  the writer (pass the same `JdbcIssuanceStore`), and `JdbcUnitOfWork` gains `onOneConnection`.
+- **`DEI-104`: a pooler in transaction mode is refused** before a number is taken, because it
+  would silently turn the session lock into no lock. Session pooling and direct connections work.
+- A redelivery whose archive read fails is retried (`DEI-241`), never reported as tampered.
 - **A burn writes the rule id and nothing else.** The trigger refuses a move to
   `FAILED_VALIDATION` that also changes the document hash, the archive key or the void reason; the
   void reason changes only with a move to `VOID_UNUSED`.
