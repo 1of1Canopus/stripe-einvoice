@@ -199,9 +199,12 @@ module is where that is set out.
   block of the script then refuses the format-2 stamp. The key is not tamper-proof against the table
   owner: with both tables' guards disabled, one statement that rewrites the name row and its series
   rows together passes it, because the key is checked at the end of the statement. The chain
-  verifier reports that rewrite as BROKEN. Run the application as a role that owns nothing. Under REPEATABLE READ or SERIALIZABLE, two transactions that
-  create one new series at once end with one of them aborted and `DEI-117`; a host transaction that
-  joined the allocator retries itself.
+  verifier reports that rewrite as BROKEN. Run the application as a role that
+  owns nothing. Under REPEATABLE READ or SERIALIZABLE, a concurrent transaction can conflict with
+  the opening of a series: two transactions that open one new series, or two that open different
+  new series. The later one is aborted and ends as `DEI-117` ("a concurrent transaction conflicted
+  with this one while the series was being opened"); a host transaction that joined the allocator
+  retries itself.
 - **`EIU04` means the database was written by an unreleased build.** This database was written by
   an unreleased build and binds a series name to two document types; rebuild it, or restore its
   0.1.x copy, then start again. A 0.1.x database cannot hit it: every row there is an invoice. The

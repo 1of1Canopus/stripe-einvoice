@@ -862,17 +862,18 @@ public final class JdbcIssuanceStore
       if ("40001".equals(e.getSQLState())) {
         // D-A1-C03, series-name design 4: at REPEATABLE READ or SERIALIZABLE, a name row or year
         // row another transaction committed after this snapshot cannot be skipped by ON CONFLICT
-        // DO NOTHING, and PostgreSQL aborts the transaction instead. That is "lost the turn to a
-        // concurrent writer of this series", which DEI-117 already means and the pipeline already
-        // retries with a new snapshot. A host that joined us retries its whole transaction, as for
-        // any 40001. Fixed text: the driver's message is not repeated.
+        // DO NOTHING, and PostgreSQL aborts the transaction instead. SERIALIZABLE also raises
+        // 40001 when two transactions open two different new series (D-PR40-1), so the cause is
+        // not known to be a creation of this series. All that is known is a conflict while the
+        // series was being opened. DEI-117 already means "retry with a new snapshot". A host that
+        // joined us retries its whole transaction, as for any 40001. Fixed text: the driver's
+        // message is not repeated.
         throw new EInvoiceException(
             ErrorCodes.ALLOCATION_TIMEOUT,
-            "series "
+            "a concurrent transaction conflicted with this one while series "
                 + key.series()
-                + " was created by a concurrent transaction under REPEATABLE READ or SERIALIZABLE"
-                + " isolation, and this transaction can no longer see it. Nothing was numbered;"
-                + " retry in a new transaction.",
+                + " was being opened (serialization failure under REPEATABLE READ or"
+                + " SERIALIZABLE). Nothing was numbered; retry in a new transaction.",
             e);
       }
       throw e;
