@@ -55,16 +55,31 @@ public final class IssuanceTestHarness {
   private final TestIssueClock issueClock = TestIssueClock.following(clock);
   private String pinnedApiVersion = FakeStripeSource.PINNED;
 
+  private final javax.sql.DataSource dataSource;
+
   private IssuanceTestHarness(
       DocumentValidator validator, Optional<Duration> closedYearCutoff, String zone) {
+    this(validator, closedYearCutoff, zone, PostgresSupport.dataSource());
+  }
+
+  private IssuanceTestHarness(
+      DocumentValidator validator,
+      Optional<Duration> closedYearCutoff,
+      String zone,
+      javax.sql.DataSource dataSource) {
+    this.dataSource = dataSource;
+    this.findings = new JdbcFindingStore(JdbcUnitOfWork.ownConnection(dataSource));
+    this.reprocessLedger = new JdbcReprocessLedger(JdbcUnitOfWork.ownConnection(dataSource));
+    this.preflightSupport =
+        new com.housedevinci.einvoice.application.PreflightSupport(findings, clock);
     this.validator = validator;
     this.closedYearCutoff = closedYearCutoff;
     this.taxZone = ZoneId.of(zone);
     this.sellerId = PostgresSupport.freshSeller("uow");
     this.store =
         TestStores.store(
-            JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()),
-            PostgresSupport.dataSource(),
+            JdbcUnitOfWork.ownConnection(dataSource),
+            dataSource,
             IssuanceChain.keyed(
                 "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8), "k1"),
             Map.of(
@@ -74,8 +89,57 @@ public final class IssuanceTestHarness {
             clock,
             JdbcIssuanceStore.DEFAULT_ALLOCATION_TIMEOUT,
             issueClock);
-    this.inbound =
-        new JdbcInboundEventStore(JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()));
+    this.inbound = new JdbcInboundEventStore(JdbcUnitOfWork.ownConnection(dataSource));
+  }
+
+  /**
+   * The store's real row lock, handing the work the test's own substitute ports instead of the
+   * lock-bound ones: for the probes that inject a store fault into a reader or a writer.
+   */
+  public static com.housedevinci.einvoice.application.IssuanceRowLock lockWith(
+      JdbcIssuanceStore store, IssuanceReader reader, IssuanceWriter writer) {
+    return new com.housedevinci.einvoice.application.IssuanceRowLock() {
+      @Override
+      public <T> Optional<T> whileHeld(long issuanceId, java.util.function.Function<Held, T> work) {
+        return store.whileHeld(issuanceId, held -> work.apply(new Held(reader, writer)));
+      }
+
+      @Override
+      public void verifySessionPinning() {
+        store.verifySessionPinning();
+      }
+    };
+  }
+
+  /** A harness over a data source the test chose: a small pool, a pooler, a fresh database. */
+  public static IssuanceTestHarness createOn(javax.sql.DataSource dataSource) {
+    return new IssuanceTestHarness(
+        TestValidators.passing(), Optional.empty(), "Europe/Paris", dataSource);
+  }
+
+  /** The data source every store of this harness uses. */
+  public javax.sql.DataSource dataSource() {
+    return dataSource;
+  }
+
+  /** A unit of work whose row lock and renderer the test chooses, for the D-RTR-7 lock paths. */
+  public IssuanceUnitOfWork unitOfWorkWithLock(
+      com.housedevinci.einvoice.application.IssuanceRowLock lock,
+      com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
+    return new IssuanceUnitOfWork(
+        inbound,
+        source,
+        store,
+        store,
+        store,
+        lock,
+        substituteRenderer,
+        validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
+        archive,
+        preflightSupport,
+        clock,
+        configurationFor("DEFAULT", pinnedApiVersion));
   }
 
   public static IssuanceTestHarness create() {
@@ -105,6 +169,7 @@ public final class IssuanceTestHarness {
         store,
         store,
         store,
+        store,
         renderer,
         validator,
         new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
@@ -126,6 +191,7 @@ public final class IssuanceTestHarness {
         allocator,
         store,
         store,
+        store,
         renderer,
         validator,
         new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
@@ -143,6 +209,7 @@ public final class IssuanceTestHarness {
     return new IssuanceUnitOfWork(
         inbound,
         source,
+        store,
         store,
         store,
         store,
@@ -167,6 +234,7 @@ public final class IssuanceTestHarness {
         store,
         store,
         store,
+        store,
         substituteRenderer,
         validator,
         new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
@@ -185,6 +253,7 @@ public final class IssuanceTestHarness {
     return new IssuanceUnitOfWork(
         inbound,
         source,
+        store,
         store,
         store,
         store,
@@ -209,6 +278,7 @@ public final class IssuanceTestHarness {
     return new IssuanceUnitOfWork(
         inbound,
         source,
+        store,
         store,
         store,
         store,
@@ -264,11 +334,9 @@ public final class IssuanceTestHarness {
     return eventId;
   }
 
-  private final JdbcFindingStore findings =
-      new JdbcFindingStore(JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()));
+  private final JdbcFindingStore findings;
 
-  private final JdbcReprocessLedger reprocessLedger =
-      new JdbcReprocessLedger(JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()));
+  private final JdbcReprocessLedger reprocessLedger;
 
   /** The durable record of every privileged re-open, over this harness's own database. */
   public JdbcReprocessLedger reprocessLedger() {
@@ -281,8 +349,7 @@ public final class IssuanceTestHarness {
     return reprocessLedger.forEvent(eventId);
   }
 
-  private final com.housedevinci.einvoice.application.PreflightSupport preflightSupport =
-      new com.housedevinci.einvoice.application.PreflightSupport(findings, clock);
+  private final com.housedevinci.einvoice.application.PreflightSupport preflightSupport;
 
   /** The privileged reprocess, over this harness's own stores and the default renderer. */
   public com.housedevinci.einvoice.application.IssuanceReprocess reprocess() {
@@ -295,7 +362,7 @@ public final class IssuanceTestHarness {
     return reprocessFor(unitOfWorkWithRenderer(substituteRenderer));
   }
 
-  private com.housedevinci.einvoice.application.IssuanceReprocess reprocessFor(
+  public com.housedevinci.einvoice.application.IssuanceReprocess reprocessFor(
       IssuanceUnitOfWork unitOfWork) {
     return new com.housedevinci.einvoice.application.IssuanceReprocess(
         unitOfWork, inbound, store, reprocessLedger, clock);

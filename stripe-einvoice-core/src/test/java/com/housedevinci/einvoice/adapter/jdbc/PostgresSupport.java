@@ -90,6 +90,11 @@ public final class PostgresSupport {
    * weakened assertion.
    */
   public static DataSource freshDatabase(String hint) {
+    return freshDatabase(hint, 4);
+  }
+
+  /** A fresh database with a pool of exactly {@code poolSize}, for the pool-starvation tests. */
+  public static DataSource freshDatabase(String hint, int poolSize) {
     dataSource();
     String name =
         ("einvoice_" + hint + "_" + SELLER_SEQUENCE.incrementAndGet())
@@ -99,9 +104,10 @@ public final class PostgresSupport {
     config.setJdbcUrl(CONTAINER.getJdbcUrl().replaceFirst("/[^/?]+(\\?|$)", "/" + name + "$1"));
     config.setUsername(CONTAINER.getUsername());
     config.setPassword(CONTAINER.getPassword());
-    config.setMaximumPoolSize(4);
+    config.setMaximumPoolSize(poolSize);
     config.setMinimumIdle(0);
     config.setIdleTimeout(10_000);
+    config.setConnectionTimeout(5_000);
     HikariDataSource fresh = new HikariDataSource(config);
     JdbcSupport.initializeSchema(fresh);
     return fresh;

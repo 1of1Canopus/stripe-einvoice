@@ -79,6 +79,7 @@ public final class IssuanceUnitOfWork {
   private final NumberAllocator allocator;
   private final IssuanceReader reader;
   private final IssuanceWriter writer;
+  private final IssuanceRowLock rowLock;
   private final DocumentRenderer renderer;
   private final DocumentValidator validator;
   private final DocumentDates dates;
@@ -163,6 +164,9 @@ public final class IssuanceUnitOfWork {
       Set.of("com.housedevinci.einvoice.adapter.validation.UblDocumentDates");
 
   /**
+   * @param rowLock the lock one issuance row is held under from its ARCHIVING marker to its outcome
+   *     (D-RTR-7). The module's {@code JdbcIssuanceStore} is one; pass the same store as {@code
+   *     reader} and {@code writer}
    * @param dates the reader of the document's own dates, which the unit of work compares with the
    *     allocation before anything is archived, whatever {@code validator} answers (D-PR36-6). Pass
    *     {@code new UblDocumentDates()} from {@code adapter.validation}. Any other reader is logged
@@ -176,6 +180,7 @@ public final class IssuanceUnitOfWork {
       NumberAllocator allocator,
       IssuanceReader reader,
       IssuanceWriter writer,
+      IssuanceRowLock rowLock,
       DocumentRenderer renderer,
       DocumentValidator validator,
       DocumentDates dates,
@@ -188,6 +193,7 @@ public final class IssuanceUnitOfWork {
     this.allocator = Objects.requireNonNull(allocator, "allocator");
     this.reader = Objects.requireNonNull(reader, "reader");
     this.writer = Objects.requireNonNull(writer, "writer");
+    this.rowLock = Objects.requireNonNull(rowLock, "rowLock");
     this.renderer = Objects.requireNonNull(renderer, "renderer");
     this.validator = Objects.requireNonNull(validator, "validator");
     this.dates = Objects.requireNonNull(dates, "dates");
@@ -293,6 +299,13 @@ public final class IssuanceUnitOfWork {
       // processor or change the configuration, and a sweep does not do that.
       return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.XSLT_PROCESSOR_MISSING, null);
     }
+    try {
+      // D-RTR-7, R5: a connection path that cannot hold the row lock is refused before a number
+      // is consumed. Retried, so the events go through once the pooler is fixed.
+      rowLock.verifySessionPinning();
+    } catch (EInvoiceException e) {
+      return fail(event, InboundState.FAILED_ISSUANCE, e.code(), backoffFor(event));
+    }
     if (!renderer.carriesSupplyDate()) {
       // D-PS1-44: the issue date is the numbering day, so a document without its supply date would
       // hide when the sale happened. Refused before a number exists, like the preflight's own
@@ -393,18 +406,65 @@ public final class IssuanceUnitOfWork {
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
     }
 
-    // QUESTIONS 38, D-RTR-1: a resumed row that recorded a hash may already have its document in
-    // the archive. It looks before it renders, so a number whose valid document exists is never
-    // burned, and a read that fails is never mistaken for an absent object.
-    Optional<Outcome> resumed = resumeFromArchive(event, invoice, issuance);
-    if (resumed.isPresent()) {
-      return resumed.get();
-    }
-
     // The same MappingInput the preflight approved, plus what the allocator fixed under the series
     // lock: the number, its series, and its dates. BT-2 comes from the allocation and nowhere else,
     // so a resumed run renders the same date the first run was given (D-PS1-27).
     DocumentInput input = DocumentInput.numbered(mapping, issuance, configuration.taxZone());
+
+    // D-RTR-7: everything from here to the outcome runs under the row's archive lock, on the lock
+    // holder's own connection. Held by another worker: retried later, nothing read or written. The
+    // inbound row is written after the lock is released, so the holder never needs a second
+    // connection.
+    Optional<Pending> concluded;
+    try {
+      concluded =
+          rowLock.whileHeld(issuance.id(), held -> underLock(invoice, issuance, input, held));
+    } catch (EInvoiceException e) {
+      Duration retryIn = transientStoreFailure(e.code()) ? backoffFor(event) : null;
+      return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
+    }
+    if (concluded.isEmpty()) {
+      return fail(
+          event, InboundState.FAILED_ISSUANCE, ErrorCodes.ISSUANCE_IN_FLIGHT, backoffFor(event));
+    }
+    return apply(event, concluded.get());
+  }
+
+  /**
+   * P2 to P4 under the row lock. Every decision uses the row as read again here, under the lock
+   * (D-RTR-7, R3.2): another worker may have issued, burned or let a void through between the
+   * allocator's read and the lock.
+   */
+  private Pending underLock(
+      SourceInvoice invoice, Issuance allocated, DocumentInput input, IssuanceRowLock.Held held) {
+    Issuance issuance =
+        held.reader()
+            .findBySource(configuration.sellerId(), configuration.mode(), invoice.id())
+            .filter(row -> row.id() == allocated.id())
+            .orElseThrow(
+                () ->
+                    new EInvoiceException(
+                        ErrorCodes.ISSUANCE_NOT_FOUND,
+                        "the issuance row read under the lock is not the row that was allocated"));
+    switch (classify(issuance.state())) {
+      case REDELIVERY -> {
+        return redeliveryPending(issuance, invoice);
+      }
+      case VOIDED, BURNED -> {
+        return terminalPending(issuance);
+      }
+      case RESUME -> {
+        // carries on below
+      }
+    }
+
+    // QUESTIONS 38, D-RTR-1: a resumed row that recorded a hash may already have its document in
+    // the archive. It looks before it renders, so a number whose valid document exists is never
+    // burned, and a read that fails is never mistaken for an absent object.
+    Optional<Pending> resumed = resumeFromArchive(invoice, issuance, held);
+    if (resumed.isPresent()) {
+      return resumed.get();
+    }
 
     // P2: the exact bytes, and the validation of those exact bytes - never of a re-serialisation.
     // Both ports are always a host's own code in 0.1.0 - the writers are the next change - and a
@@ -422,19 +482,19 @@ public final class IssuanceUnitOfWork {
       document = renderer.render(input);
       archived = document.bytes();
     } catch (EInvoiceException e) {
-      return renderRefused(event, invoice, e.code(), backoffFor(event));
+      return renderRefused(invoice, e.code(), backoffFor(held), held);
     } catch (RuntimeException e) {
       log.error("einvoice: the document renderer threw an unexpected exception", e);
-      return renderRefused(event, invoice, ErrorCodes.RENDER_FAILED, null);
+      return renderRefused(invoice, ErrorCodes.RENDER_FAILED, null, held);
     }
     DocumentValidator.Report report;
     try {
       report = validator.validate(archived.clone(), input);
     } catch (EInvoiceException e) {
-      return fail(event, InboundState.FAILED_ISSUANCE, e.code(), backoffFor(event));
+      return Pending.of(InboundState.FAILED_ISSUANCE, e.code(), backoffFor(held), null);
     } catch (RuntimeException e) {
       log.error("einvoice: the document validator threw an unexpected exception", e);
-      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.VALIDATOR_FAILED, null);
+      return Pending.of(InboundState.FAILED_ISSUANCE, ErrorCodes.VALIDATOR_FAILED, null, null);
     }
     if (report.archivable()) {
       // D-PR36-6: the last gate before the archive, and not the validator's job. Whatever
@@ -455,9 +515,9 @@ public final class IssuanceUnitOfWork {
       // rather than left to be inferred. A void that landed while this run was in flight makes the
       // write illegal, and then the event concludes on that code instead of this one.
       Optional<WriteRefusal> refused =
-          concludeIssuance(invoice.id(), IssuanceState.FAILED_VALIDATION, ruleId);
+          concludeIssuance(held, invoice.id(), IssuanceState.FAILED_VALIDATION, ruleId);
       if (refused.isPresent()) {
-        return concludeOn(event, refused.get(), issuance.legalNumber());
+        return pendingOn(refused.get(), issuance.legalNumber(), held);
       }
       if (issuance.documentHash().isPresent()) {
         // D-RTR-6: two hashes now describe this number, and only the operator can tell them apart.
@@ -471,17 +531,15 @@ public final class IssuanceUnitOfWork {
             issuance.documentSha256(),
             Hashes.sha256Hex(archived));
       }
-      inbound.transition(
-          event.eventId(), InboundState.FAILED_ISSUANCE, code, ruleId, clock.instant(), null);
-      return new Outcome(
-          event.eventId(), InboundState.FAILED_ISSUANCE, code, issuance.legalNumber().value());
+      return new Pending(
+          InboundState.FAILED_ISSUANCE, code, ruleId, null, issuance.legalNumber().value());
     }
 
     String documentSha256 = Hashes.sha256Hex(archived);
     ArchiveKey key =
         ArchiveKey.of(
             issuance.seriesKey(), issuance.legalNumber(), documentSha256, document.extension());
-    return archiveAndIssue(event, invoice, documentSha256, key, Optional.of(archived));
+    return archiveAndIssue(invoice, documentSha256, key, Optional.of(archived), held);
   }
 
   /**
@@ -503,8 +561,8 @@ public final class IssuanceUnitOfWork {
    *       refusal then burns through the edge from this state.
    * </ul>
    */
-  private Optional<Outcome> resumeFromArchive(
-      InboundEvent event, SourceInvoice invoice, Issuance issuance) {
+  private Optional<Pending> resumeFromArchive(
+      SourceInvoice invoice, Issuance issuance, IssuanceRowLock.Held held) {
     boolean marked =
         issuance.state() == IssuanceState.ARCHIVING
             || issuance.state() == IssuanceState.FAILED_ARCHIVE;
@@ -516,13 +574,12 @@ public final class IssuanceUnitOfWork {
     try {
       stored = archive.get(key);
     } catch (EInvoiceException e) {
-      return Optional.of(archiveFailed(event, invoice, e.code(), backoffFor(event)));
+      return Optional.of(archiveFailed(invoice, e.code(), backoffFor(held), held));
     } catch (RuntimeException e) {
       // D2-04's class of risk: a host store's own bug. Logged server-side only. Still retried:
       // waiting is the only way to learn what the archive holds, and the ceiling bounds it.
       log.error("einvoice: the archive store threw an unexpected exception on a resumed read", e);
-      return Optional.of(
-          archiveFailed(event, invoice, ErrorCodes.ARCHIVE_FAILED, backoffFor(event)));
+      return Optional.of(archiveFailed(invoice, ErrorCodes.ARCHIVE_FAILED, backoffFor(held), held));
     }
     if (stored.isEmpty()) {
       return Optional.empty();
@@ -536,10 +593,10 @@ public final class IssuanceUnitOfWork {
           "einvoice: the archive holds other bytes than number {} recorded, at its own key;"
               + " refused as a content conflict, never overwritten and never burned",
           issuance.legalNumber().value());
-      return Optional.of(archiveFailed(event, invoice, ErrorCodes.ARCHIVE_CONTENT_CONFLICT, null));
+      return Optional.of(archiveFailed(invoice, ErrorCodes.ARCHIVE_CONTENT_CONFLICT, null, held));
     }
     return Optional.of(
-        archiveAndIssue(event, invoice, issuance.documentSha256(), key, Optional.empty()));
+        archiveAndIssue(invoice, issuance.documentSha256(), key, Optional.empty(), held));
   }
 
   /**
@@ -548,16 +605,17 @@ public final class IssuanceUnitOfWork {
    * @param toWrite the bytes to put at the key, or empty when a resumed run found them already
    *     there with the recorded hash: the marker is re-asserted and the number issued, no PUT
    */
-  private Outcome archiveAndIssue(
-      InboundEvent event,
+  private Pending archiveAndIssue(
       SourceInvoice invoice,
       String documentSha256,
       ArchiveKey key,
-      Optional<byte[]> toWrite) {
+      Optional<byte[]> toWrite,
+      IssuanceRowLock.Held held) {
     // P3: say what we are about to write, then write it.
     try {
-      writer.markArchiving(
-          configuration.sellerId(), configuration.mode(), invoice.id(), documentSha256, key);
+      held.writer()
+          .markArchiving(
+              configuration.sellerId(), configuration.mode(), invoice.id(), documentSha256, key);
       if (toWrite.isPresent()) {
         archive.putIfAbsent(key, toWrite.get().clone());
         if (configuration.readBackAfterWrite()) {
@@ -567,13 +625,13 @@ public final class IssuanceUnitOfWork {
     } catch (EInvoiceException e) {
       // RC-01: this write is inside a catch, so it must never raise a second, different failure in
       // place of the first - which is what it did when the row had been voided in the meantime.
-      Duration retryIn = ErrorCodes.ARCHIVE_UNAVAILABLE.equals(e.code()) ? backoffFor(event) : null;
-      return archiveFailed(event, invoice, e.code(), retryIn);
+      Duration retryIn = ErrorCodes.ARCHIVE_UNAVAILABLE.equals(e.code()) ? backoffFor(held) : null;
+      return archiveFailed(invoice, e.code(), retryIn, held);
     } catch (RuntimeException e) {
       // D2-04: a host-supplied ArchiveStore is the same class of risk as the renderer and the
       // validator - always somebody else's code in 0.1.0.
       log.error("einvoice: the archive store threw an unexpected exception", e);
-      return archiveFailed(event, invoice, ErrorCodes.ARCHIVE_FAILED, null);
+      return archiveFailed(invoice, ErrorCodes.ARCHIVE_FAILED, null, held);
     }
 
     // P4: the document exists. Wrapped like P3 (D2-01): a crash or a store failure here falls
@@ -581,17 +639,17 @@ public final class IssuanceUnitOfWork {
     // exactly like an archive failure is.
     Issuance issued;
     try {
-      issued = writer.markIssued(configuration.sellerId(), configuration.mode(), invoice.id());
+      issued =
+          held.writer().markIssued(configuration.sellerId(), configuration.mode(), invoice.id());
     } catch (EInvoiceException e) {
       // A void taken while this run was archiving makes ISSUED illegal. That is terminal, not
       // retryable: there is no state left from which this document can be published.
-      if (voidedSince(invoice.id())) {
-        return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.NUMBER_VOIDED, null);
+      if (voidedSince(held.reader(), invoice.id())) {
+        return Pending.of(InboundState.FAILED_ISSUANCE, ErrorCodes.NUMBER_VOIDED, null, null);
       }
-      return fail(event, InboundState.FAILED_ISSUANCE, e.code(), backoffFor(event));
+      return Pending.of(InboundState.FAILED_ISSUANCE, e.code(), backoffFor(held), null);
     }
-    inbound.transition(event.eventId(), InboundState.COMPLETED, "", clock.instant(), null);
-    return new Outcome(event.eventId(), InboundState.COMPLETED, "", issued.legalNumber().value());
+    return Pending.of(InboundState.COMPLETED, "", null, issued.legalNumber());
   }
 
   /**
@@ -599,14 +657,14 @@ public final class IssuanceUnitOfWork {
    * when it already was), and the event concludes on {@code code}, retried when {@code retryIn} is
    * set. Never a burn.
    */
-  private Outcome archiveFailed(
-      InboundEvent event, SourceInvoice invoice, String code, Duration retryIn) {
+  private Pending archiveFailed(
+      SourceInvoice invoice, String code, Duration retryIn, IssuanceRowLock.Held held) {
     Optional<WriteRefusal> refused =
-        concludeIssuance(invoice.id(), IssuanceState.FAILED_ARCHIVE, "");
+        concludeIssuance(held, invoice.id(), IssuanceState.FAILED_ARCHIVE, "");
     if (refused.isPresent()) {
-      return concludeOn(event, refused.get(), null);
+      return pendingOn(refused.get(), null, held);
     }
-    return fail(event, InboundState.FAILED_ISSUANCE, code, retryIn);
+    return Pending.of(InboundState.FAILED_ISSUANCE, code, retryIn, null);
   }
 
   /**
@@ -666,22 +724,36 @@ public final class IssuanceUnitOfWork {
    * operators learn to ignore within a week (I-02).
    */
   private Outcome redelivery(InboundEvent event, Issuance issuance, SourceInvoice invoice) {
-    Optional<String> conflict = integrityFailure(issuance);
+    return apply(event, redeliveryPending(issuance, invoice));
+  }
+
+  private Pending redeliveryPending(Issuance issuance, SourceInvoice invoice) {
+    Optional<String> conflict;
+    try {
+      conflict = integrityFailure(issuance);
+    } catch (EInvoiceException e) {
+      // The store contract (D-RTR-8): a read that fails is "not known yet", never "tampered".
+      // Retried; nothing is rendered and no number is taken.
+      return Pending.of(InboundState.FAILED_ISSUANCE, e.code(), BACKOFF, null);
+    } catch (RuntimeException e) {
+      log.error("einvoice: the archive store threw an unexpected exception on a redelivery", e);
+      return Pending.of(InboundState.FAILED_ISSUANCE, ErrorCodes.ARCHIVE_FAILED, BACKOFF, null);
+    }
     if (conflict.isPresent()) {
-      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.ARCHIVED_DOCUMENT_TAMPERED, null);
+      return Pending.of(
+          InboundState.FAILED_ISSUANCE, ErrorCodes.ARCHIVED_DOCUMENT_TAMPERED, null, null);
     }
     if (invoice.voided()) {
       // The document exists and is never withdrawn; a credit note is the remedy and is not in this
       // edition, so this is a compliance finding with a documented manual remedy - not a DOWN
       // indicator that no free-core user could ever clear (I-04).
-      return fail(
-          event,
+      return Pending.of(
           InboundState.COMPLETED,
           ErrorCodes.VOID_AFTER_ISSUE_NEEDS_CREDIT_NOTE,
           null,
           issuance.legalNumber());
     }
-    return fail(event, InboundState.COMPLETED, "", null, issuance.legalNumber());
+    return Pending.of(InboundState.COMPLETED, "", null, issuance.legalNumber());
   }
 
   /**
@@ -700,19 +772,16 @@ public final class IssuanceUnitOfWork {
    * validation refusal already uses, so the allocator design's "never two locks in one transaction"
    * rule is untouched.
    */
-  private Outcome renderRefused(
-      InboundEvent event, SourceInvoice invoice, String code, Duration retryIn) {
+  private Pending renderRefused(
+      SourceInvoice invoice, String code, Duration retryIn, IssuanceRowLock.Held held) {
     Optional<WriteRefusal> refused =
-        concludeIssuance(invoice.id(), IssuanceState.FAILED_VALIDATION, code);
+        concludeIssuance(held, invoice.id(), IssuanceState.FAILED_VALIDATION, code);
     if (refused.isPresent()) {
-      return concludeOn(event, refused.get(), null);
+      return pendingOn(refused.get(), null, held);
     }
     // The cause goes where a schematron rule id goes on the same disposition, so an operator
     // looking at a failed number reads one row and learns which refusal it was.
-    InboundEvent updated =
-        inbound.transition(
-            event.eventId(), InboundState.FAILED_ISSUANCE, code, code, clock.instant(), retryIn);
-    return new Outcome(updated.eventId(), updated.state(), code, null);
+    return new Pending(InboundState.FAILED_ISSUANCE, code, code, retryIn, null);
   }
 
   /** Empty when the archived bytes still hash to what the row recorded; a code when they do not. */
@@ -904,11 +973,15 @@ public final class IssuanceUnitOfWork {
    * time, so there is no second number to allocate and nothing a later run could do.
    */
   private Outcome terminalDisposition(InboundEvent event, Issuance row) {
+    return apply(event, terminalPending(row));
+  }
+
+  private Pending terminalPending(Issuance row) {
     String code =
         classify(row.state()) == ExistingIssuance.VOIDED
             ? ErrorCodes.NUMBER_VOIDED
             : ErrorCodes.VALIDATION_REFUSED;
-    return fail(event, InboundState.FAILED_ISSUANCE, code, null, row.legalNumber());
+    return Pending.of(InboundState.FAILED_ISSUANCE, code, null, row.legalNumber());
   }
 
   /**
@@ -932,9 +1005,9 @@ public final class IssuanceUnitOfWork {
    * escape {@code process}, which is the shape the constraint forbids. A handler that cannot read
    * falls back to what it already knows: not voided, so the failure already in hand stands.
    */
-  private boolean voidedSince(String stripeInvoiceId) {
+  private boolean voidedSince(IssuanceReader under, String stripeInvoiceId) {
     try {
-      return reader
+      return under
           .findBySource(configuration.sellerId(), configuration.mode(), stripeInvoiceId)
           .map(row -> classify(row.state()) == ExistingIssuance.VOIDED)
           .orElse(false);
@@ -972,13 +1045,14 @@ public final class IssuanceUnitOfWork {
    * @return empty when the state was written
    */
   private Optional<WriteRefusal> concludeIssuance(
-      String stripeInvoiceId, IssuanceState target, String detail) {
+      IssuanceRowLock.Held held, String stripeInvoiceId, IssuanceState target, String detail) {
     try {
-      writer.markFailed(
-          configuration.sellerId(), configuration.mode(), stripeInvoiceId, target, detail);
+      held.writer()
+          .markFailed(
+              configuration.sellerId(), configuration.mode(), stripeInvoiceId, target, detail);
       return Optional.empty();
     } catch (EInvoiceException e) {
-      if (voidedSince(stripeInvoiceId)) {
+      if (voidedSince(held.reader(), stripeInvoiceId)) {
         log.warn(
             "einvoice: an issuance could not be recorded as {} ({}); it was voided while the run"
                 + " was in flight",
@@ -1005,13 +1079,49 @@ public final class IssuanceUnitOfWork {
   }
 
   /** Concludes the inbound row on a refused state write, with a next attempt only if one helps. */
-  private Outcome concludeOn(InboundEvent event, WriteRefusal refusal, LegalNumber number) {
-    return fail(
-        event,
+  private Pending pendingOn(WriteRefusal refusal, LegalNumber number, IssuanceRowLock.Held held) {
+    return Pending.of(
         InboundState.FAILED_ISSUANCE,
         refusal.code(),
-        refusal.retryable() ? backoffFor(event) : null,
+        refusal.retryable() ? backoffFor(held) : null,
         number);
+  }
+
+  /**
+   * What a run under the row lock concluded, written on the inbound row only after the lock is
+   * released (D-RTR-7, R3.6), so the holder never asks the pool for a second connection. A {@code
+   * retryIn} of {@link #BACKOFF} means "the event's own backoff", resolved in {@link #apply}.
+   */
+  private record Pending(
+      InboundState state, String code, String ruleId, Duration retryIn, String legalNumber) {
+
+    static Pending of(InboundState state, String code, Duration retryIn, LegalNumber number) {
+      return new Pending(state, code, "", retryIn, number == null ? null : number.value());
+    }
+  }
+
+  /** "The event's own backoff", inside the held section, which has no event in hand. */
+  private static final Duration BACKOFF = Duration.ofNanos(-1);
+
+  @SuppressWarnings("unused")
+  private static Duration backoffFor(IssuanceRowLock.Held held) {
+    return BACKOFF;
+  }
+
+  private Outcome apply(InboundEvent event, Pending pending) {
+    Duration retryIn = BACKOFF.equals(pending.retryIn()) ? backoffFor(event) : pending.retryIn();
+    InboundEvent updated =
+        pending.ruleId().isEmpty()
+            ? inbound.transition(
+                event.eventId(), pending.state(), pending.code(), clock.instant(), retryIn)
+            : inbound.transition(
+                event.eventId(),
+                pending.state(),
+                pending.code(),
+                pending.ruleId(),
+                clock.instant(),
+                retryIn);
+    return new Outcome(updated.eventId(), updated.state(), pending.code(), pending.legalNumber());
   }
 
   private Outcome park(InboundEvent event) {

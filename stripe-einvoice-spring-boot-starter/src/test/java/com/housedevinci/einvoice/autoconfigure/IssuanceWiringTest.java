@@ -737,6 +737,7 @@ class IssuanceWiringTest {
           store,
           store,
           store,
+          store,
           renderer,
           validator,
           new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),

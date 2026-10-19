@@ -73,7 +73,8 @@ public final class JdbcIssuanceStore
         IssuanceReader,
         IssuanceEventReader,
         IssuanceAnchor,
-        com.housedevinci.einvoice.application.IssuanceWriter {
+        com.housedevinci.einvoice.application.IssuanceWriter,
+        com.housedevinci.einvoice.application.IssuanceRowLock {
 
   private static final Logger log = LoggerFactory.getLogger(JdbcIssuanceStore.class);
 
@@ -237,6 +238,18 @@ public final class JdbcIssuanceStore
   private final IssueClock issueClock;
 
   /**
+   * The data sources R5's check has passed for. Per data source, not per store: the connection path
+   * is a property of the pool, and a second store on the same pool must not need two free
+   * connections again.
+   */
+  private static final java.util.Set<DataSource> SESSION_PINNED =
+      java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
+  /** A ReentrantLock, not a monitor: a virtual thread blocked in JDBC inside one pins (JDK 21). */
+  private static final java.util.concurrent.locks.ReentrantLock PINNING_CHECK =
+      new java.util.concurrent.locks.ReentrantLock();
+
+  /**
    * The configuration key of a series, before a fiscal year is known: one per seller, document type
    * and mode. The allocator resolves a request to exactly one of these and never falls back from
    * one type to another (credit-note series design, section 3).
@@ -339,6 +352,73 @@ public final class JdbcIssuanceStore
     this.allocationTimeout = Objects.requireNonNull(allocationTimeout, "allocationTimeout");
     this.maxClockRegression = requireRegressionBound(maxClockRegression);
     this.issueClock = Objects.requireNonNull(issueClock, "issueClock");
+  }
+
+  /** The same store, every statement on {@code bound} (D-RTR-7). No startup check runs again. */
+  private JdbcIssuanceStore(JdbcIssuanceStore base, JdbcUnitOfWork bound) {
+    this.unitOfWork = bound;
+    this.dataSource = base.dataSource;
+    this.chain = base.chain;
+    this.series = base.series;
+    this.taxZone = base.taxZone;
+    this.clock = base.clock;
+    this.allocationTimeout = base.allocationTimeout;
+    this.maxClockRegression = base.maxClockRegression;
+    this.issueClock = base.issueClock;
+  }
+
+  /**
+   * D-RTR-7. Tries the session lock of one issuance row on one connection, and runs {@code work}
+   * with ports bound to that connection, so the holder never asks the pool for a second one. The
+   * lock is released after {@code work} returns or throws; a failed release evicts the connection.
+   * R5's check runs once per store, before any connection is held, and refuses a connection path
+   * that does not keep one session.
+   */
+  @Override
+  public <T> Optional<T> whileHeld(
+      long issuanceId,
+      java.util.function.Function<com.housedevinci.einvoice.application.IssuanceRowLock.Held, T>
+          work) {
+    Objects.requireNonNull(work, "work");
+    verifySessionPinning();
+    return unitOfWork.onOneConnection(
+        (connection, bound) -> {
+          Optional<Integer> holder = IssuanceRowLocks.tryLock(connection, issuanceId);
+          if (holder.isEmpty()) {
+            return Optional.empty();
+          }
+          boolean released = false;
+          try {
+            JdbcIssuanceStore locked = new JdbcIssuanceStore(this, bound);
+            T result =
+                work.apply(
+                    new com.housedevinci.einvoice.application.IssuanceRowLock.Held(locked, locked));
+            released = IssuanceRowLocks.unlock(connection, issuanceId, holder.get());
+            return Optional.of(result);
+          } finally {
+            if (!released) {
+              if (!IssuanceRowLocks.unlock(connection, issuanceId, holder.get())) {
+                IssuanceRowLocks.evict(connection, issuanceId);
+              }
+            }
+          }
+        });
+  }
+
+  /**
+   * R5, once per store: refuses with {@code DEI-104} a connection path that does not keep one
+   * server session, before any issuance row lock is taken. Public so a host can run it at startup.
+   */
+  public void verifySessionPinning() {
+    PINNING_CHECK.lock();
+    try {
+      if (!SESSION_PINNED.contains(dataSource)) {
+        IssuanceRowLocks.verifySessionPinning(dataSource);
+        SESSION_PINNED.add(dataSource);
+      }
+    } finally {
+      PINNING_CHECK.unlock();
+    }
   }
 
   /** The bound of design 5.2: above zero, and at most one hour. */

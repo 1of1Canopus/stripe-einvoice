@@ -18,9 +18,14 @@ class AdvisoryLockRegistryTest {
   @Test
   void this_modules_lock_constants_are_distinct_from_each_other_and_from_every_sibling() {
     assertThat(AdvisoryLocks.SCHEMA_CLASS_ID).isNotEqualTo(AdvisoryLocks.CHAIN_CLASS_ID);
+    // D-RTR-7: the session-scoped row lock has its own class id.
+    assertThat(AdvisoryLocks.ROW_CLASS_ID)
+        .isNotEqualTo(AdvisoryLocks.SCHEMA_CLASS_ID)
+        .isNotEqualTo(AdvisoryLocks.CHAIN_CLASS_ID);
     for (int sibling : AdvisoryLocks.SIBLING_TWO_ARG_CLASS_IDS) {
       assertThat(AdvisoryLocks.SCHEMA_CLASS_ID).isNotEqualTo(sibling);
       assertThat(AdvisoryLocks.CHAIN_CLASS_ID).isNotEqualTo(sibling);
+      assertThat(AdvisoryLocks.ROW_CLASS_ID).isNotEqualTo(sibling);
     }
     // The one-argument constants cannot collide with a two-argument class id at all - the two
     // forms are separate namespaces - and this is here so that stays a checked fact.

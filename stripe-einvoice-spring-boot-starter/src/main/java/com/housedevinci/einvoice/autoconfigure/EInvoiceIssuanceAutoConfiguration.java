@@ -190,6 +190,7 @@ public class EInvoiceIssuanceAutoConfiguration {
         store,
         store,
         store,
+        store,
         renderer,
         validator,
         // D-PR36-6: built here, not a bean, and not @ConditionalOnMissingBean. A host that

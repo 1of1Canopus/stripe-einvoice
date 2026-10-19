@@ -13,7 +13,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -23,7 +22,8 @@ import org.junit.jupiter.api.Test;
  * bytes, is refused, and burns the row through ARCHIVING -> FAILED_VALIDATION. A's PUT then lands.
  *
  * <p>The probe asserts the safe outcome: a number whose document is in the archive is never
- * recorded as burned.
+ * recorded as burned. It reproduced before the row lock (B DEI-250, A DEI-113, row
+ * FAILED_VALIDATION, one object) and is green with it.
  */
 class CipherProbeArchiveRetryRaceTest {
 
@@ -67,10 +67,6 @@ class CipherProbeArchiveRetryRaceTest {
     };
   }
 
-  // Reproduces on this branch (worker B burns, worker A's object lands; the edge from ARCHIVING is
-  // what makes it reachable). Disabled until the security reviewer rules on the fix: internal
-  // open-questions log, item 42; design page "D-RTR-7 note". Remove this line with the fix.
-  @Disabled("QUESTIONS 42 / D-RTR-7: reproduces; fix awaits the security ruling")
   @Test
   void probe_a_concurrent_resume_does_not_burn_a_number_whose_put_is_in_flight() throws Exception {
     IssuanceTestHarness harness = IssuanceTestHarness.create();
@@ -121,6 +117,11 @@ class CipherProbeArchiveRetryRaceTest {
       assertThat(row.state() == IssuanceState.FAILED_VALIDATION && inner.size() == 1)
           .as("a number whose document is in the archive must not be recorded as burned")
           .isFalse();
+      // With the row lock: B found A's lock, read and rendered nothing, and retries; A issued.
+      assertThat(b.code())
+          .isEqualTo(com.housedevinci.einvoice.domain.ErrorCodes.ISSUANCE_IN_FLIGHT);
+      assertThat(harness.inbound().find(paid).orElseThrow().nextAttemptAt()).isNotNull();
+      assertThat(row.state()).isEqualTo(IssuanceState.ISSUED);
     } finally {
       release.countDown();
       workerA.shutdownNow();

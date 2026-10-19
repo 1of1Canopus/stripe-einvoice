@@ -22,6 +22,15 @@ public final class ErrorCodes {
   /** The server behind the DataSource is not PostgreSQL. */
   public static final String UNSUPPORTED_DATABASE = "DEI-103";
 
+  /**
+   * The database connections do not keep one server session: a pooler in transaction or statement
+   * mode (PgBouncer, for example) sits between this module and PostgreSQL. The issuance row lock is
+   * a session lock, and under such a pooler it would silently be no lock at all (D-RTR-7, R5), so
+   * the module refuses to issue rather than run unlocked. Use session pooling or a direct
+   * connection. There is no weaker mode.
+   */
+  public static final String SESSION_NOT_PINNED = "DEI-104";
+
   /** No series row and no configured definition for this (seller, series, mode). */
   public static final String SERIES_NOT_CONFIGURED = "DEI-110";
 
@@ -242,6 +251,13 @@ public final class ErrorCodes {
    * running again.
    */
   public static final String ARCHIVE_FAILED = "DEI-243";
+
+  /**
+   * Another worker holds this issuance row's archive lock: it is between its ARCHIVING marker and
+   * its outcome, so its write may still land (D-RTR-7). Retryable: this run read nothing, rendered
+   * nothing and wrote nothing, and the next attempt decides from what the other worker left.
+   */
+  public static final String ISSUANCE_IN_FLIGHT = "DEI-245";
 
   /** The exact bytes did not pass validation. The failing rule id is recorded. */
   public static final String VALIDATION_REFUSED = "DEI-250";
