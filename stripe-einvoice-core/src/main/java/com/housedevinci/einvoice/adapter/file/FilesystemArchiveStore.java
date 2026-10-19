@@ -5,10 +5,13 @@ import com.housedevinci.einvoice.domain.ArchiveKey;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -99,7 +102,13 @@ public final class FilesystemArchiveStore implements ArchiveStore {
   public Optional<byte[]> get(ArchiveKey key) {
     Path target = resolve(key);
     try {
-      return Files.exists(target) ? Optional.of(Files.readAllBytes(target)) : Optional.empty();
+      // Read the bytes and let the read decide. Files.exists answers false when it cannot tell
+      // (no permission, a link loop), and "cannot tell" must never look like "no object": a
+      // resumed issuance would then re-render and burn a number with the document on disk
+      // (D-RTR-8). Only NoSuchFileException is absence.
+      return Optional.of(Files.readAllBytes(target));
+    } catch (NoSuchFileException absent) {
+      return Optional.empty();
     } catch (IOException e) {
       throw unavailable(e);
     }
@@ -108,8 +117,19 @@ public final class FilesystemArchiveStore implements ArchiveStore {
   @Override
   public List<String> list(String prefix, int limit) {
     Path start = root.resolve(prefix == null ? "" : prefix).normalize();
-    if (!start.startsWith(root) || !Files.isDirectory(start)) {
+    if (!start.startsWith(root)) {
       return List.of();
+    }
+    try {
+      // Files.isDirectory is false for "cannot tell" as well; read the attributes instead so that
+      // only a missing path is an empty list and an unreadable one is a failure (D-RTR-8).
+      if (!Files.readAttributes(start, BasicFileAttributes.class).isDirectory()) {
+        return List.of();
+      }
+    } catch (NoSuchFileException absent) {
+      return List.of();
+    } catch (IOException e) {
+      throw unavailable(e);
     }
     List<String> keys = new ArrayList<>();
     try (Stream<Path> walk = Files.walk(start)) {
@@ -119,8 +139,12 @@ public final class FilesystemArchiveStore implements ArchiveStore {
           .sorted(Comparator.naturalOrder())
           .limit(Math.max(0, limit))
           .forEach(keys::add);
-    } catch (IOException e) {
-      throw unavailable(e);
+    } catch (NoSuchFileException vanished) {
+      return List.of();
+    } catch (IOException | UncheckedIOException e) {
+      // Files.walk reports a directory it cannot open while the stream runs, as an unchecked
+      // exception. It is a read failure like any other.
+      throw unavailable(e instanceof UncheckedIOException u ? u.getCause() : (IOException) e);
     }
     return List.copyOf(keys);
   }

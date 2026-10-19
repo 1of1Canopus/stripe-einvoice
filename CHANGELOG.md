@@ -95,6 +95,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **An unreadable archive object is a failure, not "absent" (D-RTR-8).** The filesystem archive
+  used `Files.exists`, which answers false when it cannot tell (no permission, a link loop). A
+  read failure looked like "no object", so a resumed run could burn a number while the document
+  was on disk, and `list` hid a directory it could not read. `get` now reads the bytes and only
+  `NoSuchFileException` is absent; `list` reads the directory attributes and reports any other
+  I/O error as `ARCHIVE_UNAVAILABLE`. Example: the archive directory loses its permissions during
+  a deploy; the retry now fails and retries later instead of re-rendering and burning the number.
+  The S3 store was checked: only `NoSuchKeyException` is absent, a 403 is a failure.
 - The reference guard now refuses the moved-private document names in any letter case (for
   example a lower-case copy of a private document), in content and in file names. The bare
   review and release words stay upper case only, because in lower case they are plain English.
