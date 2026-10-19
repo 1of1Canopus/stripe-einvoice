@@ -265,14 +265,16 @@ final class ArchiveRetryFixture {
       ps.setString(2, invoiceId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
+          // document_sha256 is a fixed-width column on the event table: an empty hash reads back
+          // as blanks, so every field is trimmed before it is compared with the row.
           out.add(
-              rs.getString(1)
+              rs.getString(1).trim()
                   + "|"
-                  + rs.getString(2)
+                  + rs.getString(2).trim()
                   + "|"
-                  + rs.getString(3)
+                  + rs.getString(3).trim()
                   + "|"
-                  + rs.getString(4));
+                  + rs.getString(4).trim());
         }
       }
     } catch (SQLException e) {
