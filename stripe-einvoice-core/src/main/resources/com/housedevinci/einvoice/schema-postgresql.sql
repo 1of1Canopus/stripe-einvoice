@@ -404,10 +404,94 @@ BEGIN
 END $$;
 
 -- One series name serves one type in a fiscal year, so the type of a number can be read from its
--- series, and a second row cannot re-assign it. Across fiscal years the insert guard below binds
--- the name to one type for a (seller, mode) (S-09).
+-- series, and a second row cannot re-assign it. Across fiscal years the name table below binds the
+-- name to one type for a (seller, mode) (S-09, D-A1-C03).
 CREATE UNIQUE INDEX IF NOT EXISTS einvoice_series_name_binding
   ON einvoice_series (seller_id, mode, fiscal_year, series);
+
+-- ---------------------------------------------------------------------------
+-- The series name (D-A1-C03): one row per (seller, mode, series name), carrying the one document
+-- type that name numbers in every fiscal year. Every per-year row of einvoice_series references it
+-- through a foreign key that includes the type.
+--
+-- Why a table and not a check in a trigger: a trigger that reads einvoice_series cannot see a row
+-- another transaction inserted and has not committed, so two writers that create one name for two
+-- years with two types both committed. The primary key here is enforced by its index, not by a
+-- snapshot: a second writer of the same name waits for the first and never commits a second name
+-- row, at any isolation level. The foreign key then lets a per-year row exist only with its name
+-- row's type. How the second writer fails depends on the level (series-name design, 3.1): a plain
+-- INSERT gets 23505; INSERT ... ON CONFLICT DO NOTHING returns no row at READ COMMITTED and fails
+-- with 40001 at REPEATABLE READ and SERIALIZABLE.
+--
+-- The foreign-key check takes FOR KEY SHARE on the name row. That lock conflicts only with an
+-- update of the key or a delete, and a name row is never updated or deleted (the guards below), so
+-- the check never waits. ALTER TABLE ... DISABLE TRIGGER <name> and DISABLE TRIGGER USER leave the
+-- foreign key's own triggers on; only DISABLE TRIGGER ALL (superuser) or dropping the constraint
+-- removes the check, and the final block refuses both.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS einvoice_series_name (
+  seller_id     varchar(64) NOT NULL,
+  mode          varchar(4)  NOT NULL,
+  series        varchar(32) NOT NULL,
+  document_type varchar(4)  NOT NULL
+    CONSTRAINT einvoice_series_name_document_type CHECK (document_type IN ('380', '381')),
+  created_at    timestamptz NOT NULL,
+  CONSTRAINT einvoice_series_name_pkey PRIMARY KEY (seller_id, mode, series),
+  -- the foreign-key target: PostgreSQL needs a unique constraint on exactly the referenced columns.
+  -- Implied by the primary key, so it never refuses a row the primary key accepts; it exists only so
+  -- the foreign key can carry the type. Every ON CONFLICT on this table names no target, so a clash
+  -- on either index does nothing (D-C03-B6). Rule: any further unique or exclusion index on this
+  -- table must contain seller_id, mode and series, and be neither partial nor on an expression.
+  CONSTRAINT einvoice_series_name_type_key UNIQUE (seller_id, mode, series, document_type)
+);
+
+-- Pre-check (EIU04, mapped to DEI-134). A 0.1.x database cannot fail it: every row there is 380.
+-- Only a database written by an unreleased build, before this table existed, can bind one name to
+-- two types. The upgrade refuses with a count and no identifiers, and changes nothing: it never
+-- picks one of the two types, because either pick rewrites what a legal number was.
+DO $$
+DECLARE
+  split bigint;
+BEGIN
+  SELECT count(*) INTO split FROM (
+    SELECT 1 FROM einvoice_series
+     GROUP BY seller_id, mode, series HAVING count(DISTINCT document_type) > 1) d;
+  IF split > 0 THEN
+    RAISE EXCEPTION USING
+      ERRCODE = 'EIU04',
+      MESSAGE = format('schema upgrade refused: %s series name(s) are bound to more than one'
+        || ' document type for one seller and mode. This database was written by an unreleased'
+        || ' build and binds a series name to two document types; rebuild it, or restore its 0.1.x'
+        || ' copy, then start again. If run as documented, nothing was changed.', split);
+  END IF;
+END $$;
+
+-- The fill: one name row per name that carries exactly one type. It never picks a type: a name with
+-- two types gets no row, so the foreign key below cannot be added and the final block refuses the
+-- stamp, even when a runner goes on after the refusal above (D-A1-C01). min() is there only because
+-- SQL needs an aggregate; with one distinct type it is that type. No conflict target: both unique
+-- indexes of the table are then arbiters (D-C03-B6), as in the allocator's own insert.
+INSERT INTO einvoice_series_name (seller_id, mode, series, document_type, created_at)
+SELECT seller_id, mode, series, min(document_type), now()
+  FROM einvoice_series
+ GROUP BY seller_id, mode, series
+HAVING count(DISTINCT document_type) = 1
+ON CONFLICT DO NOTHING;
+
+-- The binding itself. Found by name on this schema's table, like the other constraints, so a
+-- second run is a no-op.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+       WHERE conname = 'einvoice_series_name_fk'
+         AND conrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_series')) THEN
+    ALTER TABLE einvoice_series
+      ADD CONSTRAINT einvoice_series_name_fk
+      FOREIGN KEY (seller_id, mode, series, document_type)
+      REFERENCES einvoice_series_name (seller_id, mode, series, document_type);
+  END IF;
+END $$;
 
 -- Invariant 3: a credit note's legal number never collides with an invoice number of the same
 -- seller and mode, as a string, across series and fiscal years. It already holds on a 0.1.0
@@ -566,26 +650,12 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
--- S-09 and the seed rule. A series name binds to one document type for a (seller, mode) across
--- every fiscal year, so "the type of a number is readable from its series" holds beyond one year.
--- A new series row starts with no issue date: the first allocation sets it. SQLSTATE EIS01.
+-- The seed rule: a new series row starts with no issue date; the first allocation sets it.
+-- SQLSTATE EIS01. The binding of a series name to one document type across fiscal years (S-09) is
+-- no longer checked here: a read in a trigger cannot see another transaction's uncommitted row, so
+-- it raced (D-A1-C03). The name table's primary key and the foreign key above hold it instead.
 CREATE OR REPLACE FUNCTION einvoice_series_insert_guard() RETURNS trigger AS $$
-DECLARE
-  other boolean;
 BEGIN
-  -- NR-1: the table is read through the trigger's own schema, never through search_path, where a
-  -- temporary table of the same name would come first.
-  EXECUTE format(
-    'SELECT EXISTS (SELECT 1 FROM %I.einvoice_series s'
-    || ' WHERE s.seller_id = $1 AND s.mode = $2 AND s.series = $3 AND s.document_type <> $4)',
-    TG_TABLE_SCHEMA)
-    INTO other USING NEW.seller_id, NEW.mode, NEW.series, NEW.document_type;
-  IF other THEN
-    RAISE EXCEPTION USING
-      ERRCODE = 'EIS01',
-      MESSAGE = 'einvoice_series: this series name already numbers another document type for this'
-        || ' seller and mode; one series name serves one type';
-  END IF;
   IF NEW.last_issue_date IS NOT NULL THEN
     RAISE EXCEPTION USING
       ERRCODE = 'EIS01',
@@ -698,7 +768,9 @@ BEGIN
       ('einvoice_issuance_anchor_no_delete',    'einvoice_issuance_anchor', 'BEFORE DELETE',           'ROW',       'einvoice_append_only'),
       ('einvoice_issuance_anchor_no_truncate',  'einvoice_issuance_anchor', 'BEFORE TRUNCATE',         'STATEMENT', 'einvoice_append_only'),
       ('einvoice_reprocess_append_only',        'einvoice_reprocess_request', 'BEFORE UPDATE OR DELETE', 'ROW',     'einvoice_append_only'),
-      ('einvoice_reprocess_no_truncate',        'einvoice_reprocess_request', 'BEFORE TRUNCATE',       'STATEMENT', 'einvoice_append_only')
+      ('einvoice_reprocess_no_truncate',        'einvoice_reprocess_request', 'BEFORE TRUNCATE',       'STATEMENT', 'einvoice_append_only'),
+      ('einvoice_series_name_append_only',      'einvoice_series_name',     'BEFORE UPDATE OR DELETE', 'ROW',       'einvoice_append_only'),
+      ('einvoice_series_name_no_truncate',      'einvoice_series_name',     'BEFORE TRUNCATE',         'STATEMENT', 'einvoice_append_only')
     ) AS t(name, tbl, timing, level, fn)
   LOOP
     IF NOT EXISTS (
@@ -792,6 +864,7 @@ DECLARE
   rel     regclass;
   pk_cols text[];
   c       record;
+  fk      oid;
 BEGIN
   -- the new columns exist, and the three document_type columns have no default
   FOR c IN
@@ -903,7 +976,9 @@ BEGIN
         ('einvoice_issuance_anchor_no_delete', 'einvoice_issuance_anchor', 'einvoice_append_only'),
         ('einvoice_issuance_anchor_no_truncate', 'einvoice_issuance_anchor', 'einvoice_append_only'),
         ('einvoice_reprocess_append_only', 'einvoice_reprocess_request', 'einvoice_append_only'),
-        ('einvoice_reprocess_no_truncate', 'einvoice_reprocess_request', 'einvoice_append_only')
+        ('einvoice_reprocess_no_truncate', 'einvoice_reprocess_request', 'einvoice_append_only'),
+        ('einvoice_series_name_append_only', 'einvoice_series_name', 'einvoice_append_only'),
+        ('einvoice_series_name_no_truncate', 'einvoice_series_name', 'einvoice_append_only')
       ) AS t(name, tbl, fn)
     LOOP
       IF missing IS NULL AND NOT EXISTS (
@@ -924,6 +999,46 @@ BEGIN
           || ' function %s called by the trigger %s', c.fn, c.name);
       END IF;
     END LOOP;
+  END IF;
+
+  -- D-A1-C03: the name table is keyed on the name alone, and the foreign key from every per-year row
+  -- carries the type, is validated, and its own triggers fire. convalidated alone proves nothing
+  -- here: a superuser's DISABLE TRIGGER ALL leaves it true and turns the check off.
+  IF missing IS NULL THEN
+    rel := to_regclass(quote_ident(current_schema()) || '.einvoice_series_name');
+    SELECT array_agg(att.attname::text ORDER BY k.ord) INTO pk_cols
+      FROM pg_constraint con
+      CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+      JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.attnum
+     WHERE con.contype = 'p' AND con.conrelid = rel;
+    IF rel IS NULL OR pk_cols IS DISTINCT FROM ARRAY['seller_id', 'mode', 'series'] THEN
+      missing := 'the table einvoice_series_name with its primary key on (seller_id, mode, series)';
+    END IF;
+  END IF;
+  IF missing IS NULL THEN
+    SELECT con.oid INTO fk
+      FROM pg_constraint con
+     WHERE con.conname = 'einvoice_series_name_fk' AND con.contype = 'f' AND con.convalidated
+       AND con.conrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_series')
+       AND con.confrelid = rel
+       AND (SELECT array_agg(a.attname::text ORDER BY k.ord)
+              FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+              JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum)
+           = ARRAY['seller_id', 'mode', 'series', 'document_type']
+       AND (SELECT array_agg(a.attname::text ORDER BY k.ord)
+              FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord)
+              JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum)
+           = ARRAY['seller_id', 'mode', 'series', 'document_type'];
+    IF fk IS NULL THEN
+      missing := 'the validated foreign key einvoice_series_name_fk on (seller_id, mode, series,'
+        || ' document_type) from einvoice_series to einvoice_series_name';
+    ELSIF (SELECT count(*) FROM pg_trigger g WHERE g.tgconstraint = fk AND g.tgisinternal) < 4
+       OR EXISTS (SELECT 1 FROM pg_trigger g
+                   WHERE g.tgconstraint = fk AND g.tgisinternal
+                     AND g.tgenabled NOT IN ('O', 'A')) THEN
+      missing := 'the triggers of the foreign key einvoice_series_name_fk (one is disabled or'
+        || ' missing)';
+    END IF;
   END IF;
 
   -- no series that numbered rows may still lack its latest issue date (zone missing or refused)

@@ -22,6 +22,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -215,8 +217,56 @@ class CipherProbePr33Test {
   }
 
   // ------------------------------------------------------------------ F-2 (LOW)
-  // D-A1-C03 is a design stop (its own PR). Its probe,
-  // probe_one_series_name_never_binds_two_types_under_concurrent_inserts, ships with that PR.
+
+  /**
+   * S-09: one series name serves one document type for a seller and mode, in every fiscal year. The
+   * insert guard checks with a plain EXISTS, which cannot see another transaction's uncommitted
+   * row, and no index covers "same name, other year, other type". Two writers seeding the name for
+   * two years at once both commit.
+   */
+  @Test
+  void probe_one_series_name_never_binds_two_types_under_concurrent_inserts() throws Exception {
+    String seller = PostgresSupport.freshSeller("pr33race");
+    String insert =
+        "INSERT INTO einvoice_series (seller_id, document_type, series, fiscal_year, mode, prefix,"
+            + " width, next_number, updated_at) VALUES ('"
+            + seller
+            + "', '%s', 'RACE', %d, 'live', '%s', 6, 1, now())";
+    DataSource ds = PostgresSupport.dataSource();
+    try (Connection first = ds.getConnection()) {
+      first.setAutoCommit(false);
+      try (Statement st = first.createStatement()) {
+        // D-A1-C03 build: since the name table, a series row needs its name row (the foreign key),
+        // so the first writer creates it first, in the same transaction, as the allocator does.
+        // Without this line the first insert is itself refused and nothing commits.
+        st.execute(
+            "INSERT INTO einvoice_series_name (seller_id, mode, series, document_type, created_at)"
+                + " VALUES ('"
+                + seller
+                + "', 'live', 'RACE', '380', now())");
+        st.execute(String.format(insert, "380", 2026, "R26-"));
+      }
+      CompletableFuture<Void> second =
+          CompletableFuture.runAsync(
+              () -> {
+                try (Connection c = ds.getConnection();
+                    Statement st = c.createStatement()) {
+                  st.execute(String.format(insert, "381", 2027, "C27-"));
+                } catch (SQLException refusedIsFine) {
+                  // a refusal is the property holding
+                }
+              });
+      Thread.sleep(500);
+      first.commit();
+      second.get(20, TimeUnit.SECONDS);
+    }
+    assertThat(
+            PostgresSupport.scalar(
+                "SELECT count(DISTINCT document_type) FROM einvoice_series WHERE seller_id = '"
+                    + seller
+                    + "' AND series = 'RACE'"))
+        .isEqualTo(1);
+  }
 
   // ------------------------------------------------------------------ F-3 (LOW)
 

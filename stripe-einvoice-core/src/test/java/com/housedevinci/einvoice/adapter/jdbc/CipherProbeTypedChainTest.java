@@ -127,11 +127,20 @@ class CipherProbeTypedChainTest {
   @Test
   void probe_flipping_the_type_of_a_post_seam_series_is_broken() {
     Trail t = trail("flipseries");
+    // D-A1-C03 build: the type is bound to the name row by a foreign key, so the owner's flip
+    // rewrites the name row and the series rows in one statement, with both guards disabled.
+    PostgresSupport.executeOn(
+        t.f().dataSource,
+        "ALTER TABLE einvoice_series_name DISABLE TRIGGER einvoice_series_name_append_only");
     asOwner(
         t.f().dataSource,
         "einvoice_series",
         "einvoice_series_guard",
-        "UPDATE einvoice_series SET document_type = '381' WHERE series = 'INV'");
+        "WITH n AS (UPDATE einvoice_series_name SET document_type = '381' WHERE series = 'INV'"
+            + " RETURNING 1) UPDATE einvoice_series SET document_type = '381' WHERE series = 'INV'");
+    PostgresSupport.executeOn(
+        t.f().dataSource,
+        "ALTER TABLE einvoice_series_name ENABLE TRIGGER einvoice_series_name_append_only");
 
     assertThat(verifier(t.f().store).verify().status()).isEqualTo(Status.BROKEN);
   }

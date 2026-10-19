@@ -308,7 +308,20 @@ class CipherProbeSchemaUpgradeTest {
     // that an ei2h row is an invoice by definition.
     PostgresSupport.executeOn(
         ds, "ALTER TABLE einvoice_series DISABLE TRIGGER einvoice_series_guard");
-    PostgresSupport.executeOn(ds, "UPDATE einvoice_series SET document_type = '381'");
+    // D-A1-C03 build: the series row's type is bound to its name row by a foreign key, so the flip
+    // now rewrites both in one statement (the key is checked at the end of the statement), with the
+    // name table's own guard disabled too. The verifier must still catch it.
+    PostgresSupport.executeOn(
+        ds, "ALTER TABLE einvoice_series_name DISABLE TRIGGER einvoice_series_name_append_only");
+    PostgresSupport.executeOn(
+        ds,
+        "WITH n AS (UPDATE einvoice_series_name SET document_type = '381' RETURNING 1)"
+            + " UPDATE einvoice_series SET document_type = '381'");
+    assertThat(
+            PostgresSupport.scalarOn(
+                ds, "SELECT count(*) FROM einvoice_series WHERE document_type = '381'"))
+        .as("the owner's one-statement flip of both tables passed the foreign key")
+        .isPositive();
     assertThat(verifier(store).verify().status()).isEqualTo(Status.BROKEN);
   }
 

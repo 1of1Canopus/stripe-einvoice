@@ -44,6 +44,13 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON einvoice_finding TO einvoice_runtime;
 GRANT SELECT, INSERT ON einvoice_reprocess_request TO einvoice_runtime;
 GRANT USAGE ON SEQUENCE einvoice_reprocess_request_seq_seq TO einvoice_runtime;
 
+-- The series names (format 2, D-A1-C03): one row per seller, mode and series name, with the one
+-- document type that name numbers. SELECT and INSERT only: a new name is bound when its first
+-- series row is created, and a name row is never changed or removed, by this role or by any role
+-- the guard triggers bind. The foreign key from einvoice_series to this table is checked with the
+-- table owner's rights, so the runtime role needs nothing more for it.
+GRANT SELECT, INSERT ON einvoice_series_name TO einvoice_runtime;
+
 -- The schema version row (format 2, module 0.2.0). SELECT only: the starter reads it at every boot
 -- to decide whether this version may run against this schema. No UPDATE and no DELETE, so the
 -- role cannot rewrite its own version gate; a trigger also refuses a lowered version and any
