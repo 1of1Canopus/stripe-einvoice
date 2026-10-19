@@ -440,7 +440,8 @@ CREATE TABLE IF NOT EXISTS einvoice_series_name (
   -- the foreign-key target: PostgreSQL needs a unique constraint on exactly the referenced columns.
   -- Implied by the primary key, so it never refuses a row the primary key accepts; it exists only so
   -- the foreign key can carry the type. Every ON CONFLICT on this table names no target, so a clash
-  -- on either index does nothing (D-C03-B6).
+  -- on either index does nothing (D-C03-B6). Rule: any further unique or exclusion index on this
+  -- table must contain seller_id, mode and series, and be neither partial nor on an expression.
   CONSTRAINT einvoice_series_name_type_key UNIQUE (seller_id, mode, series, document_type)
 );
 

@@ -914,14 +914,18 @@ public final class JdbcIssuanceStore
       bound = readSeriesName(c, key);
     }
     if (bound.isEmpty()) {
-      // The insert met a conflicting name row and the next read cannot see it. Rows of this table
-      // are never deleted, so only a concurrent creation explains it: the same retryable outcome.
+      // Unreachable on the shipped schema: name rows are never deleted (trigger guard), READ
+      // COMMITTED re-reads with a new snapshot and sees the committed winner, and REPEATABLE READ
+      // and SERIALIZABLE raise 40001 instead of doing nothing. Reaching it means the insert did
+      // nothing on an index the primary key does not imply, so it is a schema defect, not a race.
+      // The text is fixed and carries no driver text.
       throw new EInvoiceException(
-          ErrorCodes.ALLOCATION_TIMEOUT,
-          "series "
+          ErrorCodes.SCHEMA_NOT_PREPARED,
+          "the name row of series "
               + key.series()
-              + " is being created by a concurrent transaction. Nothing was numbered; retry in a"
-              + " new transaction.");
+              + " was not written and no row for that name exists: the table einvoice_series_name"
+              + " carries a unique or exclusion index its primary key does not imply. Nothing was"
+              + " numbered. Remove that index; retrying will not help.");
     }
     if (!bound.get().equals(key.documentTypeCode())) {
       throw new EInvoiceException(

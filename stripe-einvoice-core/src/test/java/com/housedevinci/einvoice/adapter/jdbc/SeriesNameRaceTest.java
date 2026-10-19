@@ -595,6 +595,41 @@ class SeriesNameRaceTest {
   // indexes
 
   /**
+   * Guard for the rule on {@code einvoice_series_name} (D-PR40-4). The shipped name table has
+   * exactly two unique or exclusion indexes, the primary key and the type key, and the type key's
+   * columns contain the primary key's, so it can never refuse a row the primary key accepts.
+   */
+  @Test
+  void the_name_table_has_only_unique_indexes_its_primary_key_implies() {
+    HikariDataSource ds = (HikariDataSource) PostgresSupport.freshDatabase("p40bidx");
+    try (Connection c = ds.getConnection();
+        Statement st = c.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT i.indexrelid::regclass::text, i.indpred IS NULL, i.indexprs IS NULL,"
+                    + " (SELECT bool_and(pk = ANY (i.indkey::int2[])) FROM unnest("
+                    + "   (SELECT p.indkey::int2[] FROM pg_index p"
+                    + "     WHERE p.indrelid = i.indrelid AND p.indisprimary)) AS pk)"
+                    + " FROM pg_index i"
+                    + " WHERE i.indrelid = 'einvoice_series_name'::regclass"
+                    + "   AND (i.indisunique OR i.indisexclusion) ORDER BY 1")) {
+      java.util.List<String> names = new java.util.ArrayList<>();
+      while (rs.next()) {
+        names.add(rs.getString(1));
+        assertThat(rs.getBoolean(2)).as("not partial: " + rs.getString(1)).isTrue();
+        assertThat(rs.getBoolean(3)).as("no expression: " + rs.getString(1)).isTrue();
+        assertThat(rs.getBoolean(4)).as("covers the primary key: " + rs.getString(1)).isTrue();
+      }
+      assertThat(names)
+          .containsExactly("einvoice_series_name_pkey", "einvoice_series_name_type_key");
+    } catch (SQLException e) {
+      throw new AssertionError(e);
+    } finally {
+      ds.close();
+    }
+  }
+
+  /**
    * A fresh database where a writer can be held between its heap insert and its index inserts.
    * PostgreSQL inserts index entries in index OID order, so a test-only, non-unique index whose
    * expression waits on an advisory lock (only in sessions with {@code c03b.pause = on}) is created

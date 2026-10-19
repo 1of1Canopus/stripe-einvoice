@@ -20,7 +20,6 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -81,41 +80,6 @@ class CipherProbePr40Pass2Test {
           .as("a permanent schema condition must not be reported as a retryable concurrent race")
           .isNotEqualTo(ErrorCodes.ALLOCATION_TIMEOUT);
       assertThat(live.getMessage()).doesNotContain("concurrent");
-    } finally {
-      ds.close();
-    }
-  }
-
-  /**
-   * Confirmation, not a finding. The shipped name table has exactly two unique or exclusion
-   * indexes, the primary key and the type key, and the type key's columns contain the primary
-   * key's, so it can never refuse a row the primary key accepts.
-   */
-  @Test
-  void confirm_the_name_table_has_only_indexes_the_primary_key_implies() {
-    HikariDataSource ds = (HikariDataSource) PostgresSupport.freshDatabase("p40bidx");
-    try (Connection c = ds.getConnection();
-        Statement st = c.createStatement();
-        ResultSet rs =
-            st.executeQuery(
-                "SELECT i.indexrelid::regclass::text, i.indpred IS NULL, i.indexprs IS NULL,"
-                    + " (SELECT bool_and(pk = ANY (i.indkey::int2[])) FROM unnest("
-                    + "   (SELECT p.indkey::int2[] FROM pg_index p"
-                    + "     WHERE p.indrelid = i.indrelid AND p.indisprimary)) AS pk)"
-                    + " FROM pg_index i"
-                    + " WHERE i.indrelid = 'einvoice_series_name'::regclass"
-                    + "   AND (i.indisunique OR i.indisexclusion) ORDER BY 1")) {
-      List<String> names = new java.util.ArrayList<>();
-      while (rs.next()) {
-        names.add(rs.getString(1));
-        assertThat(rs.getBoolean(2)).as("not partial: " + rs.getString(1)).isTrue();
-        assertThat(rs.getBoolean(3)).as("no expression: " + rs.getString(1)).isTrue();
-        assertThat(rs.getBoolean(4)).as("covers the primary key: " + rs.getString(1)).isTrue();
-      }
-      assertThat(names)
-          .containsExactly("einvoice_series_name_pkey", "einvoice_series_name_type_key");
-    } catch (SQLException e) {
-      throw new AssertionError(e);
     } finally {
       ds.close();
     }

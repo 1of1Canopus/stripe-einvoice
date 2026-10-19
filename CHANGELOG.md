@@ -159,7 +159,11 @@ All notable changes to this project are documented here. The format follows
   `EIU04` (`DEI-134`), changing nothing, a database that already binds one name to two types; only
   an unreleased build can have written one. The final block of the script checks the name table,
   its two guard triggers, and that the foreign key exists, carries the type, is validated and has
-  its own triggers enabled.
+  its own triggers enabled. An extra unique index on `einvoice_series_name` that its primary key
+  does not imply is refused with `DEI-136` and a fixed message, not reported as a retryable race
+  (D-PR40-4). Example: an operator adds `UNIQUE (seller_id, series)`; a seller who used `RACE` in
+  test mode gets `DEI-136` in live mode, not `DEI-117` for ever. The schema comment states the rule
+  for any further index on that table.
 - **The planted-operator exposure is stated for upgraded databases (D-ADV-1).** The exposure is
   any database where the application role may `CREATE` in schema `public`: the default on
   PostgreSQL 14 and older, and kept on 15 and newer after an upgrade or a dump restore. Only a
