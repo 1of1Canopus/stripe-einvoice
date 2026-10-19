@@ -154,6 +154,35 @@ class IssuanceRowLockStoreTest {
   }
 
   @Test
+  void an_evicted_connection_never_comes_back_from_the_pool_holding_the_lock() throws Exception {
+    // R3.5 on a live session: the release answered false (the lock is not where it should be), so
+    // the connection is evicted. A pool of one proves it: the next connection is a new session and
+    // holds no lock.
+    DataSource one = PostgresSupport.freshDatabase("evictlive", 1);
+    try {
+      int before;
+      try (Connection c = one.getConnection()) {
+        assertThat(IssuanceRowLocks.tryLock(c, 77L)).isPresent();
+        try (var st = c.createStatement();
+            var rs = st.executeQuery("SELECT pg_backend_pid()")) {
+          rs.next();
+          before = rs.getInt(1);
+        }
+        IssuanceRowLocks.evict(c, 77L);
+      }
+      try (Connection next = one.getConnection();
+          var st = next.createStatement();
+          var rs = st.executeQuery("SELECT pg_backend_pid()")) {
+        rs.next();
+        assertThat(rs.getInt(1)).as("a new session, not the evicted one").isNotEqualTo(before);
+      }
+      assertThat(RowLockHolder.holderPid(one, 77L)).isEqualTo(-1);
+    } finally {
+      PostgresSupport.close(one);
+    }
+  }
+
+  @Test
   void a_joined_unit_of_work_holds_the_lock_on_the_callers_connection() throws Exception {
     DataSource single = PostgresSupport.freshDatabase("joined", 2);
     try {
