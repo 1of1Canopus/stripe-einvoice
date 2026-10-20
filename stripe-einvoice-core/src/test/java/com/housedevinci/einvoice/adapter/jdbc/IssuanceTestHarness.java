@@ -245,6 +245,29 @@ public final class IssuanceTestHarness {
   }
 
   /**
+   * A unit of work with a substitute Stripe source and renderer, for a probe that holds one worker
+   * inside the fetch or the render while another runs the same event (D-PR9-F1).
+   */
+  public IssuanceUnitOfWork unitOfWorkWithSourceAndRenderer(
+      com.housedevinci.einvoice.application.StripeInvoiceSource substituteSource,
+      com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
+    return new IssuanceUnitOfWork(
+        inbound,
+        substituteSource,
+        store,
+        store,
+        store,
+        store,
+        substituteRenderer,
+        validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
+        archive,
+        preflightSupport,
+        clock,
+        configurationFor("DEFAULT", pinnedApiVersion));
+  }
+
+  /**
    * A unit of work with a substitute archive, everything else unchanged - for a probe that needs
    * P3's write to fail in a way this module's own archive stores never fail in (D2-04).
    */
