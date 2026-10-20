@@ -183,6 +183,28 @@ same number at once: the second one gets `DEI-245` and retries later.
   the JDBC URL) so that this takes seconds, not hours. Until then the row only retries; it is never
   burned.
 
+### Inside your own transaction (joined mode)
+
+When the store joins your transaction (Spring's transaction manager, or a connection you hand
+over), each locked step runs under its own savepoint, and the row lock is released before the call
+returns.
+
+- **Your PostgreSQL connection needs `autosave` NEVER (the default) or CONSERVATIVE.** `autosave
+  ALWAYS` undoes a failed statement inside the driver, so a failed step could leave your commit
+  keeping a half-written invoice. It is refused with `DEI-249`; there is no opt-out.
+- **When a step fails after your transaction wrote through the store, the transaction is aborted on
+  purpose** (SQLState `DE248`), so it cannot commit. The exception you catch is the signal. A plain
+  JDBC `commit()` after a failed joined call returns normally and commits nothing; PostgreSQL
+  answers ROLLBACK. The module cannot make that call throw. Spring callers also get
+  `UnexpectedRollbackException`.
+- **A call on a transaction that was already aborted** is refused with `DEI-248`; roll it back and
+  call again. The module never aborts or closes your connection.
+- A caller that rolls back to its own savepoint, taken between two calls to this module, keeps the
+  first call's writes: PostgreSQL lets a rollback to an earlier savepoint undo any abort. Wrap the
+  whole issuance in one savepoint and never split it.
+- A lock attempt cancelled between taking the key and writing its token leaves a key with no token
+  until the database session ends; the row answers `DEI-245`, never a burn.
+
 ### The filesystem archive and its mount point
 
 Until the archive marker lands (before 0.2.0), an empty directory where the volume should be looks

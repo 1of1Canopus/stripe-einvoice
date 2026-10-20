@@ -121,6 +121,9 @@ public abstract class AbstractJdbcUnitOfWork implements JdbcUnitOfWork {
         // reset per call: a refusal raised by this call must still poison the caller's commit when
         // an earlier call in the same transaction already wrote.
         markRollbackOnly(connection);
+        // D-PR43-1, point 3: rollback-only does not stop a plain JDBC caller's commit. The
+        // transaction is aborted on purpose, so that commit commits nothing.
+        IssuanceRowLocks.poison(connection, IssuanceRowLocks.POISON);
       }
       throw e;
     }

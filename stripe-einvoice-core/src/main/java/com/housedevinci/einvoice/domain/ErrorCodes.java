@@ -267,6 +267,22 @@ public final class ErrorCodes {
    */
   public static final String ROW_LOCK_RELEASE_FAILED = "DEI-247";
 
+  /**
+   * The caller's transaction was already aborted before this call (SQLState 25P02 at the first
+   * statement of a joined call): the module took no key and wrote nothing. Roll the transaction
+   * back and call again (D-PR43-1).
+   */
+  public static final String HOST_TRANSACTION_ABORTED = "DEI-248";
+
+  /**
+   * Joined mode refuses a PostgreSQL connection whose driver option {@code autosave} is {@code
+   * ALWAYS}, or whose driver cannot be read (D-PR43-6): that option rolls back a failed statement
+   * to the driver's own savepoint, so a failed issuance step would not abort the caller's
+   * transaction and its commit could keep a half-written invoice. Use NEVER or CONSERVATIVE. There
+   * is no opt-out.
+   */
+  public static final String HOST_AUTOSAVE_UNSUPPORTED = "DEI-249";
+
   /** The exact bytes did not pass validation. The failing rule id is recorded. */
   public static final String VALIDATION_REFUSED = "DEI-250";
 

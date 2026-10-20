@@ -124,6 +124,17 @@ All notable changes to this project are documented here. The format follows
 - **`DEI-104`: a pooler in transaction mode is refused** before a number is taken, because it
   would silently turn the session lock into no lock. Session pooling and direct connections work.
 - A redelivery whose archive read fails is retried (`DEI-241`), never reported as tampered.
+- **Joined mode keeps the run's own outcome and never commits a half-written invoice (D-PR43-1,
+  D-PR43-6).** Inside a caller's transaction each locked step runs under a JDBC savepoint, so a
+  failed step no longer aborts the transaction before the lock is released, and the run keeps its
+  real error code instead of `DEI-104`. When a step fails after the transaction wrote through the
+  store, the module aborts the transaction on purpose (a `DO` block raising SQLState `DE248`,
+  confirmed by a statement that must fail with `25P02`), so the caller's commit commits nothing;
+  Spring callers also get `UnexpectedRollbackException`. The same now applies to a typed refusal
+  after a write outside the lock. The caller's connection is never aborted or closed. Two new
+  public error codes: `DEI-248` (the caller's transaction was already aborted before this call)
+  and `DEI-249` (pgjdbc `autosave=always`, or an unreadable driver, refused in joined mode; own
+  connections set `autosave` NEVER themselves).
 - **The row lock proves it is still ours, on every locked transaction (D-PR42-2).** Under a
   transaction pooler, a backend reset or another client could free or take our lock while the
   backend id stayed the same, and our release could then free another client's lock. Taking the

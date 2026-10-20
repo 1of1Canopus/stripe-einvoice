@@ -100,13 +100,23 @@ public final class PostgresSupport {
 
   /** A fresh database whose pool hands out connections with {@code autoCommit} as given (C1). */
   public static DataSource freshDatabase(String hint, int poolSize, boolean autoCommit) {
+    return freshDatabase(hint, poolSize, autoCommit, "");
+  }
+
+  /** A fresh database whose JDBC URL carries {@code urlParams} (for example autosave=always). */
+  public static DataSource freshDatabase(
+      String hint, int poolSize, boolean autoCommit, String urlParams) {
     dataSource();
     String name =
         ("einvoice_" + hint + "_" + SELLER_SEQUENCE.incrementAndGet())
             .toLowerCase(java.util.Locale.ROOT);
     execute("CREATE DATABASE " + name);
     HikariConfig config = new HikariConfig();
-    config.setJdbcUrl(CONTAINER.getJdbcUrl().replaceFirst("/[^/?]+(\\?|$)", "/" + name + "$1"));
+    String url = CONTAINER.getJdbcUrl().replaceFirst("/[^/?]+(\\?|$)", "/" + name + "$1");
+    if (!urlParams.isEmpty()) {
+      url = url + (url.contains("?") ? "&" : "?") + urlParams;
+    }
+    config.setJdbcUrl(url);
     config.setUsername(CONTAINER.getUsername());
     config.setPassword(CONTAINER.getPassword());
     config.setMaximumPoolSize(poolSize);

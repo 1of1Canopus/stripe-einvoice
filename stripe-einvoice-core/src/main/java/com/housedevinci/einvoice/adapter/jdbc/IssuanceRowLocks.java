@@ -120,7 +120,7 @@ final class IssuanceRowLocks {
         got = rs.getBoolean(1);
       }
     } catch (SQLException e) {
-      throw refusedByPooler(e);
+      throw abortedOrUnavailable(e);
     }
     if (!joined && !c.getAutoCommit()) {
       c.commit();
@@ -139,7 +139,7 @@ final class IssuanceRowLocks {
         return rs.getBoolean(1);
       }
     } catch (SQLException e) {
-      throw refusedByPooler(e);
+      throw abortedOrUnavailable(e);
     }
   }
 
@@ -205,6 +205,144 @@ final class IssuanceRowLocks {
             + issuanceId
             + " is no longer held by this run on its database session; nothing was written in"
             + " this transaction");
+  }
+
+  // ---------------------------------------------------------------- joined mode (D-PR43-1)
+
+  /**
+   * The statement that aborts a caller's transaction on purpose, so its commit commits nothing
+   * after a held unit failed once the transaction had written. A DO block, not a function: no
+   * schema object, nothing a caller's search_path resolves. Constant text, no row id, no token; its
+   * own SQLState DE248, so it is never confused with the caller's own RAISE (P0001).
+   */
+  static final String POISON =
+      "DO $$BEGIN RAISE EXCEPTION 'einvoice: a held unit failed after this transaction wrote"
+          + " through the e-invoice store; this transaction cannot commit' USING ERRCODE ="
+          + " 'DE248'; END$$";
+
+  /** What a poison attempt saw: the poison's own exception, and whether the abort was confirmed. */
+  record Poisoned(SQLException seen, boolean confirmed) {}
+
+  /**
+   * Runs the poison, then confirms the transaction is aborted: one SELECT 1 must fail with 25P02.
+   * Any exception of the poison counts, as long as the confirmation then fails with 25P02 (a
+   * revoked plpgsql, an UNLOCK that already aborted the transaction). A confirmation that succeeds
+   * means the abort was swallowed: logged at ERROR, and the caller still gets the run's code.
+   */
+  static Poisoned poison(Connection c, String poisonSql) {
+    SQLException seen = null;
+    try (Statement st = c.createStatement()) {
+      st.execute(poisonSql);
+    } catch (SQLException e) {
+      seen = e;
+    }
+    boolean confirmed;
+    try (Statement st = c.createStatement()) {
+      st.execute("SELECT 1");
+      confirmed = false;
+    } catch (SQLException e) {
+      confirmed = "25P02".equals(e.getSQLState());
+    }
+    if (!confirmed) {
+      log.error(
+          "einvoice: the caller's transaction could not be confirmed aborted after a failed"
+              + " issuance step ({}); do not commit it",
+          ErrorCodes.UNIT_OF_WORK_POISONED);
+    }
+    return new Poisoned(seen, confirmed);
+  }
+
+  /** 25P02 at a module statement before its own unit failed: the caller's transaction was dead. */
+  static RuntimeException abortedOrUnavailable(SQLException e) {
+    if ("25P02".equals(e.getSQLState())) {
+      return new EInvoiceException(
+          ErrorCodes.HOST_TRANSACTION_ABORTED,
+          "the caller's transaction was already aborted before this call; roll it back and call"
+              + " again");
+    }
+    if ("08P01".equals(e.getSQLState())) {
+      return notPinned("the database connection refused a transaction block (SQLState 08P01)");
+    }
+    return JdbcSupport.unavailable(e);
+  }
+
+  /**
+   * The driver's interface, looked up through the connection's class loader and then this module's:
+   * a wrapping proxy may come from a loader that cannot see the driver.
+   */
+  private static Class<?> pgConnectionClass(Connection c) throws ClassNotFoundException {
+    for (ClassLoader loader :
+        new ClassLoader[] {
+          c.getClass().getClassLoader(),
+          IssuanceRowLocks.class.getClassLoader(),
+          Thread.currentThread().getContextClassLoader()
+        }) {
+      if (loader == null) {
+        continue;
+      }
+      try {
+        return Class.forName("org.postgresql.PGConnection", false, loader);
+      } catch (ClassNotFoundException next) {
+        // try the next loader
+      }
+    }
+    throw new ClassNotFoundException("org.postgresql.PGConnection");
+  }
+
+  /**
+   * D-PR43-6: joined mode refuses pgjdbc autosave ALWAYS, and a connection whose driver option
+   * cannot be read. Read through reflection: the driver is not a compile-time dependency.
+   */
+  static void refuseAutosaveAlways(Connection c) {
+    String mode;
+    try {
+      Class<?> pg = pgConnectionClass(c);
+      Object driver = c.unwrap(pg);
+      mode = String.valueOf(pg.getMethod("getAutosave").invoke(driver));
+    } catch (ReflectiveOperationException | SQLException | RuntimeException | LinkageError e) {
+      mode = "UNKNOWN";
+    }
+    if (!"NEVER".equals(mode) && !"CONSERVATIVE".equals(mode)) {
+      throw new EInvoiceException(
+          ErrorCodes.HOST_AUTOSAVE_UNSUPPORTED,
+          "joined mode needs autosave NEVER or CONSERVATIVE on the caller's PostgreSQL"
+              + " connection (found "
+              + mode
+              + "); autosave ALWAYS undoes a failed statement and could commit a half-written"
+              + " invoice");
+    }
+  }
+
+  /**
+   * Own connections: sets pgjdbc autosave NEVER for the held section and returns the previous
+   * value, or null when the driver is not pgjdbc (then there is nothing to set).
+   */
+  static Object autosaveNever(Connection c) {
+    try {
+      Class<?> pg = pgConnectionClass(c);
+      Class<?> mode = Class.forName("org.postgresql.jdbc.AutoSave", false, pg.getClassLoader());
+      Object driver = c.unwrap(pg);
+      Object previous = pg.getMethod("getAutosave").invoke(driver);
+      @SuppressWarnings({"unchecked", "rawtypes"})
+      Object never = Enum.valueOf((Class) mode, "NEVER");
+      pg.getMethod("setAutosave", mode).invoke(driver, never);
+      return previous;
+    } catch (ReflectiveOperationException | SQLException | RuntimeException | LinkageError e) {
+      return null;
+    }
+  }
+
+  static void restoreAutosave(Connection c, Object previous) {
+    if (previous == null) {
+      return;
+    }
+    try {
+      Class<?> pg = pgConnectionClass(c);
+      Object driver = c.unwrap(pg);
+      pg.getMethod("setAutosave", previous.getClass()).invoke(driver, previous);
+    } catch (ReflectiveOperationException | SQLException | RuntimeException | LinkageError e) {
+      // the connection is going back to its pool either way
+    }
   }
 
   /**

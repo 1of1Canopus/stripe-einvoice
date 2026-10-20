@@ -215,10 +215,18 @@ class CipherProbePr1Test {
           .isInstanceOf(EInvoiceException.class)
           .extracting(e -> ((EInvoiceException) e).code())
           .isEqualTo(ErrorCodes.LOCK_ORDER_VIOLATION);
-      assertThat(lockTimeoutOf(host))
-          .describedAs("a refusal must not leave our timeout on the caller's transaction")
-          .isEqualTo("7331ms");
+      // D-PR43-1, point 3: this refusal came after the transaction had written through the store,
+      // so the module now aborts the caller's transaction on purpose (its commit would keep a
+      // half-written unit of work). No later statement of the caller can run in it, with our
+      // timeout or any other.
+      assertThatThrownBy(() -> lockTimeoutOf(host))
+          .isInstanceOf(java.sql.SQLException.class)
+          .extracting("SQLState")
+          .isEqualTo("25P02");
       host.rollback();
+      assertThat(lockTimeoutOf(host))
+          .describedAs("after the rollback the session is back on its own timeout")
+          .isNotEqualTo(JdbcIssuanceStore.DEFAULT_ALLOCATION_TIMEOUT.toMillis() + "ms");
     }
   }
 

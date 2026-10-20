@@ -405,36 +405,130 @@ public final class JdbcIssuanceStore
           work) {
     return unitOfWork.onOneConnection(
         (connection, bound, joined) -> {
-          if (!joined && !sessionPinned()) {
+          if (joined) {
+            return Optional.of(heldJoined(connection, bound, issuanceId, work));
+          }
+          if (!sessionPinned()) {
             return Optional.empty();
           }
-          Optional<String> token = IssuanceRowLocks.tryLock(connection, issuanceId, joined);
-          if (token.isEmpty()) {
-            return Optional.of(Optional.<T>empty());
-          }
-          // Joined: every statement is in the caller's one transaction, so one server connection;
-          // own connection: every held transaction proves this acquisition first (P1).
-          JdbcUnitOfWork held =
-              joined ? bound : new HeldConnectionUnitOfWork(connection, issuanceId, token.get());
-          boolean released = false;
+          Object autosave = IssuanceRowLocks.autosaveNever(connection);
           try {
-            JdbcIssuanceStore locked = new JdbcIssuanceStore(this, held);
-            T result =
-                work.apply(
-                    new com.housedevinci.einvoice.application.IssuanceRowLock.Held(locked, locked));
-            released = IssuanceRowLocks.unlock(connection, issuanceId, token.get(), joined);
-            if (!released) {
-              // P2: the release refused to free a lock that is no longer this acquisition's.
-              throw IssuanceRowLocks.lostLock(issuanceId);
+            Optional<String> token = IssuanceRowLocks.tryLock(connection, issuanceId, false);
+            if (token.isEmpty()) {
+              return Optional.of(Optional.<T>empty());
             }
-            return Optional.of(Optional.of(result));
+            // Every held transaction proves this acquisition first (P1).
+            JdbcUnitOfWork held = new HeldConnectionUnitOfWork(connection, issuanceId, token.get());
+            boolean released = false;
+            try {
+              JdbcIssuanceStore locked = new JdbcIssuanceStore(this, held);
+              T result =
+                  work.apply(
+                      new com.housedevinci.einvoice.application.IssuanceRowLock.Held(
+                          locked, locked));
+              released = IssuanceRowLocks.unlock(connection, issuanceId, token.get(), false);
+              if (!released) {
+                // P2: the release refused to free a lock that is no longer this acquisition's.
+                throw IssuanceRowLocks.lostLock(issuanceId);
+              }
+              return Optional.of(Optional.of(result));
+            } finally {
+              if (!released
+                  && !IssuanceRowLocks.unlock(connection, issuanceId, token.get(), false)) {
+                IssuanceRowLocks.evict(connection, issuanceId);
+              }
+            }
           } finally {
-            if (!released
-                && !IssuanceRowLocks.unlock(connection, issuanceId, token.get(), joined)) {
-              IssuanceRowLocks.evict(connection, issuanceId);
-            }
+            IssuanceRowLocks.restoreAutosave(connection, autosave);
           }
         });
+  }
+
+  /**
+   * Joined mode (D-PR43-1, candidate B; D-PR43-6). Refuses autosave ALWAYS, tries the lock inside
+   * the caller's transaction, runs every unit under a savepoint, and at the end, each step on its
+   * own: the release; the poison when a unit failed after the transaction wrote; the caller's
+   * rollback-only. The run's own outcome is what the caller gets. A caller's connection is never
+   * aborted or closed.
+   */
+  private <T> Optional<T> heldJoined(
+      java.sql.Connection connection,
+      JdbcUnitOfWork bound,
+      long issuanceId,
+      java.util.function.Function<com.housedevinci.einvoice.application.IssuanceRowLock.Held, T>
+          work)
+      throws java.sql.SQLException {
+    if (!(bound instanceof AbstractJdbcUnitOfWork caller)) {
+      throw new EInvoiceException(
+          ErrorCodes.CONFIG,
+          "the issuance row lock in joined mode needs one of this module's unit of work types");
+    }
+    IssuanceRowLocks.refuseAutosaveAlways(connection);
+    Optional<String> token = IssuanceRowLocks.tryLock(connection, issuanceId, true);
+    if (token.isEmpty()) {
+      return Optional.empty();
+    }
+    JoinedHeldUnitOfWork.Scope scope = new JoinedHeldUnitOfWork.Scope();
+    JdbcIssuanceStore locked =
+        new JdbcIssuanceStore(
+            this,
+            new JoinedHeldUnitOfWork(
+                connection, caller.ledger(connection), issuanceId, token.get(), scope));
+    T result = null;
+    RuntimeException failure = null;
+    try {
+      result =
+          work.apply(
+              new com.housedevinci.einvoice.application.IssuanceRowLock.Held(locked, locked));
+    } catch (RuntimeException e) {
+      failure = e;
+    }
+    boolean released = false;
+    try {
+      released = IssuanceRowLocks.unlock(connection, issuanceId, token.get(), true);
+    } catch (RuntimeException e) {
+      released = false;
+    }
+    IssuanceRowLocks.Poisoned poisoned = null;
+    if (scope.poisonPending()) {
+      try {
+        poisoned = IssuanceRowLocks.poison(connection, IssuanceRowLocks.POISON);
+      } catch (RuntimeException e) {
+        log.error("einvoice: the poison statement failed unexpectedly", e);
+      }
+      try {
+        caller.markRollbackOnly(connection);
+      } catch (RuntimeException e) {
+        log.error("einvoice: the caller's transaction could not be marked rollback-only", e);
+      }
+    }
+    if (!released) {
+      log.error(
+          "einvoice: the archive lock of issuance row {} could not be released ({}); this call's"
+              + " writes are in your transaction, and the lock on the row stays until this"
+              + " database session ends",
+          issuanceId,
+          ErrorCodes.ROW_LOCK_RELEASE_FAILED);
+    }
+    if (failure != null) {
+      if (poisoned != null && poisoned.seen() != null) {
+        failure.addSuppressed(poisoned.seen());
+      }
+      throw failure;
+    }
+    if (scope.poisonPending()) {
+      EInvoiceException refused =
+          new EInvoiceException(
+              scope.failureCode(),
+              "an issuance step failed in this call after the transaction had written through the"
+                  + " e-invoice store; the transaction is aborted and cannot commit. Roll it back"
+                  + " and call again");
+      if (poisoned != null && poisoned.seen() != null) {
+        refused.addSuppressed(poisoned.seen());
+      }
+      throw refused;
+    }
+    return Optional.of(result);
   }
 
   /**
