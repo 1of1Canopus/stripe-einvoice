@@ -55,16 +55,31 @@ public final class IssuanceTestHarness {
   private final TestIssueClock issueClock = TestIssueClock.following(clock);
   private String pinnedApiVersion = FakeStripeSource.PINNED;
 
+  private final javax.sql.DataSource dataSource;
+
   private IssuanceTestHarness(
       DocumentValidator validator, Optional<Duration> closedYearCutoff, String zone) {
+    this(validator, closedYearCutoff, zone, PostgresSupport.dataSource());
+  }
+
+  private IssuanceTestHarness(
+      DocumentValidator validator,
+      Optional<Duration> closedYearCutoff,
+      String zone,
+      javax.sql.DataSource dataSource) {
+    this.dataSource = dataSource;
+    this.findings = new JdbcFindingStore(JdbcUnitOfWork.ownConnection(dataSource));
+    this.reprocessLedger = new JdbcReprocessLedger(JdbcUnitOfWork.ownConnection(dataSource));
+    this.preflightSupport =
+        new com.housedevinci.einvoice.application.PreflightSupport(findings, clock);
     this.validator = validator;
     this.closedYearCutoff = closedYearCutoff;
     this.taxZone = ZoneId.of(zone);
     this.sellerId = PostgresSupport.freshSeller("uow");
     this.store =
         TestStores.store(
-            JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()),
-            PostgresSupport.dataSource(),
+            JdbcUnitOfWork.ownConnection(dataSource),
+            dataSource,
             IssuanceChain.keyed(
                 "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8), "k1"),
             Map.of(
@@ -74,8 +89,23 @@ public final class IssuanceTestHarness {
             clock,
             JdbcIssuanceStore.DEFAULT_ALLOCATION_TIMEOUT,
             issueClock);
-    this.inbound =
-        new JdbcInboundEventStore(JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()));
+    this.inbound = new JdbcInboundEventStore(JdbcUnitOfWork.ownConnection(dataSource));
+  }
+
+  /**
+   * A harness on a database of its own, for a sweep that reads every row of a table regardless of
+   * seller (the QUESTIONS 29 time limit): rows other test classes left behind must not be in it.
+   */
+  public static IssuanceTestHarness createOnFreshDatabase(String hint) {
+    return new IssuanceTestHarness(
+        TestValidators.passing(),
+        Optional.empty(),
+        "Europe/Paris",
+        PostgresSupport.freshDatabase(hint));
+  }
+
+  public javax.sql.DataSource dataSource() {
+    return dataSource;
   }
 
   public static IssuanceTestHarness create() {
@@ -264,11 +294,9 @@ public final class IssuanceTestHarness {
     return eventId;
   }
 
-  private final JdbcFindingStore findings =
-      new JdbcFindingStore(JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()));
+  private final JdbcFindingStore findings;
 
-  private final JdbcReprocessLedger reprocessLedger =
-      new JdbcReprocessLedger(JdbcUnitOfWork.ownConnection(PostgresSupport.dataSource()));
+  private final JdbcReprocessLedger reprocessLedger;
 
   /** The durable record of every privileged re-open, over this harness's own database. */
   public JdbcReprocessLedger reprocessLedger() {
@@ -281,8 +309,7 @@ public final class IssuanceTestHarness {
     return reprocessLedger.forEvent(eventId);
   }
 
-  private final com.housedevinci.einvoice.application.PreflightSupport preflightSupport =
-      new com.housedevinci.einvoice.application.PreflightSupport(findings, clock);
+  private final com.housedevinci.einvoice.application.PreflightSupport preflightSupport;
 
   /** The privileged reprocess, over this harness's own stores and the default renderer. */
   public com.housedevinci.einvoice.application.IssuanceReprocess reprocess() {
@@ -327,7 +354,8 @@ public final class IssuanceTestHarness {
 
   /** Rows in the findings table for one subject, acknowledged or not. */
   public long findingRows(String subjectId) {
-    return PostgresSupport.scalar(
+    return PostgresSupport.scalarOn(
+        dataSource,
         "SELECT count(*) FROM einvoice_finding WHERE seller_id = '"
             + sellerId
             + "' AND subject_id = '"
@@ -385,18 +413,19 @@ public final class IssuanceTestHarness {
 
   /** How many numbers this seller has consumed, whatever state they are in. */
   public long numberedRows() {
-    return PostgresSupport.scalar(
-        "SELECT count(*) FROM einvoice_issuance WHERE seller_id = '" + sellerId + "'");
+    return PostgresSupport.scalarOn(
+        dataSource, "SELECT count(*) FROM einvoice_issuance WHERE seller_id = '" + sellerId + "'");
   }
 
   /** The series counter itself: the number the next allocation would take. */
   public long seriesCounter() {
-    return PostgresSupport.scalar(
-        "SELECT next_number FROM einvoice_series WHERE seller_id = '" + sellerId + "'");
+    return PostgresSupport.scalarOn(
+        dataSource, "SELECT next_number FROM einvoice_series WHERE seller_id = '" + sellerId + "'");
   }
 
   public long chainedEvents() {
-    return PostgresSupport.scalar(
+    return PostgresSupport.scalarOn(
+        dataSource,
         "SELECT count(*) FROM einvoice_issuance_event WHERE seller_id = '" + sellerId + "'");
   }
 
@@ -411,7 +440,12 @@ public final class IssuanceTestHarness {
    * equals {@code pin} is re-picked.
    */
   public List<InboundEvent> due(String pin) {
-    return inbound.due(clock.instant(), Duration.ofHours(72), 100, pin);
+    return inbound.due(
+        clock.instant(),
+        Duration.ofHours(72),
+        com.housedevinci.einvoice.domain.RunningLimit.DEFAULT,
+        100,
+        pin);
   }
 
   public SeriesKey seriesKey() {
@@ -462,12 +496,12 @@ public final class IssuanceTestHarness {
    * crash between the two statements and the commit leaves behind.
    */
   public void killDuringChainAppend(String stripeInvoiceId) {
-    try (java.sql.Connection connection = PostgresSupport.dataSource().getConnection()) {
+    try (java.sql.Connection connection = dataSource.getConnection()) {
       connection.setAutoCommit(false);
       JdbcIssuanceStore killed =
           TestStores.store(
               JdbcUnitOfWork.using(connection),
-              PostgresSupport.dataSource(),
+              dataSource,
               IssuanceChain.keyed(
                   "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8), "k1"),
               Map.of(
@@ -483,7 +517,8 @@ public final class IssuanceTestHarness {
   }
 
   public long anchorRowCount() {
-    return PostgresSupport.scalar("SELECT row_count FROM einvoice_issuance_anchor WHERE id = 1");
+    return PostgresSupport.scalarOn(
+        dataSource, "SELECT row_count FROM einvoice_issuance_anchor WHERE id = 1");
   }
 
   /** The harness clock's current instant, for a test that writes a record itself. */

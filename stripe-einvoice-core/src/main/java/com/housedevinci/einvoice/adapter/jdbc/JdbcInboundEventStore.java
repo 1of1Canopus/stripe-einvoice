@@ -4,11 +4,13 @@ import static com.housedevinci.einvoice.adapter.jdbc.JdbcSupport.instant;
 import static com.housedevinci.einvoice.adapter.jdbc.JdbcSupport.ts;
 
 import com.housedevinci.einvoice.application.InboundEventStore;
+import com.housedevinci.einvoice.domain.ComplianceFinding;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
 import com.housedevinci.einvoice.domain.Mode;
+import com.housedevinci.einvoice.domain.RunningLimit;
 import com.housedevinci.einvoice.domain.Timestamps;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -37,13 +39,14 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   static final String COLUMNS =
       "event_id, event_type, object_id, api_version, livemode, stripe_account_id, seller_id,"
           + " mode, signature_key_id, received_at, updated_at, state, attempts, next_attempt_at,"
-          + " last_code, last_rule_id, body_sha256, (body IS NOT NULL) AS body_present";
+          + " last_code, last_rule_id, body_sha256, (body IS NOT NULL) AS body_present, due_since";
 
   static final String INSERT =
       "INSERT INTO einvoice_inbound_event (event_id, event_type, object_id, api_version, livemode,"
           + " stripe_account_id, seller_id, mode, signature_key_id, received_at, updated_at,"
-          + " state, attempts, next_attempt_at, last_code, last_rule_id, body, body_sha256)"
-          + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (event_id) DO NOTHING";
+          + " state, attempts, next_attempt_at, last_code, last_rule_id, body, body_sha256,"
+          + " due_since) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+          + " ON CONFLICT (event_id) DO NOTHING";
 
   static final String FIND =
       "SELECT " + COLUMNS + " FROM einvoice_inbound_event WHERE event_id = ?";
@@ -55,13 +58,66 @@ public final class JdbcInboundEventStore implements InboundEventStore {
    * 5.6): the first time the event was parked and the first time it failed with a retry scheduled.
    * The allocator reads them to say why an invoice was numbered after its supply day; the state and
    * the last code are overwritten by the next run, so they cannot say it.
+   *
+   * <p>It also restarts the time-limit clock {@code due_since} on progress (QUESTIONS 29, F-1), by
+   * {@link RunningLimit#restartsClock}. The rule depends on whether the row was ever parked, and
+   * {@code parked_at} on the right of a {@code SET} is the value before this statement, so the two
+   * answers are bound and the row picks its own: no read, no race with the {@code parked_at} mark.
    */
   static final String TRANSITION =
       "UPDATE einvoice_inbound_event SET state = ?, last_code = ?, updated_at = ?,"
           + " attempts = attempts + 1, next_attempt_at = ?, body = CASE WHEN ? THEN body ELSE NULL"
           + " END, parked_at = CASE WHEN ? THEN coalesce(parked_at, ?) ELSE parked_at END,"
-          + " retried_at = CASE WHEN ? THEN coalesce(retried_at, ?) ELSE retried_at END"
+          + " retried_at = CASE WHEN ? THEN coalesce(retried_at, ?) ELSE retried_at END,"
+          + " due_since = CASE WHEN (CASE WHEN parked_at IS NULL THEN ? ELSE ? END) THEN ?"
+          + " ELSE due_since END"
           + " WHERE event_id = ?";
+
+  /**
+   * Which clock a running row is measured against (QUESTIONS 29): the parked limit for a parked row
+   * and for the {@code FETCHED} hop of a row that was ever parked, the running limit for every
+   * other. Two parameters: the parked cutoff, then the running cutoff. Mirrors {@link
+   * RunningLimit#parkedLimitGoverns}.
+   */
+  static final String CUTOFF =
+      "CASE WHEN state = 'PARKED' OR (state = 'FETCHED' AND parked_at IS NOT NULL)"
+          + " THEN ?::timestamptz ELSE ?::timestamptz END";
+
+  /**
+   * Running rows past their limit. A null clock is a row 0.1.0 wrote during the upgrade (F-2): it
+   * is read as "not past any limit", never as the epoch, so it stays in {@link #DUE} instead.
+   */
+  static final String STRANDED =
+      "SELECT "
+          + COLUMNS
+          + " FROM einvoice_inbound_event"
+          + " WHERE state IN ('RECEIVED','FETCHED','MAPPED','PARKED')"
+          + " AND due_since IS NOT NULL AND due_since < "
+          + CUTOFF
+          + " ORDER BY due_since LIMIT ?";
+
+  /**
+   * The expiry. Conditional on the state and the clock the sweep read: a row that moved, or moved
+   * and came back to the same state, has another clock and is left alone.
+   *
+   * <p>TODO(PR 45): use transitionFrom once it merges, keeping the clock in the compare.
+   */
+  static final String EXPIRE =
+      "UPDATE einvoice_inbound_event SET state = '"
+          + InboundState.EXPIRED.name()
+          + "', last_code = ?, updated_at = ?, attempts = attempts + 1, next_attempt_at = NULL,"
+          + " body = NULL WHERE event_id = ? AND state = ? AND due_since = ?";
+
+  /**
+   * The finding of an expiry. Unlike the ordinary upsert it opens an acknowledged finding again:
+   * the operator acknowledged an earlier expiry of this event, and this is a new one. The earlier
+   * reason stays on the row.
+   */
+  static final String RECORD_EXPIRY_FINDING =
+      "INSERT INTO einvoice_finding (seller_id, mode, code, subject_id, first_seen, last_seen)"
+          + " VALUES (?,?,?,?,?,?)"
+          + " ON CONFLICT (seller_id, mode, code, subject_id) DO UPDATE"
+          + " SET last_seen = EXCLUDED.last_seen, acknowledged_at = NULL";
 
   /**
    * The privileged re-open (QUESTIONS 26), run by {@code JdbcReprocessLedger} in the same
@@ -70,15 +126,21 @@ public final class JdbcInboundEventStore implements InboundEventStore {
    *
    * <p>Conditional on the state, so the eligibility check and the write are one statement and two
    * simultaneous operator calls produce exactly one winner. {@code attempts} is cleared because
-   * this is a new decision by a human, not the next attempt of the old one, and the retry ceiling
-   * is measured from arrival either way.
+   * this is a new decision by a human, not the next attempt of the old one. The time-limit clock
+   * {@code due_since} starts again (QUESTIONS 29): an expired row whose clock ran from its old
+   * value would be expired again on the next sweep without ever running. The retry ceiling of a
+   * retryable terminal is still measured from arrival.
+   *
+   * <p>Parameters: last code, updated at, due since, event id.
    */
   static final String REOPEN_FOR_REPROCESS =
       "UPDATE einvoice_inbound_event SET state = 'RECEIVED', last_code = ?, updated_at = ?,"
-          + " attempts = 0, next_attempt_at = NULL"
-          + " WHERE event_id = ? AND (state = '"
+          + " due_since = ?, attempts = 0, next_attempt_at = NULL"
+          + " WHERE event_id = ? AND (state IN ('"
           + InboundState.FAILED_MAPPING.name()
-          + "' OR (state = '"
+          + "', '"
+          + InboundState.EXPIRED.name()
+          + "') OR (state = '"
           + InboundState.FAILED_ISSUANCE.name()
           + "' AND last_code = '"
           + com.housedevinci.einvoice.application.IssuanceReprocess.ELIGIBLE_ISSUANCE_CODE
@@ -96,9 +158,14 @@ public final class JdbcInboundEventStore implements InboundEventStore {
       "SELECT "
           + COLUMNS
           + " FROM einvoice_inbound_event WHERE"
-          // Still running: picked up whenever its time has come, and immediately when it has none.
+          // Still running: picked up whenever its time has come, and immediately when it has none,
+          // while it is inside its time limit (QUESTIONS 29). >= here and < in STRANDED: a clock
+          // exactly on the cutoff is in one of the two, never in neither (F-3).
           + " (state IN ('RECEIVED','FETCHED','MAPPED','PARKED')"
-          + "   AND (next_attempt_at IS NULL OR next_attempt_at <= ?))"
+          + "   AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
+          + "   AND (due_since IS NULL OR due_since >= "
+          + CUTOFF
+          + "))"
           // A retryable terminal is re-picked only when a next attempt was actually scheduled. A
           // null there is the pipeline saying "this one cannot improve by running again" - an
           // archive conflict, a tampered object, a validation refusal - and it must not be read as
@@ -140,7 +207,8 @@ public final class JdbcInboundEventStore implements InboundEventStore {
             ps.setString(i++, event.lastCode());
             ps.setString(i++, "");
             ps.setBytes(i++, body);
-            ps.setString(i, event.bodySha256());
+            ps.setString(i++, event.bodySha256());
+            ps.setObject(i, ts(event.dueSinceInstant().orElse(event.receivedAt())));
             // ON CONFLICT DO NOTHING: a redelivery of an event we already hold is a no-op that is
             // still answered 200. Stripe delivers at least once and says so.
             return ps.executeUpdate() == 1;
@@ -221,6 +289,9 @@ public final class JdbcInboundEventStore implements InboundEventStore {
                     && (resolved == InboundState.FAILED_FETCH
                         || resolved == InboundState.FAILED_ISSUANCE));
             ps.setObject(i++, ts(when));
+            ps.setBoolean(i++, RunningLimit.restartsClock(current.state(), resolved, false));
+            ps.setBoolean(i++, RunningLimit.restartsClock(current.state(), resolved, true));
+            ps.setObject(i++, ts(when));
             ps.setString(i, eventId);
             ps.executeUpdate();
           }
@@ -259,24 +330,92 @@ public final class JdbcInboundEventStore implements InboundEventStore {
 
   @Override
   public List<InboundEvent> due(
-      Instant now, Duration retryCeiling, int limit, String pinnedApiVersion) {
+      Instant now,
+      Duration retryCeiling,
+      RunningLimit runningLimit,
+      int limit,
+      String pinnedApiVersion) {
+    Objects.requireNonNull(runningLimit, "runningLimit");
     return unitOfWork.inReadUnit(
         unit -> {
-          List<InboundEvent> due = new ArrayList<>();
           try (PreparedStatement ps = unit.connection().prepareStatement(DUE)) {
-            ps.setObject(1, ts(now));
-            ps.setObject(2, ts(now.minus(retryCeiling)));
-            ps.setObject(3, ts(now));
-            ps.setString(4, pinnedApiVersion == null ? "" : pinnedApiVersion);
-            ps.setInt(5, Math.max(1, limit));
-            try (ResultSet rs = ps.executeQuery()) {
-              while (rs.next()) {
-                due.add(read(rs));
-              }
+            int i = 1;
+            ps.setObject(i++, ts(now));
+            ps.setObject(i++, ts(runningLimit.parkedCutoff(now)));
+            ps.setObject(i++, ts(runningLimit.runningCutoff(now)));
+            ps.setObject(i++, ts(now.minus(retryCeiling)));
+            ps.setObject(i++, ts(now));
+            ps.setString(i++, pinnedApiVersion == null ? "" : pinnedApiVersion);
+            ps.setInt(i, Math.max(1, limit));
+            return readAll(ps);
+          }
+        });
+  }
+
+  @Override
+  public List<InboundEvent> stranded(Instant now, RunningLimit runningLimit, int limit) {
+    Objects.requireNonNull(runningLimit, "runningLimit");
+    return unitOfWork.inReadUnit(
+        unit -> {
+          try (PreparedStatement ps = unit.connection().prepareStatement(STRANDED)) {
+            ps.setObject(1, ts(runningLimit.parkedCutoff(now)));
+            ps.setObject(2, ts(runningLimit.runningCutoff(now)));
+            ps.setInt(3, Math.max(1, limit));
+            return readAll(ps);
+          }
+        });
+  }
+
+  @Override
+  public boolean expire(InboundEvent stranded, ComplianceFinding finding, Instant now) {
+    Objects.requireNonNull(finding, "finding");
+    Instant clock =
+        stranded
+            .dueSinceInstant()
+            .orElseThrow(
+                () ->
+                    new EInvoiceException(
+                        ErrorCodes.INVALID, "a row with no time-limit clock is never stranded"));
+    if (!stranded.state().allowedNext().contains(InboundState.EXPIRED)) {
+      // Not a running state: nothing to expire, and never an exception from the sweep's loop.
+      return false;
+    }
+    return unitOfWork.inTransaction(
+        unit -> {
+          Connection c = unit.connection();
+          try (PreparedStatement ps = c.prepareStatement(EXPIRE)) {
+            int i = 1;
+            ps.setString(i++, ErrorCodes.INBOUND_CEILING_REACHED);
+            ps.setObject(i++, ts(Timestamps.toStorage(now)));
+            ps.setString(i++, stranded.eventId());
+            ps.setString(i++, stranded.state().name());
+            ps.setObject(i, ts(clock));
+            if (ps.executeUpdate() != 1) {
+              return false;
             }
           }
-          return List.copyOf(due);
+          try (PreparedStatement ps = c.prepareStatement(RECORD_EXPIRY_FINDING)) {
+            int i = 1;
+            ps.setString(i++, finding.sellerId());
+            ps.setString(i++, finding.mode().wire());
+            ps.setString(i++, finding.code());
+            ps.setString(i++, finding.subjectId());
+            ps.setObject(i++, ts(finding.firstSeen()));
+            ps.setObject(i, ts(finding.lastSeen()));
+            ps.executeUpdate();
+          }
+          return true;
         });
+  }
+
+  private static List<InboundEvent> readAll(PreparedStatement ps) throws SQLException {
+    List<InboundEvent> rows = new ArrayList<>();
+    try (ResultSet rs = ps.executeQuery()) {
+      while (rs.next()) {
+        rows.add(read(rs));
+      }
+    }
+    return List.copyOf(rows);
   }
 
   @Override
@@ -337,7 +476,8 @@ public final class JdbcInboundEventStore implements InboundEventStore {
         instant(rs.getObject("next_attempt_at", OffsetDateTime.class)),
         rs.getString("last_code"),
         rs.getString("body_sha256"),
-        rs.getBoolean("body_present"));
+        rs.getBoolean("body_present"),
+        instant(rs.getObject("due_since", OffsetDateTime.class)));
   }
 
   @Override

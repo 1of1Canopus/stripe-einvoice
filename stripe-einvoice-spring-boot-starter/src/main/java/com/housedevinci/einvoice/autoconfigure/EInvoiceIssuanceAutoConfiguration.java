@@ -18,6 +18,7 @@ import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
 import com.housedevinci.einvoice.application.PreflightSupport;
 import com.housedevinci.einvoice.application.ReconciliationSweep;
 import com.housedevinci.einvoice.application.ReprocessLedger;
+import com.housedevinci.einvoice.application.StrandedInboundSweep;
 import com.housedevinci.einvoice.application.StripeInvoiceSource;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
@@ -300,8 +301,16 @@ public class EInvoiceIssuanceAutoConfiguration {
       IssuanceChainVerifier verifier,
       Clock clock,
       EInvoiceProperties properties) {
+    // QUESTIONS 29: built here, not a bean, like the D-PR36-6 controls. A host that could replace
+    // it with a no-op would leave rows hidden from the due query with nothing to report them.
+    StrandedInboundSweep stranded =
+        new StrandedInboundSweep(
+            inbound,
+            properties.getIssuance().runningLimit(),
+            properties.getReconcile().getPageSize(),
+            unitOfWork.configuration());
     return new IssuanceSweeper(
-        unitOfWork, inbound, worker, reconciliation, verifier, clock, properties);
+        unitOfWork, inbound, worker, reconciliation, verifier, stranded, clock, properties);
   }
 
   @Bean
