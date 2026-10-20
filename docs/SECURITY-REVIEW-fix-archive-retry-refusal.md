@@ -211,3 +211,147 @@ The six probes are in `CipherProbePr42Test` and `CipherProbePr42BouncerTest` (pa
 `com.housedevinci.einvoice.adapter.jdbc`, core tests), handed over with the fix list. The fix pass
 adds them to the suite before it touches production code. Each must go green with its fix, and
 the full `./mvnw -B clean verify` must stay at 0 skipped.
+
+## Pass 2 (2026-10-20)
+
+Head `3a4b6b5` on `fix/archive-retry-refusal-v2` (PR 43). The token proof mechanism is `35a43e1`.
+`main` is not merged into the branch, as instructed.
+
+**Verdict: MERGE WITH FIXES.** No HIGH, no MEDIUM. Two LOW and one INFO (D-PR43-1 to D-PR43-3).
+D-PR43-1 needs a new mechanism: **DESIGN STOP**. The CI check Build & test is still red
+(D-PR42-7, the `CipherProbePr40Test` failure that also fails on `main`). It blocks the merge on its
+own until `main` is merged with its fix.
+
+### Numbers
+
+| check | result |
+|---|---|
+| `./mvnw -B clean verify`, Docker up, Surefire XML | BUILD SUCCESS; core 755, starter 143, sample 9; 0 failures, 0 skipped |
+| pass 1 probes (4 in `CipherProbePr42Test`, 2 in `CipherProbePr42BouncerTest`) | 6 of 6 green |
+| C4 probes (`probe_foreign_unlock_after_the_pre_read_refuses_the_burn`, `probe_foreign_unlock_during_the_put_refuses_mark_issued`), real PgBouncer transaction mode | 2 of 2 green |
+| mutations T1 to T5 and L1 to L5, re-run by the reviewer, each alone, restored by `git checkout` | 10 of 10 RED on the tests the PR body names |
+| mutations 1 to 7 (trigger, enum, pre-read) | not re-run: the schema, `IssuanceState` and the pre-read code are unchanged since pass 1 (`git diff 8bda84a..3a4b6b5` touches none of them); the pass 1 results stand |
+| new review probes (internal `CipherProbePr43Test`, `CipherProbePr43StartupTest`) | 2 probes, 2 RED on the head |
+
+Mutation results, measured:
+
+| # | mutation | RED |
+|---|---|---|
+| T1 | proof skipped on held transactions | both C4 probes. The reset probe stays green (D-PR43-3) |
+| T2 | token not compared | `probe_release_frees_another_holders_lock`, `probe_a_second_key_on_one_backend_never_passes_the_first_proof`, `a_new_session_holding_the_key_without_the_token_fails_the_proof` |
+| T3 | release without the proof | `probe_release_frees_another_holders_lock`, `probe_a_second_key_on_one_backend_never_passes_the_first_proof` |
+| T4 | `08P01` not mapped | `probe_statement_pooling_is_refused_as_not_pinned` |
+| T5 | TRY not committed when autocommit is off | `probe_a_rolled_back_held_unit_keeps_the_token_on_a_pool_without_autocommit` |
+| L1 | TRY answers "got it" for a held key | race probe and 14 path and store tests |
+| L2 | unlock skipped | released-lock, free-lock path, terminated holder, eviction, collision, C1 probe |
+| L3 | session check disabled | `transaction_pooling_is_refused_before_a_number_is_taken`, both pooler probes |
+| L4 | decide from the allocator's read | `the_row_is_read_again_under_the_lock` |
+| L5 | eviction skipped | `an_evicted_connection_never_comes_back_from_the_pool_holding_the_lock` |
+
+### The builder's deviations
+
+1. **A release whose proof fails answers DEI-104 even after the work succeeded.** Correct. Keep it.
+   The retry does not do the work twice. It reads the row again under a fresh lock. An `ISSUED` row
+   takes the redelivery path: one archive read and a hash compare, no render, no PUT, no number. A
+   burned row ends terminal. An `ARCHIVING` row whose object exists resumes from the archive with no
+   PUT. Example: `F-2026-0042` is marked `ISSUED`, then a foreign `pg_advisory_unlock_all()` frees
+   the lock before the release. The run answers DEI-104. The next attempt finds `ISSUED` and
+   completes with the same number. Evidence: the C4 PUT probe (row stays `ARCHIVING`, retried) and
+   the pass 1 resume probes 3 and 4, green. One wording defect remains: the release refusal says
+   "nothing was written in this transaction", which is false at the release. It is part of
+   D-PR43-1.
+2. **Joined mode runs no per-transaction proof, only the release proof.** Correct. In joined mode
+   the TRY, every held statement and the release are one caller transaction. Any pooler keeps one
+   transaction on one server connection. No foreign statement can run on that backend while the
+   transaction is open, so nobody else can free the lock. A host transaction that spans two of our
+   units takes two locks in turn: each unit runs its own TRY and its own release, and the second
+   unit cannot run without its own TRY. A caller connection in autocommit is refused with
+   `HOST_AUTOCOMMIT` before the first read. Spring joins only an actual transaction. The design
+   page's "Order" line still says the proofs run in joined mode; the build notes correct it.
+   The one gap found is not a lost lock. It is an aborted caller transaction: D-PR43-1.
+3. **`tryLock` returns the token.** Accepted. The internal copy of `CipherProbePr42Test` is
+   updated to `Optional<String>`.
+4. **The reset probe stays green under T1.** Measured. That is a weak probe: D-PR43-3.
+
+### Attacks with no finding
+
+- **The token in logs at DEBUG.** This module never logs the token. The two messages name the row
+  id only (C6, asserted). The JDBC driver can log bound values at its most verbose level, which I
+  did not reproduce. Not a finding either way: the token is not a secret. The design review
+  measured that any client on the same backend can read it with `current_setting`. It proves
+  "this acquisition", and it grants nothing to someone who reads it. Closed without a code change.
+- **The round-robin refusal on a plain pool.** The four extra statements run on connection one,
+  which the pool never moves while it is checked out. A plain pool cannot fail them. Every database
+  test in the suite runs the check on a plain pool and passes, and
+  `session_pooling_with_round_robin_still_passes` is green. The one false refusal is a pool of one
+  connection, and it is not a DEI-104: D-PR43-2.
+
+### Findings
+
+#### D-PR43-1 (LOW): an aborted caller transaction turns the outcome into DEI-104 and aborts the caller's connection
+
+Repro: internal `CipherProbePr43Test.probe_an_aborted_joined_transaction_keeps_its_outcome_and_the_callers_connection`.
+Joined mode. A held write (`markFailed`) times out on the issuance row lock (`lock_timeout`). The
+run handles that refusal, as `concludeIssuance` does. PostgreSQL has now aborted the caller's
+transaction, so the release statement cannot run. Measured: `whileHeld` throws `DEI-104` "the row
+lock of issuance row 1 is no longer held by this run on its database session; nothing was written
+in this transaction". The lock was never lost. The real code is gone. By code reading, the second
+release in `finally` fails the same way, and `evict` then calls `abort()` on the connection the
+caller's transaction manager still owns. That is the joined eviction of D-RTR-7, now also hit by a
+plain lock timeout. Example: a host batch job holds a row of `F-2026-0042`; the issuance in the
+host's transaction reports "pooler in transaction mode", and the host's rollback then fails on a
+closed connection.
+
+**DESIGN STOP.** The property, for the builder's one-page design: in joined mode, (a) a release
+that cannot run because the caller's transaction is aborted keeps the run's own outcome and code;
+(b) the row lock is still released by the end of the caller's transaction, whatever its result;
+(c) this module never aborts or closes a connection that a caller's transaction owns. Paths:
+`CallerConnectionUnitOfWork`, `SpringManagedUnitOfWork` (commit, rollback, rollback-only), and the
+own-connection path unchanged. Also in this item: the release refusal gets its own message, which
+says the run's committed writes stand and the next attempt converges, and never "nothing was
+written".
+
+#### D-PR43-2 (LOW): a pool of one connection only WARNs at startup and stalls every issuance
+
+Repro: internal `CipherProbePr43StartupTest.probe_a_pool_of_one_fails_the_startup_as_a_configuration_error`.
+Hikari with `maximumPoolSize = 1`. The check holds the only connection while it waits for a
+second one. After the pool's connection timeout it ends `DEI-102`. The starter logs "it runs before
+the first issuance row lock instead", which is never true for this pool. Every issuance then holds
+the only connection for the whole timeout (30 s by default), starving the host, and ends DEI-102.
+The README says the check needs two free connections, but nothing enforces it.
+Fix (Isis): in `EInvoiceIssuanceAutoConfiguration.einvoiceSessionPinningCheck`, when the data
+source unwraps to `HikariDataSource` (or `HikariConfigMXBean`) with a maximum pool size below 2,
+fail the startup with `ErrorCodes.CONFIG` and a message naming the pool size and the minimum. Any
+other data source keeps today's path. README: one sentence. Test: the probe above, asserting
+`CONFIG`.
+
+#### D-PR43-3 (INFO): the reset probe does not pin the per-transaction proof
+
+Repro: mutation T1 (proof skipped in `HeldConnectionUnitOfWork.beforeTransaction`) leaves
+`probe_reset_always_pid_match_is_not_proof` green. Measured. The work is one read; the read runs
+without a proof, and only the release refuses. The design asked for this probe to be red under T1.
+Fix (Isis): the work sets a flag after its held read returns; assert that the flag was never set
+(the first held transaction refused, not the release). T1 must then turn it red.
+
+### Prior findings on this branch
+
+| id | status |
+|---|---|
+| D-PR42-1 (LOW) | closed: probe green, F1 and F1b red (pass 1 fix) |
+| D-PR42-2 (LOW) | closed by Revision 3: both pooler probes green, T1 to T4 red |
+| D-PR42-3 (LOW) | closed: probe green |
+| D-PR42-4 (INFO) | closed: probe green, `DEI-247` |
+| D-PR42-5 (INFO) | closed: probe green |
+| D-PR42-6 (MEDIUM) | closed by Revision 3: case 1 and 2 probes green, T2 and T3 red |
+| D-PR42-7 (LOW) | open: Build & test red on CI on `3a4b6b5`; waits for the `main` merge |
+| D-PR42-8 (LOW, C1) | closed: C1 probe green, T5 red |
+| D-PR42-9 (INFO, C2) | closed: C2 probe green, T2 and T3 red, text present |
+| D-PR42-10 (INFO, C3 to C6) | closed: `IS TRUE`, the C4 probes green under T1 red, `08P01` only (T4 red), C6 text and message check present |
+| D-RTR-7 (MEDIUM) | closed for the race (L1 red); its joined release edge is D-PR43-1 |
+
+### Fix list
+
+1. D-PR43-1: DESIGN STOP, one page from the builder, reviewed before code.
+2. D-PR43-2: pool-size refusal in the starter, README sentence, probe asserting `CONFIG`.
+3. D-PR43-3: the reset probe's flag assertion; show T1 red.
+4. D-PR42-7: merge `main` with the flaky-probe fix; Build & test green on CI.
