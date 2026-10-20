@@ -52,7 +52,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- **`InboundEventStore.transitionFrom` (D-PR9-F1).** A new abstract method on the port: a state
+- **BREAKING CHANGE: `InboundEventStore.transitionFrom` (D-PR9-F1).** A new abstract method on the port: a state
   move that lands only if the row still holds an expected state, and answers empty otherwise. A
   host that supplies its own `InboundEventStore` bean must implement it with the compare and the
   write in one locked statement. There is no default method on purpose: one built from `find`
@@ -101,6 +101,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A lost inbound compare-and-set under REPEATABLE READ or SERIALIZABLE answers quietly (D-PR45-2).**
+  When the store owns the connection, a `40001` on the state move is retried once in a fresh
+  transaction, so the loser of a worker and sweeper race steps aside instead of logging `DEI-102`.
+  In a host transaction the error passes through unchanged.
 - **Two runs on one event no longer fail with `DEI-210` before the number (D-PR9-F1).** A worker
   and the sweeper, or a re-open and a retry, can run one event at once. A run wrote the inbound
   row before the number claim against whatever the row held at that moment. Example: run B waits

@@ -213,6 +213,13 @@ public final class JdbcInboundEventStore implements InboundEventStore {
    * The one state move. With an expected state it is a compare-and-set (D-PR9-F1): the row lock is
    * taken, the state compared, and the update itself repeats the compare, so a row that moved is
    * left exactly as it is and the answer is empty.
+   *
+   * <p>At REPEATABLE READ and SERIALIZABLE the locking read of a row another transaction moved and
+   * committed raises SQLState {@code 40001} instead of re-reading (D-PR45-2). When this store owns
+   * the connection, the whole move is run once more in a fresh transaction: the new snapshot sees
+   * the committed move, so the compare answers empty or the move lands. A second {@code 40001}
+   * stays an unavailable-store error. When the transaction is the caller's, the error passes
+   * through unchanged: that transaction is already aborted and cannot be retried from here.
    */
   private Optional<InboundEvent> move(
       String eventId,
@@ -222,65 +229,109 @@ public final class JdbcInboundEventStore implements InboundEventStore {
       String ruleId,
       Instant now,
       Duration retryIn) {
+    try {
+      return attempt(eventId, expected, next, code, ruleId, now, retryIn, true);
+    } catch (SnapshotLost first) {
+      return attempt(eventId, expected, next, code, ruleId, now, retryIn, false);
+    }
+  }
+
+  /** Raised inside an owned transaction only; never leaves {@link #move}. */
+  private static final class SnapshotLost extends RuntimeException {
+    private static final long serialVersionUID = 1L;
+
+    SnapshotLost() {
+      super(null, null, false, false);
+    }
+  }
+
+  private Optional<InboundEvent> attempt(
+      String eventId,
+      Optional<InboundState> expected,
+      InboundState next,
+      String code,
+      String ruleId,
+      Instant now,
+      Duration retryIn,
+      boolean mayRetry) {
     return unitOfWork.inTransaction(
         unit -> {
-          Connection c = unit.connection();
-          InboundEvent current =
-              find(c, eventId, true)
-                  .orElseThrow(
-                      () ->
-                          new EInvoiceException(
-                              ErrorCodes.INBOUND_UNREADABLE,
-                              "no inbound event is recorded under that id"));
-          if (expected.isPresent() && current.state() != expected.get()) {
-            return Optional.<InboundEvent>empty();
-          }
-          // Refused in the enum, here, for the same reason the issuance transition is: a worker
-          // and a sweeper can both reach a conclusion about one row, and the second one to write
-          // must not be able to move it backwards.
-          InboundState resolved = current.state().transitionTo(next);
-          Instant when = Timestamps.toStorage(now);
-          try (PreparedStatement ps = c.prepareStatement(TRANSITION_FROM)) {
-            int i = 1;
-            ps.setString(i++, resolved.name());
-            ps.setString(i++, code == null ? "" : code);
-            ps.setObject(i++, ts(when));
-            if (retryIn == null) {
-              ps.setNull(i++, Types.TIMESTAMP_WITH_TIMEZONE);
-            } else {
-              ps.setObject(i++, ts(Timestamps.toStorage(now.plus(retryIn))));
+          try {
+            return run(unit, eventId, expected, next, code, ruleId, now, retryIn);
+          } catch (SQLException e) {
+            if (mayRetry && !unit.joined() && "40001".equals(e.getSQLState())) {
+              throw new SnapshotLost();
             }
-            // I-07: the state machine decides whether the body survives, not the caller.
-            ps.setBoolean(i++, resolved.keepsBody());
-            ps.setBoolean(i++, resolved == InboundState.PARKED);
-            ps.setObject(i++, ts(when));
-            ps.setBoolean(
-                i++,
-                retryIn != null
-                    && (resolved == InboundState.FAILED_FETCH
-                        || resolved == InboundState.FAILED_ISSUANCE));
-            ps.setObject(i++, ts(when));
-            ps.setString(i++, eventId);
-            // The row is locked, so this repeats the compare above rather than racing it: the
-            // statement itself refuses a row whose state is not the one the move was decided on.
-            ps.setString(i, current.state().name());
-            if (ps.executeUpdate() != 1) {
-              throw new EInvoiceException(
-                  ErrorCodes.INBOUND_UNREADABLE,
-                  "the inbound event changed under its own row lock");
-            }
+            throw e;
           }
-          if (ruleId != null && !ruleId.isBlank()) {
-            try (PreparedStatement ps =
-                c.prepareStatement(
-                    "UPDATE einvoice_inbound_event SET last_rule_id = ? WHERE event_id = ?")) {
-              ps.setString(1, ruleId);
-              ps.setString(2, eventId);
-              ps.executeUpdate();
-            }
-          }
-          return find(c, eventId, false);
         });
+  }
+
+  private Optional<InboundEvent> run(
+      JdbcUnitOfWork.Unit unit,
+      String eventId,
+      Optional<InboundState> expected,
+      InboundState next,
+      String code,
+      String ruleId,
+      Instant now,
+      Duration retryIn)
+      throws SQLException {
+    Connection c = unit.connection();
+    InboundEvent current =
+        find(c, eventId, true)
+            .orElseThrow(
+                () ->
+                    new EInvoiceException(
+                        ErrorCodes.INBOUND_UNREADABLE,
+                        "no inbound event is recorded under that id"));
+    if (expected.isPresent() && current.state() != expected.get()) {
+      return Optional.<InboundEvent>empty();
+    }
+    // Refused in the enum, here, for the same reason the issuance transition is: a worker
+    // and a sweeper can both reach a conclusion about one row, and the second one to write
+    // must not be able to move it backwards.
+    InboundState resolved = current.state().transitionTo(next);
+    Instant when = Timestamps.toStorage(now);
+    try (PreparedStatement ps = c.prepareStatement(TRANSITION_FROM)) {
+      int i = 1;
+      ps.setString(i++, resolved.name());
+      ps.setString(i++, code == null ? "" : code);
+      ps.setObject(i++, ts(when));
+      if (retryIn == null) {
+        ps.setNull(i++, Types.TIMESTAMP_WITH_TIMEZONE);
+      } else {
+        ps.setObject(i++, ts(Timestamps.toStorage(now.plus(retryIn))));
+      }
+      // I-07: the state machine decides whether the body survives, not the caller.
+      ps.setBoolean(i++, resolved.keepsBody());
+      ps.setBoolean(i++, resolved == InboundState.PARKED);
+      ps.setObject(i++, ts(when));
+      ps.setBoolean(
+          i++,
+          retryIn != null
+              && (resolved == InboundState.FAILED_FETCH
+                  || resolved == InboundState.FAILED_ISSUANCE));
+      ps.setObject(i++, ts(when));
+      ps.setString(i++, eventId);
+      // The row is locked, so this repeats the compare above rather than racing it: the
+      // statement itself refuses a row whose state is not the one the move was decided on.
+      ps.setString(i, current.state().name());
+      if (ps.executeUpdate() != 1) {
+        throw new EInvoiceException(
+            ErrorCodes.INBOUND_UNREADABLE, "the inbound event changed under its own row lock");
+      }
+    }
+    if (ruleId != null && !ruleId.isBlank()) {
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "UPDATE einvoice_inbound_event SET last_rule_id = ? WHERE event_id = ?")) {
+        ps.setString(1, ruleId);
+        ps.setString(2, eventId);
+        ps.executeUpdate();
+      }
+    }
+    return find(c, eventId, false);
   }
 
   @Override

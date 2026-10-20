@@ -62,6 +62,12 @@ public interface InboundEventStore {
    * <p>No default implementation: one built from {@link #find} and {@link #transition} would not be
    * atomic, and that weaker form must not pass silently.
    *
+   * <p>Isolation (D-PR45-2): at REPEATABLE READ or SERIALIZABLE the locking read of a row that
+   * another run moved raises SQLState {@code 40001}. When the store owns the connection, the
+   * bundled implementation runs the move once more in a fresh transaction and so answers empty (or
+   * lands). When the transaction is the host's, the failure passes through unchanged ({@code
+   * DEI-102}): that transaction is already aborted and the host retries it.
+   *
    * @param expected the state this run last read or wrote
    * @return the moved row, or empty when the row no longer holds {@code expected} and nothing was
    *     written
