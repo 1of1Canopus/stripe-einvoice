@@ -11,20 +11,23 @@ public final class RowLockHolder implements AutoCloseable {
 
   private final Connection connection;
   private final long issuanceId;
+  private final String token;
 
-  private RowLockHolder(Connection connection, long issuanceId) {
+  private RowLockHolder(Connection connection, long issuanceId, String token) {
     this.connection = connection;
     this.issuanceId = issuanceId;
+    this.token = token;
   }
 
   public static RowLockHolder hold(DataSource dataSource, long issuanceId) {
     try {
       Connection c = dataSource.getConnection();
-      if (IssuanceRowLocks.tryLock(c, issuanceId).isEmpty()) {
+      java.util.Optional<String> token = IssuanceRowLocks.tryLock(c, issuanceId);
+      if (token.isEmpty()) {
         c.close();
         throw new IllegalStateException("the test could not take the row lock");
       }
-      return new RowLockHolder(c, issuanceId);
+      return new RowLockHolder(c, issuanceId, token.get());
     } catch (SQLException e) {
       throw new IllegalStateException(e);
     }
@@ -50,12 +53,10 @@ public final class RowLockHolder implements AutoCloseable {
 
   @Override
   public void close() {
-    try (PreparedStatement ps = connection.prepareStatement(IssuanceRowLocks.UNLOCK)) {
-      ps.setInt(1, AdvisoryLocks.ROW_CLASS_ID);
-      ps.setInt(2, IssuanceRowLocks.rowKey(issuanceId));
-      ps.execute();
-    } catch (SQLException e) {
-      throw new IllegalStateException(e);
+    try {
+      if (!IssuanceRowLocks.unlock(connection, issuanceId, token)) {
+        throw new IllegalStateException("the test's own lock was not released");
+      }
     } finally {
       try {
         connection.close();

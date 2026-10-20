@@ -118,8 +118,6 @@ class CipherProbePr42BouncerTest {
    * connections. Connection two gets the other server, and connection one gets its first server
    * back with the session setting still on it, so the check passes a transaction pooler.
    */
-  @org.junit.jupiter.api.Disabled(
-      "QUESTIONS 43 / D-PR42-2: design stop, the stronger check awaits the security ruling")
   @Test
   void probe_a_round_robin_transaction_pooler_is_refused() throws Exception {
     try (HikariDataSource ds = through(roundRobin)) {
@@ -135,8 +133,6 @@ class CipherProbePr42BouncerTest {
    * D-PR42-2, second shape. Statement mode refuses the check's own transaction, and the refusal
    * comes out as DEI-102 (store unavailable, retried for ever) instead of DEI-104.
    */
-  @org.junit.jupiter.api.Disabled(
-      "QUESTIONS 43 / D-PR42-2: design stop, the stronger check awaits the security ruling")
   @Test
   void probe_statement_pooling_is_refused_as_not_pinned() throws Exception {
     try (HikariDataSource ds = through(statementMode)) {

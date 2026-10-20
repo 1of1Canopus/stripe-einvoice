@@ -61,10 +61,9 @@ public interface JdbcUnitOfWork {
 
   /**
    * Runs {@code work} with one connection held for the whole call, outside any transaction of this
-   * unit of work, and with a unit of work whose every statement runs on that same connection
-   * (D-RTR-7). Own connection: a pooled connection is taken for the call and released after it, and
-   * the bound unit of work commits each of its transactions on it. Joined: the caller's connection,
-   * and the bound unit of work is this one. Either way the work never needs a second connection.
+   * unit of work (D-RTR-7). Own connection: a pooled connection is taken for the call and released
+   * after it. Joined: the caller's connection, inside the caller's transaction. {@code bound} is
+   * this unit of work; the issuance row lock builds its own held unit of work on the connection.
    */
   <T> T onOneConnection(SessionWork<T> work);
 

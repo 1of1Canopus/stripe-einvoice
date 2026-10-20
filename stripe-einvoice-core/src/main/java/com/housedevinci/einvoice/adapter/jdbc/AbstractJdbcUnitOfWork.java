@@ -35,14 +35,21 @@ public abstract class AbstractJdbcUnitOfWork implements JdbcUnitOfWork {
     // nothing to poison: the implementation that opened the connection rolls it back itself
   }
 
+  /**
+   * Runs as the first statement of every transaction this unit of work opens on its own; the
+   * default does nothing. The issuance row lock's held unit of work proves its lock here (Revision
+   * 3, P1), so nothing is written before the proof.
+   */
+  protected void beforeTransaction(Connection connection) throws SQLException {
+    // nothing by default
+  }
+
   @Override
   public <T> T onOneConnection(SessionWork<T> work) {
     Connection connection = null;
     try {
       connection = acquire();
-      boolean joined = joined(connection);
-      JdbcUnitOfWork bound = joined ? this : new HeldConnectionUnitOfWork(connection);
-      return work.run(connection, bound, joined);
+      return work.run(connection, this, joined(connection));
     } catch (SQLException e) {
       throw JdbcSupport.unavailable(e);
     } finally {
@@ -131,6 +138,7 @@ public abstract class AbstractJdbcUnitOfWork implements JdbcUnitOfWork {
     boolean previous = connection.getAutoCommit();
     connection.setAutoCommit(false);
     try {
+      beforeTransaction(connection);
       T result = work.run(unit);
       connection.commit();
       return result;

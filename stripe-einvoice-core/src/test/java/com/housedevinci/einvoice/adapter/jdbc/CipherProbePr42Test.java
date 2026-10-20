@@ -79,7 +79,7 @@ class CipherProbePr42Test {
     DataSource b = PostgresSupport.freshDatabase("cxdbb", 2);
     try (RowLockHolder held = RowLockHolder.hold(a, 4242L);
         Connection c = b.getConnection()) {
-      Optional<Integer> taken = IssuanceRowLocks.tryLock(c, 4242L);
+      Optional<String> taken = IssuanceRowLocks.tryLock(c, 4242L);
       if (taken.isPresent()) {
         IssuanceRowLocks.unlock(c, 4242L, taken.get());
       }

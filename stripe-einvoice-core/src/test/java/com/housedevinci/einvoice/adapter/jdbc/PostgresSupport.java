@@ -95,6 +95,11 @@ public final class PostgresSupport {
 
   /** A fresh database with a pool of exactly {@code poolSize}, for the pool-starvation tests. */
   public static DataSource freshDatabase(String hint, int poolSize) {
+    return freshDatabase(hint, poolSize, true);
+  }
+
+  /** A fresh database whose pool hands out connections with {@code autoCommit} as given (C1). */
+  public static DataSource freshDatabase(String hint, int poolSize, boolean autoCommit) {
     dataSource();
     String name =
         ("einvoice_" + hint + "_" + SELLER_SEQUENCE.incrementAndGet())
@@ -108,6 +113,7 @@ public final class PostgresSupport {
     config.setMinimumIdle(0);
     config.setIdleTimeout(10_000);
     config.setConnectionTimeout(5_000);
+    config.setAutoCommit(autoCommit);
     HikariDataSource fresh = new HikariDataSource(config);
     JdbcSupport.initializeSchema(fresh);
     return fresh;

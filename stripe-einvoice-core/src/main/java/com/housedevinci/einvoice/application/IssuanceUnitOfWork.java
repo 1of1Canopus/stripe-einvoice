@@ -1075,7 +1075,9 @@ public final class IssuanceUnitOfWork {
    * refusals use, named once (D11-02): a second list would drift from it.
    */
   private static boolean transientStoreFailure(String code) {
-    return retryableAllocationFailure(code);
+    // Revision 3: a row lock lost mid-run (DEI-104) is retried; the next run decides from what
+    // the archive and the row then hold, under a fresh lock.
+    return retryableAllocationFailure(code) || ErrorCodes.SESSION_NOT_PINNED.equals(code);
   }
 
   /** Concludes the inbound row on a refused state write, with a next attempt only if one helps. */

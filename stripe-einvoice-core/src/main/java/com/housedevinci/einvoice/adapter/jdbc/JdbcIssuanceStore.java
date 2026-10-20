@@ -408,26 +408,46 @@ public final class JdbcIssuanceStore
           if (!joined && !sessionPinned()) {
             return Optional.empty();
           }
-          Optional<Integer> holder = IssuanceRowLocks.tryLock(connection, issuanceId);
-          if (holder.isEmpty()) {
+          Optional<String> token = IssuanceRowLocks.tryLock(connection, issuanceId, joined);
+          if (token.isEmpty()) {
             return Optional.of(Optional.<T>empty());
           }
+          // Joined: every statement is in the caller's one transaction, so one server connection;
+          // own connection: every held transaction proves this acquisition first (P1).
+          JdbcUnitOfWork held =
+              joined ? bound : new HeldConnectionUnitOfWork(connection, issuanceId, token.get());
           boolean released = false;
           try {
-            JdbcIssuanceStore locked = new JdbcIssuanceStore(this, bound);
+            JdbcIssuanceStore locked = new JdbcIssuanceStore(this, held);
             T result =
                 work.apply(
                     new com.housedevinci.einvoice.application.IssuanceRowLock.Held(locked, locked));
-            released = IssuanceRowLocks.unlock(connection, issuanceId, holder.get());
+            released = IssuanceRowLocks.unlock(connection, issuanceId, token.get(), joined);
+            if (!released) {
+              // P2: the release refused to free a lock that is no longer this acquisition's.
+              throw IssuanceRowLocks.lostLock(issuanceId);
+            }
             return Optional.of(Optional.of(result));
           } finally {
-            if (!released) {
-              if (!IssuanceRowLocks.unlock(connection, issuanceId, holder.get())) {
-                IssuanceRowLocks.evict(connection, issuanceId);
-              }
+            if (!released
+                && !IssuanceRowLocks.unlock(connection, issuanceId, token.get(), joined)) {
+              IssuanceRowLocks.evict(connection, issuanceId);
             }
           }
         });
+  }
+
+  /**
+   * Test seam: marks a data source as checked without running R5's startup check, so a test can put
+   * a transaction pooler under the per-lock proof itself (Revision 3). Package-private.
+   */
+  static void trustSessionPinningForTest(DataSource dataSource) {
+    PINNING_CHECK.lock();
+    try {
+      SESSION_PINNED.add(dataSource);
+    } finally {
+      PINNING_CHECK.unlock();
+    }
   }
 
   /** True once R5's check has passed for this store's data source (for a startup probe). */

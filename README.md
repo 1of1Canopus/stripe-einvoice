@@ -160,7 +160,13 @@ Each issuance row is held under a session-level PostgreSQL advisory lock from th
 archive write is announced until its outcome is recorded. Two workers never write and refuse the
 same number at once: the second one gets `DEI-245` and retries later.
 
-- **A pooler in transaction or statement mode is refused** (`DEI-104`), before any number is taken.
+- **A pooler in transaction or statement mode is refused** (`DEI-104`). The startup check is an
+  early warning only: under low load a transaction pooler can pass it. What protects the number is
+  the proof every locked transaction runs first (this session still holds the key with this run's
+  random token); when it fails, the run stops with `DEI-104` before it reads, writes or burns. A
+  false pass needs two foreign acts on the same database backend (something frees the lock without
+  a reset, then something that is not this module takes the same key), which only code running as
+  the module's own database role can do. The session setting `einvoice.row_lock` is reserved.
   Under such a pooler a session lock is no lock at all. PgBouncer in session mode, or a direct
   connection, works. There is no setting that turns this check off.
 - The check needs two free connections besides the caller's own, the first time. The starter runs

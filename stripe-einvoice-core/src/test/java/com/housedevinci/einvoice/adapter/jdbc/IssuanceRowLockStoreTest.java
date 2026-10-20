@@ -6,6 +6,7 @@ import static com.housedevinci.einvoice.adapter.jdbc.NumberAllocatorTest.SIX;
 import static com.housedevinci.einvoice.adapter.jdbc.NumberAllocatorTest.key;
 import static com.housedevinci.einvoice.adapter.jdbc.NumberAllocatorTest.request;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.housedevinci.einvoice.domain.Issuance;
 import com.housedevinci.einvoice.domain.Mode;
@@ -32,6 +33,82 @@ class IssuanceRowLockStoreTest {
         Map.of(new JdbcIssuanceStore.SeriesId(seller, "DEFAULT", Mode.LIVE), SIX),
         CLOCK,
         JdbcIssuanceStore.DEFAULT_ALLOCATION_TIMEOUT);
+  }
+
+  // ------------------------------------------------------------------ Revision 3 (D-PR42-2)
+
+  @Test
+  void probe_a_rolled_back_held_unit_keeps_the_token_on_a_pool_without_autocommit() {
+    // C1: a Spring host often sets hikari auto-commit=false. The TRY must commit on its own, or the
+    // first held unit's rollback undoes the token (not the lock) and every later proof fails.
+    DataSource manual = PostgresSupport.freshDatabase("noautocommit", 2, false);
+    try {
+      String seller = PostgresSupport.freshSeller("noautocommit");
+      JdbcIssuanceStore store = store(manual, seller, JdbcUnitOfWork.ownConnection(manual));
+      Issuance row = store.allocate(request(key(seller), "in_noauto"));
+
+      Optional<String> firstError =
+          store.whileHeld(
+              row.id(),
+              held -> {
+                String code = "";
+                try {
+                  held.writer().markIssued(seller, Mode.LIVE, "in_noauto"); // NUMBERED: refused
+                } catch (com.housedevinci.einvoice.domain.EInvoiceException e) {
+                  code = e.code();
+                }
+                // The next held unit still proves the lock.
+                assertThat(held.reader().findBySource(seller, Mode.LIVE, "in_noauto")).isPresent();
+                return code;
+              });
+
+      assertThat(firstError)
+          .contains(com.housedevinci.einvoice.domain.ErrorCodes.ILLEGAL_TRANSITION);
+      assertThat(RowLockHolder.holderPid(manual, row.id()))
+          .as("released, not evicted")
+          .isEqualTo(-1);
+    } finally {
+      PostgresSupport.close(manual);
+    }
+  }
+
+  @Test
+  void the_proof_is_false_not_null_on_a_session_without_a_token() throws Exception {
+    // C3: the proof is written "(...) IS TRUE", so SQL itself answers false.
+    try (Connection c = PostgresSupport.dataSource().getConnection();
+        var ps = c.prepareStatement("SELECT " + IssuanceRowLocks.PROOF)) {
+      ps.setString(1, "5:" + "a".repeat(32));
+      ps.setLong(2, AdvisoryLocks.ROW_CLASS_ID & 0xFFFFFFFFL);
+      ps.setLong(3, 5L);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        assertThat(rs.getObject(1)).isEqualTo(Boolean.FALSE);
+      }
+    }
+  }
+
+  @Test
+  void a_new_session_holding_the_key_without_the_token_fails_the_proof() throws Exception {
+    // Pid reuse, faked: the OS cannot be made to hand out the same pid, so a new session takes the
+    // key itself. "This backend holds the key" is then true; the old acquisition's token is not on
+    // it. The proof never compares pids, so it fails.
+    long id = 909_090L;
+    String oldToken;
+    try (Connection old = PostgresSupport.dataSource().getConnection()) {
+      oldToken = IssuanceRowLocks.tryLock(old, id).orElseThrow();
+      assertThat(IssuanceRowLocks.unlock(old, id, oldToken)).isTrue();
+    }
+    try (Connection fresh = PostgresSupport.dataSource().getConnection();
+        var st = fresh.createStatement()) {
+      st.execute(
+          "SELECT pg_try_advisory_lock(" + AdvisoryLocks.ROW_CLASS_ID + ", " + (int) id + ")");
+      try {
+        assertThat(IssuanceRowLocks.prove(fresh, id, oldToken)).isFalse();
+      } finally {
+        st.execute(
+            "SELECT pg_advisory_unlock(" + AdvisoryLocks.ROW_CLASS_ID + ", " + (int) id + ")");
+      }
+    }
   }
 
   @Test
@@ -132,17 +209,21 @@ class IssuanceRowLockStoreTest {
       store.verifySessionPinning();
       Issuance row = store.allocate(request(key(seller), "in_evict"));
 
-      // The holder's session is killed from outside while it holds the lock: its release fails.
-      Optional<String> result =
-          store.whileHeld(
-              row.id(),
-              held -> {
-                int pid = RowLockHolder.holderPid(one, row.id());
-                PostgresSupport.executeOn(one, "SELECT pg_terminate_backend(" + pid + ")");
-                return "done";
-              });
+      // The holder's session is killed from outside while it holds the lock: its release fails,
+      // and since Revision 3 (P2) a release that cannot prove the lock answers DEI-104.
+      assertThatThrownBy(
+              () ->
+                  store.whileHeld(
+                      row.id(),
+                      held -> {
+                        int pid = RowLockHolder.holderPid(one, row.id());
+                        PostgresSupport.executeOn(one, "SELECT pg_terminate_backend(" + pid + ")");
+                        return "done";
+                      }))
+          .isInstanceOf(com.housedevinci.einvoice.domain.EInvoiceException.class)
+          .extracting("code")
+          .isEqualTo(com.housedevinci.einvoice.domain.ErrorCodes.SESSION_NOT_PINNED);
 
-      assertThat(result).contains("done");
       assertThat(RowLockHolder.holderPid(one, row.id())).isEqualTo(-1);
       // Had the dead connection gone back to the pool, the next borrows would fail.
       for (int i = 0; i < 3; i++) {
