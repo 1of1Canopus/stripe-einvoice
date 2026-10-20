@@ -355,3 +355,122 @@ Fix (fix pass): the work sets a flag after its held read returns; assert that th
 2. D-PR43-2: pool-size refusal in the starter, README sentence, probe asserting `CONFIG`.
 3. D-PR43-3: the reset probe's flag assertion; show T1 red.
 4. D-PR42-7: merge `main` with the flaky-probe fix; Build & test green on CI.
+
+## Pass 3, limited re-verification (2026-10-21)
+
+Head `0327481` on `fix/archive-retry-refusal-v2` (PR 43). Scope: D-PR43-1 candidate B as built,
+D-PR43-6, and the two deviations the builder declared. Closed findings are not re-opened.
+
+**Verdict: NOT MERGE.** One MEDIUM, one LOW, one INFO (D-PR43-7 to D-PR43-9). The held section is
+right. The gap is the joined path outside it: a joined allocation skips the new autosave check and
+the new DEI-248 mapping.
+
+### Numbers
+
+| check | result |
+|---|---|
+| `./mvnw -q verify` (reactor root), Docker up, Surefire XML | BUILD SUCCESS; core 781, starter 147, sample 9; 0 failures, 0 skipped |
+| existing review probes (`CipherProbe*`, unchanged) | all green in that run |
+| builder tests `JoinedModeLockTest` (11) | 11 of 11 green |
+| new review probes (internal `probes/CipherProbePr43Pass3Test.java`, 6) | 4 green, 2 RED |
+
+Mutations J1 to J8 were not re-run (budget). The probes below cover the same controls.
+
+### Item 1: D-PR43-1 candidate B as built
+
+Green, measured with new probes:
+
+* `probe_a_swallowed_unit_failure_then_a_good_write_still_commits_nothing`. The work catches a
+  failed unit, reads again and returns normally. The run still throws `DEI-102` (the failed unit's
+  code). A suppressed `SQLException` has SQLState `DE248`. `pg_locks` shows 0 row locks before the
+  commit. The connection is open, `autoCommit` false. The commit keeps 0 rows and the counter does
+  not move.
+* `probe_a_held_entry_on_an_aborted_transaction_is_dei_248_with_no_key`. The caller runs
+  `SELECT 1/0`, then calls `whileHeld`. Answer `DEI-248`, 0 row locks, connection open.
+
+Reading of `heldJoined`: release, poison, rollback-only each in its own `try`; the run's own
+exception is thrown, the poison's exception only suppressed; no `abort()` or `close()` on a caller
+connection. Matches the ruling.
+
+### Item 2: D-PR43-6
+
+Green: `probe_own_connections_set_never_and_restore_the_pools_mode`. `autosaveNever` turns an
+`ALWAYS` Hikari connection to `NEVER` and `restoreAutosave` puts `ALWAYS` back. After an
+own-connection `whileHeld` on an `autosave=always` pool of 2, both pooled connections answer
+`ALWAYS`.
+
+The held section refuses `ALWAYS` (the builder's probe, green). The joined path outside the held
+section does not. That is D-PR43-7.
+
+### Deviation rulings
+
+**J5 mutation: acceptable, with one added probe (D-PR43-9).** The builder is right that
+rollback-only does not stop a plain JDBC `commit()`. But for a plain JDBC caller, rollback-only
+sets `CallerConnectionUnitOfWork.poisoned`, which refuses the module's next call. So the briefed
+mutation is observable: make one more module call before the commit.
+`probe_a_release_failure_alone_leaves_the_next_call_usable` does that and is green on the head.
+Under the briefed mutation it must turn red. The new mutation (poison on a release failure alone)
+stays too; both are R2 violations.
+
+**`CipherProbePr1Test` alteration: acceptable.** The refusal comes after the same transaction wrote
+(an allocation and a void). Point 3 of the approved design now aborts that transaction on purpose.
+The probe's property was "the module's `SET LOCAL lock_timeout` never reaches the caller's later
+statements". It now holds more strongly: no later statement can run (25P02). The check after the
+rollback still turns red if the module ever used a session `SET` instead of `SET LOCAL`. Nothing a
+regression could hide behind.
+
+### New findings
+
+**D-PR43-7 (MEDIUM). A joined allocation is not refused on `autosave=always`.** The DEI-249 check
+runs only in `JdbcIssuanceStore.heldJoined`. `AbstractJdbcUnitOfWork.runJoined` (every joined
+allocation, void and write outside the lock) never calls it. Under `autosave=always` the driver
+undoes both the failed statement and the point-3 poison.
+
+Example (measured): pool URL `autosave=always`. A plain JDBC caller allocates `in_p3a1`; the
+issuance insert fails (test trigger) after the counter moved. The caller catches and commits.
+`next_number` goes from 2 to 3 and no issuance row exists (T-03: a consumed number with no row).
+The module logs "could not be confirmed aborted", then throws `DEI-102`, never `DEI-249`.
+
+Probe: `probe_a_joined_allocation_on_autosave_always_is_refused_before_any_number` (RED: expected
+2, was 3).
+
+Fix (fix pass, a check not a mechanism): in `AbstractJdbcUnitOfWork.runJoined`, call
+`IssuanceRowLocks.refuseAutosaveAlways(connection)` first, before the auto-commit check, for
+read and write units. Keep the call in `heldJoined`. CHANGELOG and README: "joined mode" means
+every joined call, not only the row lock. Mutation to show red: the new call removed.
+
+**D-PR43-8 (LOW). A joined allocation on an aborted caller transaction answers DEI-102.** The
+public javadoc of `DEI-248` says "SQLState 25P02 at the first statement of a joined call". In
+`runJoined` the first statement is `SHOW transaction_read_only` (`refuseReadOnlyTransaction`). Its
+25P02 falls to `JdbcSupport.unavailable`, an outage code.
+
+Example (measured): caller runs `SELECT 1/0`, then `allocate`. Answer `DEI-102`, expected `DEI-248`.
+
+Probe: `probe_a_joined_allocation_on_an_aborted_transaction_is_dei_248` (RED).
+
+Fix (fix pass): in `runJoined`, map a 25P02 from `refuseReadOnlyTransaction` to
+`HOST_TRANSACTION_ABORTED` (the same message as `IssuanceRowLocks.abortedOrUnavailable`; do not
+take its 08P01 branch, which is the pooler refusal). Suspected, not run: a joined read unit
+(`inReadUnit`) has no entry statement, so its first statement inside the work also answers
+`DEI-102`; cover it with a 25P02 mapping in the `runJoined` catch when this call wrote nothing, and
+a test `a_joined_read_on_an_aborted_transaction_is_dei_248`.
+
+**D-PR43-9 (INFO). The briefed J5 mutation has no red test.** See the deviation ruling. Fix: add
+`probe_a_release_failure_alone_leaves_the_next_call_usable` to the suite; show "rollback-only on a
+release failure alone" red in the PR body as J5b.
+
+### Prior findings on this branch
+
+| id | status |
+|---|---|
+| D-PR43-1 (LOW) | closed: held-section probes green (builder 11, review 2) |
+| D-PR43-4 (HIGH) | closed for the held section: half-written probe green with autosave NEVER and CONSERVATIVE; the same property outside the lock on autosave ALWAYS is D-PR43-7 |
+| D-PR43-5 (LOW) | closed: R2 test green, review R2 probe green, R3 entry probe green |
+| D-PR43-6 (MEDIUM) | closed for the held section and own connections; the joined path outside the lock is D-PR43-7 |
+
+### Fix list
+
+1. D-PR43-7: `refuseAutosaveAlways` at the top of `runJoined`; probe green; mutation red.
+2. D-PR43-8: 25P02 at a joined entry is `DEI-248` on every joined call; probe green.
+3. D-PR43-9: add the R2 next-call probe; J5b red in the PR body.
+4. Add all six `CipherProbePr43Pass3Test` probes to the suite before the production change.
