@@ -118,6 +118,13 @@ All notable changes to this project are documented here. The format follows
 - **`DEI-104`: a pooler in transaction mode is refused** before a number is taken, because it
   would silently turn the session lock into no lock. Session pooling and direct connections work.
 - A redelivery whose archive read fails is retried (`DEI-241`), never reported as tampered.
+- **The row lock proves it is still ours, on every locked transaction (D-PR42-2).** Under a
+  transaction pooler, a backend reset or another client could free or take our lock while the
+  backend id stayed the same, and our release could then free another client's lock. Taking the
+  lock now writes a random token into the session; every locked transaction first checks the token
+  and the lock together and stops with `DEI-104` before it writes; the release frees only when that
+  check holds. Statement pooling is refused by its SQLState (`08P01`). The session setting
+  `einvoice.row_lock` is reserved.
 - **Security review of the row lock, pass 1 (D-PR42-1, 3, 4, 5).** The starter runs the session
   check once at startup, outside any transaction, and a joined holder needs none, so a host
   transaction on a pool of two is never starved. The lock's pre-check reads only this database's
