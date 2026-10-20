@@ -235,7 +235,12 @@ public final class IssuanceUnitOfWork {
         && !event.state().refused()) {
       return outcome(event, Optional.empty());
     }
-    Optional<Outcome> refusal = route(event);
+    // D-PR9-F1: every inbound write before the number claim is a compare-and-set on the state this
+    // run last read or wrote. Another run can work the same event at the same time (a worker and
+    // the sweeper, a re-open and a retry). A write that finds the row moved writes nothing and
+    // returns what is stored, like the claim loser in P1: never DEI-210, never a row moved back.
+    InboundState read = event.state();
+    Optional<Outcome> refusal = route(event, read);
     if (refusal.isPresent()) {
       return refusal.get();
     }
@@ -246,23 +251,29 @@ public final class IssuanceUnitOfWork {
     } catch (EInvoiceException e) {
       // An outage, a rate limit, a 5xx, or a collection that would not read to exhaustion. None of
       // them is a verdict about the sale, so all of them are retryable up to the ceiling (I-08).
-      return fail(event, InboundState.FAILED_FETCH, e.code(), backoffFor(event));
+      return failFrom(read, event, InboundState.FAILED_FETCH, e.code(), backoffFor(event));
     }
     if (invoice.livemode() != (configuration.mode() == Mode.LIVE)) {
       // The event said one thing and the object says another. The authoritative answer wins, and
       // in this direction it is the one that keeps a test invoice out of the live series (D-01).
-      return fail(event, InboundState.REFUSED_MODE, ErrorCodes.MODE_MISMATCH, null);
+      return failFrom(read, event, InboundState.REFUSED_MODE, ErrorCodes.MODE_MISMATCH, null);
     }
-    inbound.transition(eventId, InboundState.FETCHED, "", clock.instant(), null);
+    Optional<Outcome> fetchedElsewhere = step(event, read, InboundState.FETCHED);
+    if (fetchedElsewhere.isPresent()) {
+      return fetchedElsewhere.get();
+    }
+    // From here every write expects FETCHED. When another run is already past it, each of them
+    // loses and is answered from what is stored, and the MAPPED step carries on behind that run.
+    final InboundState fetched = InboundState.FETCHED;
 
     if (!invoice.finalised()) {
       // Out of order: invoice.paid can arrive before invoice.finalized. Parked, retried, never an
       // invented invoice and never a dropped event.
-      return park(event);
+      return park(event, fetched);
     }
     Optional<Issuance> existing =
         reader.findBySource(configuration.sellerId(), configuration.mode(), invoice.id());
-    Optional<Outcome> decided = existingDisposition(event, existing, invoice);
+    Optional<Outcome> decided = existingDisposition(event, fetched, existing, invoice);
     if (decided.isPresent()) {
       return decided.get();
     }
@@ -282,9 +293,9 @@ public final class IssuanceUnitOfWork {
           mismatch.field(),
           mismatch.recomputed(),
           mismatch.upstream());
-      return fail(event, InboundState.FAILED_TOTALS, mismatch.code(), null);
+      return failFrom(fetched, event, InboundState.FAILED_TOTALS, mismatch.code(), null);
     } catch (EInvoiceException refused) {
-      return fail(event, InboundState.FAILED_MAPPING, refused.code(), null);
+      return failFrom(fetched, event, InboundState.FAILED_MAPPING, refused.code(), null);
     }
     if (!validator.canValidate()) {
       // D3-02: this is a fact about the application, known before it serves a single request, not
@@ -292,13 +303,15 @@ public final class IssuanceUnitOfWork {
       // spends a legal number on a document that was never going to be validated by anything -
       // every invoice, for as long as the condition holds. No backoff: an operator has to add a
       // processor or change the configuration, and a sweep does not do that.
-      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.XSLT_PROCESSOR_MISSING, null);
+      return failFrom(
+          fetched, event, InboundState.FAILED_ISSUANCE, ErrorCodes.XSLT_PROCESSOR_MISSING, null);
     }
     if (!renderer.carriesSupplyDate()) {
       // D-PS1-44: the issue date is the numbering day, so a document without its supply date would
       // hide when the sale happened. Refused before a number exists, like the preflight's own
       // refusals; terminal, because the renderer will not learn the field by running again.
-      return fail(event, InboundState.FAILED_MAPPING, ErrorCodes.SUPPLY_DATE_NOT_CARRIED, null);
+      return failFrom(
+          fetched, event, InboundState.FAILED_MAPPING, ErrorCodes.SUPPLY_DATE_NOT_CARRIED, null);
     }
 
     // The preflight (D3-01). Every screen the render will apply, applied now, with no number in
@@ -312,7 +325,7 @@ public final class IssuanceUnitOfWork {
       // FAILED_MAPPING, with the mapper's own code, and no NUMBERED row, chain entry or archive
       // object. Terminal with an empty successor set: a finalised invoice's fields are frozen, so
       // re-running changes nothing and the sweeper does not re-pick it.
-      return fail(event, InboundState.FAILED_MAPPING, report.code(), null)
+      return failFrom(fetched, event, InboundState.FAILED_MAPPING, report.code(), null)
           .withPreflight(report.verdict());
     }
     if (report.verdict() == PreflightReport.Verdict.NOT_SUPPORTED) {
@@ -324,7 +337,10 @@ public final class IssuanceUnitOfWork {
     // MAPPED now means what it says: the mapping ran, over every screen, and produced a document
     // model. Before the preflight existed this row went MAPPED as soon as the totals agreed, and
     // the mapping itself was first attempted after a number had been allocated.
-    inbound.transition(eventId, InboundState.MAPPED, "", clock.instant(), null);
+    Optional<Outcome> mappedElsewhere = step(event, fetched, InboundState.MAPPED);
+    if (mappedElsewhere.isPresent()) {
+      return mappedElsewhere.get().withPreflight(report.verdict());
+    }
     return issue(event, invoice, mapping).withPreflight(report.verdict());
   }
 
@@ -378,7 +394,7 @@ public final class IssuanceUnitOfWork {
         // that concluded COMPLETED behind a burned or voided winner recorded a sale with no
         // document on the success terminal.
         if (winner.isPresent() && classify(winner.get().state()).disposed()) {
-          return terminalDisposition(event, winner.get());
+          return terminalDisposition(event, Optional.empty(), winner.get());
         }
         return fail(
             event,
@@ -536,23 +552,25 @@ public final class IssuanceUnitOfWork {
    * <p>Each refusal here is a terminal state on the row with its own code, answered 200 by the
    * endpoint that recorded it, and replayable through this same method once the pin is updated.
    */
-  private Optional<Outcome> route(InboundEvent event) {
+  private Optional<Outcome> route(InboundEvent event, InboundState read) {
     if (!SUBSCRIBED_TYPES.contains(event.type())) {
       return Optional.of(
-          fail(event, InboundState.DROPPED, ErrorCodes.UNSUBSCRIBED_EVENT_TYPE, null));
+          failFrom(read, event, InboundState.DROPPED, ErrorCodes.UNSUBSCRIBED_EVENT_TYPE, null));
     }
     if (!configuration.pinnedApiVersion().equals(event.apiVersion())) {
       // Never a lenient fallback deserialiser: the mapping table and the golden files are written
       // against the pinned version, so drift is loud and recorded rather than silently absorbed.
       return Optional.of(
-          fail(event, InboundState.REFUSED_VERSION_SKEW, ErrorCodes.API_VERSION_SKEW, null));
+          failFrom(
+              read, event, InboundState.REFUSED_VERSION_SKEW, ErrorCodes.API_VERSION_SKEW, null));
     }
     if (event.livemode() != (configuration.mode() == Mode.LIVE)) {
-      return Optional.of(fail(event, InboundState.REFUSED_MODE, ErrorCodes.MODE_MISMATCH, null));
+      return Optional.of(
+          failFrom(read, event, InboundState.REFUSED_MODE, ErrorCodes.MODE_MISMATCH, null));
     }
     if (!configuration.stripeAccountId().equals(event.stripeAccountId())) {
       return Optional.of(
-          fail(event, InboundState.REFUSED_ACCOUNT, ErrorCodes.UNKNOWN_ACCOUNT, null));
+          failFrom(read, event, InboundState.REFUSED_ACCOUNT, ErrorCodes.UNKNOWN_ACCOUNT, null));
     }
     inbound.bindSeller(event.eventId(), configuration.sellerId(), clock.instant());
     return Optional.empty();
@@ -567,23 +585,27 @@ public final class IssuanceUnitOfWork {
    * not turn a January document into an alert, and an alarm that fires on normal behaviour is one
    * operators learn to ignore within a week (I-02).
    */
-  private Outcome redelivery(InboundEvent event, Issuance issuance, SourceInvoice invoice) {
+  private Outcome redelivery(
+      InboundEvent event, InboundState read, Issuance issuance, SourceInvoice invoice) {
     Optional<String> conflict = integrityFailure(issuance);
     if (conflict.isPresent()) {
-      return fail(event, InboundState.FAILED_ISSUANCE, ErrorCodes.ARCHIVED_DOCUMENT_TAMPERED, null);
+      return failFrom(
+          read, event, InboundState.FAILED_ISSUANCE, ErrorCodes.ARCHIVED_DOCUMENT_TAMPERED, null);
     }
     if (invoice.voided()) {
       // The document exists and is never withdrawn; a credit note is the remedy and is not in this
       // edition, so this is a compliance finding with a documented manual remedy - not a DOWN
       // indicator that no free-core user could ever clear (I-04).
-      return fail(
+      return write(
           event,
+          Optional.of(read),
           InboundState.COMPLETED,
           ErrorCodes.VOID_AFTER_ISSUE_NEEDS_CREDIT_NOTE,
           null,
           issuance.legalNumber());
     }
-    return fail(event, InboundState.COMPLETED, "", null, issuance.legalNumber());
+    return write(
+        event, Optional.of(read), InboundState.COMPLETED, "", null, issuance.legalNumber());
   }
 
   /**
@@ -771,29 +793,28 @@ public final class IssuanceUnitOfWork {
    * terminal whatever Stripe later does with the invoice.
    */
   private Optional<Outcome> existingDisposition(
-      InboundEvent event, Optional<Issuance> existing, SourceInvoice invoice) {
+      InboundEvent event, InboundState read, Optional<Issuance> existing, SourceInvoice invoice) {
     if (existing.isEmpty()) {
       return invoice.voided()
           // Voided upstream before we ever issued: nothing is owed and nothing is withdrawn.
-          ? Optional.of(
-              fail(event, InboundState.DROPPED, ErrorCodes.UPSTREAM_VOID_NOT_ISSUED, null))
+          ? Optional.of(upstreamVoid(event, read))
           : Optional.empty();
     }
     Issuance row = existing.get();
     return switch (classify(row.state())) {
-      case REDELIVERY -> Optional.of(redelivery(event, row, invoice));
-      case VOIDED -> Optional.of(terminalDisposition(event, row));
+      case REDELIVERY -> Optional.of(redelivery(event, read, row, invoice));
+      case VOIDED -> Optional.of(terminalDisposition(event, Optional.of(read), row));
       case BURNED ->
           Optional.of(
               invoice.voided()
-                  ? fail(event, InboundState.DROPPED, ErrorCodes.UPSTREAM_VOID_NOT_ISSUED, null)
-                  : terminalDisposition(event, row));
-      case RESUME ->
-          invoice.voided()
-              ? Optional.of(
-                  fail(event, InboundState.DROPPED, ErrorCodes.UPSTREAM_VOID_NOT_ISSUED, null))
-              : Optional.empty();
+                  ? upstreamVoid(event, read)
+                  : terminalDisposition(event, Optional.of(read), row));
+      case RESUME -> invoice.voided() ? Optional.of(upstreamVoid(event, read)) : Optional.empty();
     };
+  }
+
+  private Outcome upstreamVoid(InboundEvent event, InboundState read) {
+    return failFrom(read, event, InboundState.DROPPED, ErrorCodes.UPSTREAM_VOID_NOT_ISSUED, null);
   }
 
   /**
@@ -805,12 +826,13 @@ public final class IssuanceUnitOfWork {
    * VOID_UNUSED} is final for the Stripe invoice itself: one invoice maps to one number for all
    * time, so there is no second number to allocate and nothing a later run could do.
    */
-  private Outcome terminalDisposition(InboundEvent event, Issuance row) {
+  private Outcome terminalDisposition(
+      InboundEvent event, Optional<InboundState> read, Issuance row) {
     String code =
         classify(row.state()) == ExistingIssuance.VOIDED
             ? ErrorCodes.NUMBER_VOIDED
             : ErrorCodes.VALIDATION_REFUSED;
-    return fail(event, InboundState.FAILED_ISSUANCE, code, null, row.legalNumber());
+    return write(event, read, InboundState.FAILED_ISSUANCE, code, null, row.legalNumber());
   }
 
   /**
@@ -916,8 +938,9 @@ public final class IssuanceUnitOfWork {
         number);
   }
 
-  private Outcome park(InboundEvent event) {
-    return fail(event, InboundState.PARKED, ErrorCodes.INVOICE_NOT_FINALISED, backoffFor(event));
+  private Outcome park(InboundEvent event, InboundState read) {
+    return failFrom(
+        read, event, InboundState.PARKED, ErrorCodes.INVOICE_NOT_FINALISED, backoffFor(event));
   }
 
   private Outcome fail(InboundEvent event, InboundState state, String code, Duration retryIn) {
@@ -926,10 +949,92 @@ public final class IssuanceUnitOfWork {
 
   private Outcome fail(
       InboundEvent event, InboundState state, String code, Duration retryIn, LegalNumber number) {
-    InboundEvent updated =
-        inbound.transition(event.eventId(), state, code, clock.instant(), retryIn);
-    return new Outcome(
-        updated.eventId(), updated.state(), code, number == null ? null : number.value());
+    return write(event, Optional.empty(), state, code, retryIn, number);
+  }
+
+  /** A write before the number claim: lands only on the state this run last read (D-PR9-F1). */
+  private Outcome failFrom(
+      InboundState read, InboundEvent event, InboundState state, String code, Duration retryIn) {
+    return write(event, Optional.of(read), state, code, retryIn, null);
+  }
+
+  /**
+   * The one inbound write of a conclusion. With {@code read} present it is a compare-and-set, and a
+   * row another run moved meanwhile is answered from what is stored. Empty only after P1, where
+   * this run holds the number and its write is the truth about that number.
+   */
+  private Outcome write(
+      InboundEvent event,
+      Optional<InboundState> read,
+      InboundState state,
+      String code,
+      Duration retryIn,
+      LegalNumber number) {
+    String legalNumber = number == null ? null : number.value();
+    if (read.isEmpty()) {
+      InboundEvent updated =
+          inbound.transition(event.eventId(), state, code, clock.instant(), retryIn);
+      return new Outcome(updated.eventId(), updated.state(), code, legalNumber);
+    }
+    return inbound
+        .transitionFrom(event.eventId(), read.get(), state, code, "", clock.instant(), retryIn)
+        .map(updated -> new Outcome(updated.eventId(), updated.state(), code, legalNumber))
+        .orElseGet(() -> concludedElsewhere(event));
+  }
+
+  /**
+   * D-PR9-F1: this run's write found the row moved by another run. The answer is what that run
+   * stored, read back now: the inbound row's state and code, and the number when one exists. This
+   * run writes nothing more, exactly like the claim loser in P1. Example: worker B waited in the
+   * preflight while worker A issued {@code INV-2026-000001}; B's {@code MAPPED} write finds {@code
+   * COMPLETED}, and B returns {@code COMPLETED} with that number.
+   */
+  private Outcome concludedElsewhere(InboundEvent event) {
+    return storedOutcome(reread(event));
+  }
+
+  /**
+   * The {@code FETCHED} and {@code MAPPED} steps, as compare-and-sets (D-PR9-F1).
+   *
+   * <p>Empty when this run carries on. That is the case when the write landed, and also when
+   * another run that is still in flight has already reached this step or {@code MAPPED}: this run
+   * goes on behind it, writes nothing back, and the P1 claim decides the number as it always did
+   * for two runs. Any other state was written by a run that concluded, and its stored outcome is
+   * the answer. Example: B's {@code FETCHED} write expects {@code RECEIVED}; A has written {@code
+   * MAPPED}; B carries on and the row stays {@code MAPPED}.
+   */
+  private Optional<Outcome> step(InboundEvent event, InboundState read, InboundState next) {
+    if (inbound
+        .transitionFrom(event.eventId(), read, next, "", "", clock.instant(), null)
+        .isPresent()) {
+      return Optional.empty();
+    }
+    InboundEvent stored = reread(event);
+    if (stored.state() == next || stored.state() == InboundState.MAPPED) {
+      return Optional.empty();
+    }
+    return Optional.of(storedOutcome(stored));
+  }
+
+  private InboundEvent reread(InboundEvent event) {
+    return inbound
+        .find(event.eventId())
+        .orElseThrow(
+            () ->
+                new EInvoiceException(
+                    ErrorCodes.INBOUND_UNREADABLE, "no inbound event is recorded under that id"));
+  }
+
+  private Outcome storedOutcome(InboundEvent stored) {
+    Optional<LegalNumber> number =
+        reader
+            .findBySource(configuration.sellerId(), configuration.mode(), stored.objectId())
+            .map(Issuance::legalNumber);
+    log.info(
+        "einvoice: event {} was moved to {} by another run; this run stops and writes nothing",
+        stored.eventId(),
+        stored.state());
+    return outcome(stored, number);
   }
 
   private Outcome outcome(InboundEvent event, Optional<LegalNumber> number) {

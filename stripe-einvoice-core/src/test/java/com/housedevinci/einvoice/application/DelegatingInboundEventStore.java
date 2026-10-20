@@ -45,6 +45,18 @@ class DelegatingInboundEventStore implements InboundEventStore {
   }
 
   @Override
+  public Optional<InboundEvent> transitionFrom(
+      String eventId,
+      InboundState expected,
+      InboundState next,
+      String code,
+      String ruleId,
+      Instant now,
+      Duration retryIn) {
+    return delegate.transitionFrom(eventId, expected, next, code, ruleId, now, retryIn);
+  }
+
+  @Override
   public Optional<String> lastRuleId(String eventId) {
     return delegate.lastRuleId(eventId);
   }

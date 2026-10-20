@@ -72,6 +72,12 @@ All notable changes to this project are documented here. The format follows
   `RunningLimit` argument; `IssuanceUnitOfWork.due` and the `IssuanceSweeper` constructor change to
   match. `InboundEvent` gains a `dueSince` component; the 0.1.0 constructor is kept.
 
+- **BREAKING CHANGE: `InboundEventStore.transitionFrom` (D-PR9-F1).** A new abstract method on the port: a state
+  move that lands only if the row still holds an expected state, and answers empty otherwise. A
+  host that supplies its own `InboundEventStore` bean must implement it with the compare and the
+  write in one locked statement. There is no default method on purpose: one built from `find`
+  then `transition` would not be atomic.
+
 - **The date check is part of the unit of work (D-PR36-6).** EINVOICE-DATES used to live only in
   the module's validator, so a host `DocumentValidator` bean (the starter's backs off) removed it.
   Now `IssuanceUnitOfWork` reads the dates from the exact bytes to be archived and compares them
@@ -114,6 +120,19 @@ All notable changes to this project are documented here. The format follows
   remain and mean an invoice.
 
 ### Fixed
+
+- **A lost inbound compare-and-set under REPEATABLE READ or SERIALIZABLE answers quietly (D-PR45-2).**
+  When the store owns the connection, a `40001` on the state move is retried once in a fresh
+  transaction, so the loser of a worker and sweeper race steps aside instead of logging `DEI-102`.
+  In a host transaction the error passes through unchanged.
+- **Two runs on one event no longer fail with `DEI-210` before the number (D-PR9-F1).** A worker
+  and the sweeper, or a re-open and a retry, can run one event at once. A run wrote the inbound
+  row before the number claim against whatever the row held at that moment. Example: run B waits
+  in the preflight while run A issues the invoice; B then writes `MAPPED` over `COMPLETED`, and
+  `DEI-210` escapes `process`. Every inbound write before the claim now lands only if the row
+  still holds the state the run last saw. When the row moved, the run reads it again: it answers
+  with the stored outcome (here `COMPLETED` and A's number), or carries on behind a run that is
+  still in flight. A row another run moved forward is never moved back to `FETCHED`.
 
 - **An unreadable archive object is a failure, not "absent" (D-RTR-8).** The filesystem archive
   used `Files.exists`, which answers false when it cannot tell (no permission, a link loop). A
