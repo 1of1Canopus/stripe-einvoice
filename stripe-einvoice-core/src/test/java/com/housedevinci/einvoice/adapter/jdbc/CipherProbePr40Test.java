@@ -16,7 +16,8 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Map;
 import javax.sql.DataSource;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Security review, PR 40 pass 1 (D-A1-C03 build). Each probe failed on the head it was written
@@ -58,8 +59,16 @@ class CipherProbePr40Test {
         Duration.ofSeconds(10));
   }
 
-  private static Connection serializable(DataSource ds) throws Exception {
+  private static Connection serializable(DataSource ds, String plan) throws Exception {
     Connection c = ds.getConnection();
+    try (java.sql.Statement st = c.createStatement()) {
+      // session settings: the connection is closed (not reused for another plan) after the test
+      st.execute(
+          switch (plan) {
+            case "index" -> "SET enable_seqscan = off";
+            default -> "SET enable_indexscan = off; SET enable_bitmapscan = off";
+          });
+    }
     c.setAutoCommit(false);
     c.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
     return c;
@@ -73,21 +82,22 @@ class CipherProbePr40Test {
    * is aborted at the name step. Nobody created DELTA, yet the message says somebody did. The code
    * (DEI-117, retryable) is right; the stated cause is not.
    */
-  @Test
-  void probe_a_serialization_failure_is_not_reported_as_a_concurrent_creation_of_this_series()
-      throws Exception {
+  @ParameterizedTest
+  @CsvSource({"index,index", "index,seqscan", "seqscan,index", "seqscan,seqscan"})
+  void probe_a_serialization_failure_is_not_reported_as_a_concurrent_creation_of_this_series(
+      String planA, String planB) throws Exception {
     String seller = PostgresSupport.freshSeller("pr40ssi");
     DataSource ds = PostgresSupport.dataSource();
     TestStores.store(ds, DocumentSeriesFixture.CHAIN, series(seller), CLOCK)
         .allocate(invoice(seller, "INV", "in_seed"));
 
     Throwable refused;
-    try (Connection b = serializable(ds)) {
+    try (Connection b = serializable(ds, planB)) {
       // host B's snapshot is taken before host A commits; B has written nothing yet
       try (java.sql.Statement st = b.createStatement()) {
         st.execute("SELECT 1");
       }
-      try (Connection a = serializable(ds)) {
+      try (Connection a = serializable(ds, planA)) {
         joined(a, seller).allocate(invoice(seller, "GAMMA", "in_g"));
         a.commit();
       }
