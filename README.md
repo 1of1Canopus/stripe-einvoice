@@ -191,7 +191,8 @@ returns.
 
 - **Your PostgreSQL connection needs `autosave` NEVER (the default) or CONSERVATIVE.** `autosave
   ALWAYS` undoes a failed statement inside the driver, so a failed step could leave your commit
-  keeping a half-written invoice. It is refused with `DEI-249`; there is no opt-out.
+  keeping a half-written invoice. Every joined call, read or write, refuses it with `DEI-249`;
+  there is no opt-out.
 - **When a step fails after your transaction wrote through the store, the transaction is aborted on
   purpose** (SQLState `DE248`), so it cannot commit. The exception you catch is the signal. A plain
   JDBC `commit()` after a failed joined call returns normally and commits nothing; PostgreSQL

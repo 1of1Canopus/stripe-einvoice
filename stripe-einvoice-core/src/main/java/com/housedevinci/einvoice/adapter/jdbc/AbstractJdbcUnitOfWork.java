@@ -103,8 +103,20 @@ public abstract class AbstractJdbcUnitOfWork implements JdbcUnitOfWork {
               + " rolled back would keep the allocated number. Call setAutoCommit(false) before"
               + " handing the connection over, or let the store open its own connection.");
     }
-    if (transactional) {
-      refuseReadOnlyTransaction(connection);
+    // D-PR43-7: every joined call, read or write, refuses autosave ALWAYS before its first
+    // statement: the driver would undo a failed insert and the caller's commit could burn a number.
+    IssuanceRowLocks.refuseAutosaveAlways(connection);
+    try {
+      refuseReadOnlyTransaction(connection, transactional);
+    } catch (SQLException e) {
+      // D-PR43-8: 25P02 at the first statement means the caller's transaction was already dead.
+      if ("25P02".equals(e.getSQLState())) {
+        throw new EInvoiceException(
+            ErrorCodes.HOST_TRANSACTION_ABORTED,
+            "the caller's transaction was already aborted before this call; roll it back and call"
+                + " again");
+      }
+      throw e;
     }
     LockLedger ledger = ledger(connection);
     Unit unit =
@@ -159,10 +171,11 @@ public abstract class AbstractJdbcUnitOfWork implements JdbcUnitOfWork {
    * <p>Without this the first {@code INSERT} fails with SQLState 25006 and is reported as {@code
    * DEI-102 STORE_UNAVAILABLE} - an outage code for what is a caller's annotation.
    */
-  private static void refuseReadOnlyTransaction(Connection connection) throws SQLException {
+  private static void refuseReadOnlyTransaction(Connection connection, boolean transactional)
+      throws SQLException {
     try (Statement st = connection.createStatement();
         var rs = st.executeQuery("SHOW transaction_read_only")) {
-      if (rs.next() && "on".equalsIgnoreCase(rs.getString(1))) {
+      if (transactional && rs.next() && "on".equalsIgnoreCase(rs.getString(1))) {
         throw new EInvoiceException(
             ErrorCodes.HOST_TRANSACTION_READ_ONLY,
             "this allocation was called inside a read-only transaction (Spring's"
