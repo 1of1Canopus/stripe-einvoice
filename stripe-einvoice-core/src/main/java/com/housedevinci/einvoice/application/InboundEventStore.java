@@ -1,7 +1,9 @@
 package com.housedevinci.einvoice.application;
 
+import com.housedevinci.einvoice.domain.ComplianceFinding;
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
+import com.housedevinci.einvoice.domain.RunningLimit;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -90,14 +92,39 @@ public interface InboundEventStore {
   InboundEvent bindSeller(String eventId, String sellerId, Instant now);
 
   /**
-   * Events the sweeper should pick up: anything not terminal, any retryable terminal whose
+   * Events the sweeper should pick up: a running row whose next attempt has come and which is still
+   * inside its time limit ({@link RunningLimit}, QUESTIONS 29), any retryable terminal whose
    * next-attempt time has come and which is still inside the retry ceiling (I-08, I-10), and a
    * {@code REFUSED_VERSION_SKEW} row whose recorded {@code api_version} now equals {@code
    * pinnedApiVersion} - a configuration change has cured exactly that row, and none of the ones
    * still refused (D2-03). {@code REFUSED_MODE} and {@code REFUSED_ACCOUNT} are never re-picked
    * here: an upgrade does not cure either.
+   *
+   * <p>The running branch is the exact complement of {@link #stranded} for the same {@code now} and
+   * the same limits: a running row whose next attempt has come is in one of the two, never in both
+   * and never in neither.
    */
-  List<InboundEvent> due(Instant now, Duration retryCeiling, int limit, String pinnedApiVersion);
+  List<InboundEvent> due(
+      Instant now,
+      Duration retryCeiling,
+      RunningLimit runningLimit,
+      int limit,
+      String pinnedApiVersion);
+
+  /**
+   * Running rows past their time limit, oldest clock first (QUESTIONS 29). A row 0.1.0 wrote during
+   * the upgrade, with no clock yet, is never in it.
+   */
+  List<InboundEvent> stranded(Instant now, RunningLimit runningLimit, int limit);
+
+  /**
+   * Moves one stranded row to {@code EXPIRED} with {@code DEI-266} and records {@code finding}, in
+   * one transaction. Conditional on the row still holding the state and the clock it was read with:
+   * a row that moved in between is not touched, nothing is recorded, and the answer is false - a
+   * skip, never an exception (F-6). A finding acknowledged for an earlier expiry of the same event
+   * is opened again: a second expiry is news.
+   */
+  boolean expire(InboundEvent stranded, ComplianceFinding finding, Instant now);
 
   /** Rows that never reached a terminal state and are older than the retention ceiling (I-07). */
   int purgeOlderThan(Instant cutoff, int limit);

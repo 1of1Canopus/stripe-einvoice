@@ -255,6 +255,7 @@ class CipherProbeIssuanceStarterTest {
                       .due(
                           NOW.plus(Duration.ofMinutes(5)),
                           Duration.ofHours(72),
+                          com.housedevinci.einvoice.domain.RunningLimit.DEFAULT,
                           1000,
                           IssuanceTestApp.PINNED_VERSION)
                       .stream()

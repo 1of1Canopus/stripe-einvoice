@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **No inbound event is due for ever (QUESTIONS 29).** A row that stays running without progress
+  past a limit stops being due. It is moved to the new terminal state `EXPIRED` with `DEI-266`
+  (`INBOUND_CEILING_REACHED`), and the finding `DEI-282` (`RECON_STUCK_INBOUND`) is raised once on
+  its event id. Example: an `invoice.paid` event for a draft that is never finalised was re-checked
+  every backoff until the retention purge deleted it, and nobody was told; now it expires on day 90
+  and the findings list names it. Two new properties: `einvoice.issuance.running-ceiling` (default
+  `PT72H`, for `RECEIVED`, `FETCHED`, `MAPPED`) and `einvoice.issuance.parked-ceiling` (default
+  `P90D`). Zero, negative, a running limit not longer than `max-retry-backoff`, or a parked limit
+  below the running one are refused at startup; above 7 and 365 days they WARN at every start.
+  The limit measures time since the row last made progress, kept in the new column
+  `einvoice_inbound_event.due_since`. A re-check of a draft (`PARKED -> FETCHED -> PARKED`) is not
+  progress. The schema upgrade gives existing rows the upgrade instant, so a backlog is never
+  expired on the first sweep. `IssuanceReprocess` accepts `EXPIRED` and starts the clock again;
+  its refusal of a numbered invoice is unchanged.
+
 - **Invoice dates go up with their numbers (D-PS1-27).** The issue date (BT-2) of an invoice is
   now the day its number is given: the database clock (`pg_catalog.clock_timestamp()`), read after
   the series row lock, turned into a date once, in Java, in the seller's tax zone. The day of the
@@ -51,6 +66,17 @@ All notable changes to this project are documented here. The format follows
   than this version), `DEI-136` (schema not upgraded and `initialize-schema=false`).
 
 ### Changed
+
+- **`InboundEventStore.due` takes the running-row limit (QUESTIONS 29).** The port gains
+  `stranded(now, limit, pageSize)` and `expire(row, finding, now)`, and `due` gains a
+  `RunningLimit` argument; `IssuanceUnitOfWork.due` and the `IssuanceSweeper` constructor change to
+  match. `InboundEvent` gains a `dueSince` component; the 0.1.0 constructor is kept.
+
+- **Running-row limit with the compare-and-set (D-PR46-1, D-Q29-3).** `transition` and
+  `transitionFrom` share one statement and restart the running clock by the same rule. The expiry
+  keeps its own compare on state and clock, because `transitionFrom` compares the state only. A
+  `FAILED_FETCH` row that was ever parked is now judged by its park clock against the parked limit,
+  so one Stripe error no longer leaves it neither due nor stranded.
 
 - **BREAKING CHANGE: `InboundEventStore.transitionFrom` (D-PR9-F1).** A new abstract method on the port: a state
   move that lands only if the row still holds an expected state, and answers empty otherwise. A

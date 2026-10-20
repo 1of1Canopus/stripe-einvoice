@@ -15,6 +15,9 @@ import java.util.Optional;
  *
  * @param bodySha256 kept after the body itself is nulled, so what arrived stays provable
  * @param bodyPresent whether the raw body is still on the row; see {@link InboundState#keepsBody()}
+ * @param dueSince when the row last made progress, the clock of its time limit ({@link
+ *     RunningLimit}); null only for a row written by 0.1.0 during the upgrade, which is read as
+ *     "not past any limit", never as the epoch
  */
 public record InboundEvent(
     String eventId,
@@ -33,7 +36,48 @@ public record InboundEvent(
     Instant nextAttemptAt,
     String lastCode,
     String bodySha256,
-    boolean bodyPresent) {
+    boolean bodyPresent,
+    Instant dueSince) {
+
+  /** The 0.1.0 shape, kept for source compatibility: the clock starts at arrival. */
+  public InboundEvent(
+      String eventId,
+      String type,
+      String objectId,
+      String apiVersion,
+      boolean livemode,
+      String stripeAccountId,
+      String sellerId,
+      Mode mode,
+      String signatureKeyId,
+      Instant receivedAt,
+      Instant updatedAt,
+      InboundState state,
+      int attempts,
+      Instant nextAttemptAt,
+      String lastCode,
+      String bodySha256,
+      boolean bodyPresent) {
+    this(
+        eventId,
+        type,
+        objectId,
+        apiVersion,
+        livemode,
+        stripeAccountId,
+        sellerId,
+        mode,
+        signatureKeyId,
+        receivedAt,
+        updatedAt,
+        state,
+        attempts,
+        nextAttemptAt,
+        lastCode,
+        bodySha256,
+        bodyPresent,
+        receivedAt);
+  }
 
   public InboundEvent {
     Identifiers.validate("stripe event id", eventId);
@@ -72,10 +116,16 @@ public record InboundEvent(
         Timestamps.toStorage(now),
         "",
         Hashes.sha256Hex(body),
-        true);
+        true,
+        Timestamps.toStorage(now));
   }
 
   public Optional<Instant> nextAttempt() {
     return Optional.ofNullable(nextAttemptAt);
+  }
+
+  /** When the row's time-limit clock last started; empty only for a row 0.1.0 wrote mid-upgrade. */
+  public Optional<Instant> dueSinceInstant() {
+    return Optional.ofNullable(dueSince);
   }
 }

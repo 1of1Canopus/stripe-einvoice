@@ -297,6 +297,13 @@ public final class ErrorCodes {
   public static final String REPROCESS_REQUESTED = "DEI-264";
 
   /**
+   * The last code of an inbound row that reached {@code EXPIRED}: it stayed running past its time
+   * limit (QUESTIONS 29). Not a verdict about the sale; the finding {@link #RECON_STUCK_INBOUND}
+   * names the row, and a reprocess starts it again.
+   */
+  public static final String INBOUND_CEILING_REACHED = "DEI-266";
+
+  /**
    * A reprocess run failed with an error this module does not type: not an {@link
    * EInvoiceException}, so none of the named DEI-2xx codes describes what happened. Concluded with
    * this rather than with a code whose documented meaning is a different failure.
@@ -338,6 +345,14 @@ public final class ErrorCodes {
    * The operator's next step is the void; re-enqueueing it only repeats the refusal.
    */
   public static final String RECON_BURNED_NO_DOCUMENT = "DEI-279";
+
+  /**
+   * An inbound row stayed in a running state past {@code einvoice.issuance.running-ceiling} (or
+   * {@code parked-ceiling} for a parked one) and was moved to {@code EXPIRED} (QUESTIONS 29). A
+   * finding on the event id, raised once per expiry. The remedy is the operator's reprocess, after
+   * the cause is understood; the sweeper never starts the row again by itself.
+   */
+  public static final String RECON_STUCK_INBOUND = "DEI-282";
 
   /** Reconciliation has not completed within two intervals. No result is never "healthy". */
   public static final String RECON_STALE = "DEI-274";

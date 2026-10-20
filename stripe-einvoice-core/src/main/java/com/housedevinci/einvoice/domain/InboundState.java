@@ -60,12 +60,32 @@ public enum InboundState {
   FAILED_TOTALS,
 
   /** The issuance row carries the failure - validation or archive. Retryability lives there. */
-  FAILED_ISSUANCE;
+  FAILED_ISSUANCE,
+
+  /**
+   * The row stayed in a running state past its limit ({@link RunningLimit}) and stopped being due
+   * (QUESTIONS 29). Reported once as a finding on the event id. The body is dropped; an operator's
+   * reprocess re-fetches the invoice by its id and starts the clock again.
+   */
+  EXPIRED;
 
   /** The set this state may move to. A move to the same state is always allowed and is a no-op. */
   public Set<InboundState> allowedNext() {
     return switch (this) {
-      case RECEIVED, REFUSED_VERSION_SKEW, REFUSED_MODE, REFUSED_ACCOUNT ->
+      // A refused row shares RECEIVED's successors except EXPIRED: it is not running, so the time
+      // limit (QUESTIONS 29) is not its business.
+      case RECEIVED ->
+          Set.of(
+              FETCHED,
+              PARKED,
+              DROPPED,
+              COMPLETED,
+              REFUSED_VERSION_SKEW,
+              REFUSED_MODE,
+              REFUSED_ACCOUNT,
+              FAILED_FETCH,
+              EXPIRED);
+      case REFUSED_VERSION_SKEW, REFUSED_MODE, REFUSED_ACCOUNT ->
           Set.of(
               FETCHED,
               PARKED,
@@ -77,11 +97,19 @@ public enum InboundState {
               FAILED_FETCH);
       case FETCHED ->
           Set.of(
-              MAPPED, PARKED, DROPPED, COMPLETED, FAILED_MAPPING, FAILED_TOTALS, FAILED_ISSUANCE);
-      case MAPPED -> Set.of(COMPLETED, FAILED_ISSUANCE, FETCHED);
-      case PARKED, FAILED_FETCH -> Set.of(FETCHED, PARKED, DROPPED, FAILED_FETCH);
+              MAPPED,
+              PARKED,
+              DROPPED,
+              COMPLETED,
+              FAILED_MAPPING,
+              FAILED_TOTALS,
+              FAILED_ISSUANCE,
+              EXPIRED);
+      case MAPPED -> Set.of(COMPLETED, FAILED_ISSUANCE, FETCHED, EXPIRED);
+      case PARKED -> Set.of(FETCHED, PARKED, DROPPED, FAILED_FETCH, EXPIRED);
+      case FAILED_FETCH -> Set.of(FETCHED, PARKED, DROPPED, FAILED_FETCH);
       case FAILED_ISSUANCE -> Set.of(FETCHED, MAPPED, COMPLETED, FAILED_ISSUANCE);
-      case COMPLETED, DROPPED, FAILED_MAPPING, FAILED_TOTALS -> Set.of();
+      case COMPLETED, DROPPED, FAILED_MAPPING, FAILED_TOTALS, EXPIRED -> Set.of();
     };
   }
 

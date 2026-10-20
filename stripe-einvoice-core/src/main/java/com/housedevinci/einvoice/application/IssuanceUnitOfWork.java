@@ -11,6 +11,7 @@ import com.housedevinci.einvoice.domain.IssuanceState;
 import com.housedevinci.einvoice.domain.IssueClockException;
 import com.housedevinci.einvoice.domain.LegalNumber;
 import com.housedevinci.einvoice.domain.Mode;
+import com.housedevinci.einvoice.domain.RunningLimit;
 import com.housedevinci.einvoice.domain.SeriesKey;
 import com.housedevinci.einvoice.domain.Totals;
 import com.housedevinci.einvoice.domain.TotalsMismatchException;
@@ -1049,8 +1050,9 @@ public final class IssuanceUnitOfWork {
     return configuration;
   }
 
-  /** Every event the sweeper should re-pick, oldest first (I-08, I-10, D2-03). */
-  public List<InboundEvent> due(Duration retryCeiling, int limit) {
-    return inbound.due(clock.instant(), retryCeiling, limit, configuration.pinnedApiVersion());
+  /** Every event the sweeper should re-pick, oldest first (I-08, I-10, D2-03, QUESTIONS 29). */
+  public List<InboundEvent> due(Duration retryCeiling, RunningLimit runningLimit, int limit) {
+    return inbound.due(
+        clock.instant(), retryCeiling, runningLimit, limit, configuration.pinnedApiVersion());
   }
 }

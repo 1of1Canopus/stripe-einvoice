@@ -48,9 +48,19 @@ public final class IssuanceReprocess {
    */
   public static final String ELIGIBLE_ISSUANCE_CODE = ErrorCodes.ISSUE_CLOCK_BEHIND_SERIES;
 
-  /** True for the two terminals a reprocess may start from. */
+  /**
+   * The second state a reprocess starts from (QUESTIONS 29): a row that stayed running past its
+   * time limit. Without this the state would have no exit: the reconciliation re-enqueue writes a
+   * {@code recon-<invoice>} row that already exists, so it is deduplicated away, and it lists
+   * finalised invoices only, so a parked draft is never re-enqueued at all. Every refusal below
+   * still applies, a numbered invoice included.
+   */
+  public static final InboundState ELIGIBLE_EXPIRED = InboundState.EXPIRED;
+
+  /** True for the three starts a reprocess accepts: two states and one issuance code. */
   public static boolean eligible(InboundEvent event) {
     return event.state() == ELIGIBLE
+        || event.state() == ELIGIBLE_EXPIRED
         || (event.state() == InboundState.FAILED_ISSUANCE
             && ELIGIBLE_ISSUANCE_CODE.equals(event.lastCode()));
   }
@@ -130,7 +140,9 @@ public final class IssuanceReprocess {
     }
     if (existing.isPresent()) {
       // Defence in depth. A FAILED_MAPPING row has no number by construction - the preflight
-      // refuses before the allocator - and "by construction" is not a control.
+      // refuses before the allocator - and "by construction" is not a control. An EXPIRED row can
+      // hold one (a MAPPED row past its limit); it is refused here too, and its number stays
+      // reported by the stuck-issuance finding (DEI-273) until the operator voids or resumes it.
       log.warn(
           "einvoice: reprocess of event {} refused: a legal number already exists for its invoice",
           eventId);
