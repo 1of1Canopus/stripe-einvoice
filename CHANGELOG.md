@@ -72,6 +72,12 @@ All notable changes to this project are documented here. The format follows
   `RunningLimit` argument; `IssuanceUnitOfWork.due` and the `IssuanceSweeper` constructor change to
   match. `InboundEvent` gains a `dueSince` component; the 0.1.0 constructor is kept.
 
+- **Running-row limit with the compare-and-set (D-PR46-1, D-Q29-3).** `transition` and
+  `transitionFrom` share one statement and restart the running clock by the same rule. The expiry
+  keeps its own compare on state and clock, because `transitionFrom` compares the state only. A
+  `FAILED_FETCH` row that was ever parked is now judged by its park clock against the parked limit,
+  so one Stripe error no longer leaves it neither due nor stranded.
+
 - **BREAKING CHANGE: `InboundEventStore.transitionFrom` (D-PR9-F1).** A new abstract method on the port: a state
   move that lands only if the row still holds an expected state, and answers empty otherwise. A
   host that supplies its own `InboundEventStore` bean must implement it with the compare and the

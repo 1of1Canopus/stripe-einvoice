@@ -181,6 +181,46 @@ class RunningLimitStoreTest {
     assertThat(due(store, NOW)).doesNotContain(id);
   }
 
+  @Test
+  void transition_from_restarts_the_clock_like_transition() {
+    // transition and transitionFrom share one statement: a compare-and-set move to FETCHED from
+    // RECEIVED restarts the clock at the move, not at arrival.
+    JdbcInboundEventStore store = store();
+    Instant received = NOW.minus(Duration.ofDays(2));
+    String id = receivedAt(store, received);
+    Instant moved = NOW.minus(Duration.ofHours(1));
+
+    assertThat(
+            store.transitionFrom(
+                id, InboundState.RECEIVED, InboundState.FETCHED, "", null, moved, null))
+        .isPresent();
+
+    assertThat(store.find(id).orElseThrow().dueSinceInstant()).contains(moved);
+  }
+
+  @Test
+  void an_ever_parked_failed_fetch_row_is_judged_by_the_park_clock_at_the_parked_cutoff() {
+    // Parked on day 0, one Stripe error: the row stays re-checkable while its park clock is inside
+    // the parked limit, exactly on the cutoff included (D-Q29-3), and not one tick after it.
+    JdbcInboundEventStore store = store();
+    Instant t0 = NOW.minus(Duration.ofDays(60));
+    String id = receivedAt(store, t0);
+    store.transition(id, InboundState.FETCHED, "", t0, null);
+    store.transition(id, InboundState.PARKED, ErrorCodes.INVOICE_NOT_FINALISED, t0, null);
+    store.transition(
+        id,
+        InboundState.FAILED_FETCH,
+        ErrorCodes.STRIPE_UNAVAILABLE,
+        t0.plus(Duration.ofDays(10)),
+        Duration.ofHours(1));
+
+    Instant cutoff = LIMIT.parkedCutoff(NOW);
+    setClock(id, cutoff);
+    assertThat(due(store, NOW)).contains(id);
+    setClock(id, cutoff.minusNanos(1_000));
+    assertThat(due(store, NOW)).doesNotContain(id);
+  }
+
   // ---- probe 8: exactly one of due and stranded, never both (F-3) --------------------------
 
   @Test

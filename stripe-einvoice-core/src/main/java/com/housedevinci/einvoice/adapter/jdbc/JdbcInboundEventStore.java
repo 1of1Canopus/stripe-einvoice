@@ -172,7 +172,13 @@ public final class JdbcInboundEventStore implements InboundEventStore {
           // null there is the pipeline saying "this one cannot improve by running again" - an
           // archive conflict, a tampered object, a validation refusal - and it must not be read as
           // "due now", which is what the same column means for a row that is still running.
-          + " OR (state IN ('FAILED_FETCH','FAILED_ISSUANCE') AND received_at > ?"
+          // A FAILED_FETCH row that was ever parked is judged by its park clock against the parked
+          // limit, not by arrival against the retry ceiling: a draft parked for days that meets
+          // one Stripe error would otherwise be neither due nor stranded (D-Q29-3).
+          + " OR (state IN ('FAILED_FETCH','FAILED_ISSUANCE')"
+          + "   AND (CASE WHEN state = 'FAILED_FETCH' AND parked_at IS NOT NULL"
+          + "             AND due_since IS NOT NULL THEN due_since >= ?::timestamptz"
+          + "        ELSE received_at > ? END)"
           + "   AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?)"
           // D2-03: a version-skew refusal a configuration change has actually cured. REFUSED_MODE
           // and REFUSED_ACCOUNT are deliberately absent - neither is cured by an upgrade, and
@@ -439,6 +445,7 @@ public final class JdbcInboundEventStore implements InboundEventStore {
             ps.setObject(i++, ts(now));
             ps.setObject(i++, ts(runningLimit.parkedCutoff(now)));
             ps.setObject(i++, ts(runningLimit.runningCutoff(now)));
+            ps.setObject(i++, ts(runningLimit.parkedCutoff(now)));
             ps.setObject(i++, ts(now.minus(retryCeiling)));
             ps.setObject(i++, ts(now));
             ps.setString(i++, pinnedApiVersion == null ? "" : pinnedApiVersion);
