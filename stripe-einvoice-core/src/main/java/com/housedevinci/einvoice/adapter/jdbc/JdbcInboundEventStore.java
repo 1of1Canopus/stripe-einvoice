@@ -63,6 +63,9 @@ public final class JdbcInboundEventStore implements InboundEventStore {
           + " retried_at = CASE WHEN ? THEN coalesce(retried_at, ?) ELSE retried_at END"
           + " WHERE event_id = ?";
 
+  /** {@link #TRANSITION} with the compare in the statement: the state the move was decided on. */
+  static final String TRANSITION_FROM = TRANSITION + " AND state = ?";
+
   /**
    * The privileged re-open (QUESTIONS 26), run by {@code JdbcReprocessLedger} in the same
    * transaction as the record of who asked (D9-03) - which is why the statement lives here, beside
@@ -186,6 +189,39 @@ public final class JdbcInboundEventStore implements InboundEventStore {
       String ruleId,
       Instant now,
       Duration retryIn) {
+    return move(eventId, Optional.empty(), next, code, ruleId, now, retryIn)
+        .orElseThrow(
+            () ->
+                new EInvoiceException(
+                    ErrorCodes.INBOUND_UNREADABLE, "no inbound event is recorded under that id"));
+  }
+
+  @Override
+  public Optional<InboundEvent> transitionFrom(
+      String eventId,
+      InboundState expected,
+      InboundState next,
+      String code,
+      String ruleId,
+      Instant now,
+      Duration retryIn) {
+    Objects.requireNonNull(expected, "expected");
+    return move(eventId, Optional.of(expected), next, code, ruleId, now, retryIn);
+  }
+
+  /**
+   * The one state move. With an expected state it is a compare-and-set (D-PR9-F1): the row lock is
+   * taken, the state compared, and the update itself repeats the compare, so a row that moved is
+   * left exactly as it is and the answer is empty.
+   */
+  private Optional<InboundEvent> move(
+      String eventId,
+      Optional<InboundState> expected,
+      InboundState next,
+      String code,
+      String ruleId,
+      Instant now,
+      Duration retryIn) {
     return unitOfWork.inTransaction(
         unit -> {
           Connection c = unit.connection();
@@ -196,12 +232,15 @@ public final class JdbcInboundEventStore implements InboundEventStore {
                           new EInvoiceException(
                               ErrorCodes.INBOUND_UNREADABLE,
                               "no inbound event is recorded under that id"));
+          if (expected.isPresent() && current.state() != expected.get()) {
+            return Optional.<InboundEvent>empty();
+          }
           // Refused in the enum, here, for the same reason the issuance transition is: a worker
           // and a sweeper can both reach a conclusion about one row, and the second one to write
           // must not be able to move it backwards.
           InboundState resolved = current.state().transitionTo(next);
           Instant when = Timestamps.toStorage(now);
-          try (PreparedStatement ps = c.prepareStatement(TRANSITION)) {
+          try (PreparedStatement ps = c.prepareStatement(TRANSITION_FROM)) {
             int i = 1;
             ps.setString(i++, resolved.name());
             ps.setString(i++, code == null ? "" : code);
@@ -221,8 +260,15 @@ public final class JdbcInboundEventStore implements InboundEventStore {
                     && (resolved == InboundState.FAILED_FETCH
                         || resolved == InboundState.FAILED_ISSUANCE));
             ps.setObject(i++, ts(when));
-            ps.setString(i, eventId);
-            ps.executeUpdate();
+            ps.setString(i++, eventId);
+            // The row is locked, so this repeats the compare above rather than racing it: the
+            // statement itself refuses a row whose state is not the one the move was decided on.
+            ps.setString(i, current.state().name());
+            if (ps.executeUpdate() != 1) {
+              throw new EInvoiceException(
+                  ErrorCodes.INBOUND_UNREADABLE,
+                  "the inbound event changed under its own row lock");
+            }
           }
           if (ruleId != null && !ruleId.isBlank()) {
             try (PreparedStatement ps =
@@ -233,7 +279,7 @@ public final class JdbcInboundEventStore implements InboundEventStore {
               ps.executeUpdate();
             }
           }
-          return find(c, eventId, false).orElseThrow();
+          return find(c, eventId, false);
         });
   }
 

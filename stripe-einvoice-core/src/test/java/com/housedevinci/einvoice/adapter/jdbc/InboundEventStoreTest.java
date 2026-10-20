@@ -102,6 +102,88 @@ class InboundEventStoreTest {
   }
 
   @Test
+  void a_compare_and_set_on_a_row_that_moved_writes_nothing_and_answers_empty() {
+    // D-PR9-F1. Worker B read RECEIVED; worker A moved the row to MAPPED. B's FETCHED write
+    // expects RECEIVED, so it must leave A's row exactly as it is: state, code, attempts, body.
+    JdbcInboundEventStore store = store();
+    String id = freshId();
+    store.record(received(id), BODY);
+    store.transition(id, InboundState.FETCHED, "", NOW, null);
+    InboundEvent moved = store.transition(id, InboundState.MAPPED, "", NOW, null);
+
+    assertThat(
+            store.transitionFrom(
+                id,
+                InboundState.RECEIVED,
+                InboundState.FETCHED,
+                ErrorCodes.STRIPE_UNAVAILABLE,
+                "rule-x",
+                NOW.plusSeconds(60),
+                Duration.ofMinutes(1)))
+        .isEmpty();
+    InboundEvent after = store.find(id).orElseThrow();
+    assertThat(after.state()).isEqualTo(InboundState.MAPPED);
+    assertThat(after.lastCode()).isEqualTo(moved.lastCode());
+    assertThat(after.attempts()).isEqualTo(moved.attempts());
+    assertThat(after.updatedAt()).isEqualTo(moved.updatedAt());
+    assertThat(after.nextAttemptAt()).isEqualTo(moved.nextAttemptAt());
+    assertThat(store.lastRuleId(id)).isEmpty();
+    assertThat(store.body(id)).contains(BODY);
+  }
+
+  @Test
+  void a_compare_and_set_on_the_expected_state_moves_the_row_like_a_transition() {
+    JdbcInboundEventStore store = store();
+    String id = freshId();
+    store.record(received(id), BODY);
+    InboundEvent moved =
+        store
+            .transitionFrom(
+                id,
+                InboundState.RECEIVED,
+                InboundState.FAILED_FETCH,
+                ErrorCodes.STRIPE_UNAVAILABLE,
+                "",
+                NOW,
+                Duration.ofMinutes(1))
+            .orElseThrow();
+    assertThat(moved.state()).isEqualTo(InboundState.FAILED_FETCH);
+    assertThat(moved.lastCode()).isEqualTo(ErrorCodes.STRIPE_UNAVAILABLE);
+    assertThat(moved.attempts()).isEqualTo(1);
+    assertThat(moved.nextAttemptAt()).isEqualTo(NOW.plus(Duration.ofMinutes(1)));
+  }
+
+  @Test
+  void a_compare_and_set_that_matches_still_refuses_an_illegal_edge() {
+    // A match with an illegal edge is the caller's own bug, not a race: it stays loud.
+    JdbcInboundEventStore store = store();
+    String id = freshId();
+    store.record(received(id), BODY);
+    store.transition(id, InboundState.COMPLETED, "", NOW, null);
+    assertThatThrownBy(
+            () ->
+                store.transitionFrom(
+                    id, InboundState.COMPLETED, InboundState.FETCHED, "", "", NOW, null))
+        .isInstanceOf(EInvoiceException.class)
+        .extracting("code")
+        .isEqualTo(ErrorCodes.INBOUND_ILLEGAL_TRANSITION);
+    assertThatThrownBy(
+            () ->
+                store()
+                    .transitionFrom(
+                        "evt_does_not_exist",
+                        InboundState.RECEIVED,
+                        InboundState.FETCHED,
+                        "",
+                        "",
+                        NOW,
+                        null))
+        .isInstanceOf(EInvoiceException.class)
+        .extracting("code")
+        .isEqualTo(ErrorCodes.INBOUND_UNREADABLE);
+  }
+
+  @Test
   void the_sweeper_sees_what_is_running_and_what_is_retryable_and_nothing_final() {
     JdbcInboundEventStore store = store();
     String running = freshId();
