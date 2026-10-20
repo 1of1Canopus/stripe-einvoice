@@ -50,6 +50,39 @@ public interface InboundEventStore {
   InboundEvent transition(
       String eventId, InboundState next, String code, String ruleId, Instant now, Duration retryIn);
 
+  /**
+   * Moves one event only if it is still in the state the caller last saw (D-PR9-F1).
+   *
+   * <p>The compare and the write are one locked statement. Two workers can run one event at once (a
+   * worker and the sweeper, or a re-open and a retry). A run whose view is stale must not write
+   * over what the other run concluded, and must not move the row back. Example: worker B read
+   * {@code RECEIVED} and waited in the Stripe fetch; worker A reached {@code COMPLETED}; B's {@code
+   * FETCHED} write expects {@code RECEIVED} and returns empty.
+   *
+   * <p>No default implementation: one built from {@link #find} and {@link #transition} would not be
+   * atomic, and that weaker form must not pass silently.
+   *
+   * <p>Isolation (D-PR45-2): at REPEATABLE READ or SERIALIZABLE the locking read of a row that
+   * another run moved raises SQLState {@code 40001}. When the store owns the connection, the
+   * bundled implementation runs the move once more in a fresh transaction and so answers empty (or
+   * lands). When the transaction is the host's, the failure passes through unchanged ({@code
+   * DEI-102}): that transaction is already aborted and the host retries it.
+   *
+   * @param expected the state this run last read or wrote
+   * @return the moved row, or empty when the row no longer holds {@code expected} and nothing was
+   *     written
+   * @throws com.housedevinci.einvoice.domain.EInvoiceException {@code DEI-210} when the row holds
+   *     {@code expected} and {@code next} is not an edge from it: the caller's own bug, not a race
+   */
+  Optional<InboundEvent> transitionFrom(
+      String eventId,
+      InboundState expected,
+      InboundState next,
+      String code,
+      String ruleId,
+      Instant now,
+      Duration retryIn);
+
   /** The failing validation rule recorded with the last transition, when there was one. */
   Optional<String> lastRuleId(String eventId);
 
