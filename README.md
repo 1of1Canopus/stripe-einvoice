@@ -169,6 +169,8 @@ same number at once: the second one gets `DEI-245` and retries later.
   the module's own database role can do. The session setting `einvoice.row_lock` is reserved.
   Under such a pooler a session lock is no lock at all. PgBouncer in session mode, or a direct
   connection, works. There is no setting that turns this check off.
+- A Hikari pool with a maximum size below 2 fails the startup with `DEI-100`: the check needs two
+  connections at once.
 - The check needs two free connections besides the caller's own, the first time. The starter runs
   it once at startup, outside any transaction (a refused pooler fails the startup). A host that
   wires the store by hand calls `JdbcIssuanceStore.verifySessionPinning()` at startup.

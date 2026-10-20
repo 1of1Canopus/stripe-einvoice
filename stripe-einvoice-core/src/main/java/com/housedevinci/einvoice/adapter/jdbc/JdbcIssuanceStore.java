@@ -450,6 +450,11 @@ public final class JdbcIssuanceStore
     }
   }
 
+  /** The data source this store reads and writes, for the starter's startup checks. */
+  public DataSource dataSource() {
+    return dataSource;
+  }
+
   /** True once R5's check has passed for this store's data source (for a startup probe). */
   public boolean sessionPinningVerified() {
     return sessionPinned();

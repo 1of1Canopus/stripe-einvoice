@@ -62,6 +62,7 @@ class SessionPinningStartupTest {
                   case "equals" -> proxy == args[0];
                   case "toString" -> "test data source";
                   case "getConnection" -> source.get();
+                  case "isWrapperFor" -> false;
                   default -> throw new UnsupportedOperationException(method.getName());
                 });
   }

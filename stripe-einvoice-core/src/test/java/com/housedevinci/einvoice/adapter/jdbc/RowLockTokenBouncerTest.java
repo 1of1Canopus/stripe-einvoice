@@ -160,11 +160,20 @@ class RowLockTokenBouncerTest {
       Issuance row = store.allocate(request(key(seller), "in_reset"));
 
       // After the TRY's own transaction the pooler runs DISCARD ALL: the lock and the token are
-      // gone, the pid is the same. The first held transaction must refuse.
+      // gone, the pid is the same. The first held transaction must refuse (D-PR43-3: not only the
+      // release at the end).
+      java.util.concurrent.atomic.AtomicBoolean pastFirstRead =
+          new java.util.concurrent.atomic.AtomicBoolean();
       assertThatThrownBy(
               () ->
                   store.whileHeld(
-                      row.id(), held -> held.reader().findBySource(seller, Mode.LIVE, "in_reset")))
+                      row.id(),
+                      held -> {
+                        Optional<Issuance> read =
+                            held.reader().findBySource(seller, Mode.LIVE, "in_reset");
+                        pastFirstRead.set(true);
+                        return read;
+                      }))
           .isInstanceOf(EInvoiceException.class)
           .satisfies(
               e -> {
@@ -174,6 +183,7 @@ class RowLockTokenBouncerTest {
                     .contains("issuance row " + row.id())
                     .doesNotContainPattern("[0-9a-f]{32}");
               });
+      assertThat(pastFirstRead).as("the first held read refused").isFalse();
     }
   }
 

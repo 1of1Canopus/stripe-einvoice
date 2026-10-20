@@ -76,12 +76,44 @@ public class EInvoiceIssuanceAutoConfiguration {
    * pooler in transaction or statement mode) fails the startup. A database not reachable yet only
    * WARNs, and the check then runs before the first lock instead.
    */
+  /** Kept apart so the starter loads without HikariCP on the classpath. */
+  static final class HikariPoolSize {
+    private HikariPoolSize() {}
+
+    static void refuseBelowTwo(javax.sql.DataSource dataSource) {
+      int max;
+      try {
+        if (!dataSource.isWrapperFor(com.zaxxer.hikari.HikariConfigMXBean.class)) {
+          return;
+        }
+        max = dataSource.unwrap(com.zaxxer.hikari.HikariConfigMXBean.class).getMaximumPoolSize();
+      } catch (java.sql.SQLException e) {
+        return;
+      }
+      if (max < 2) {
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG,
+            "the connection pool has a maximum size of "
+                + max
+                + "; the issuance row lock needs at least 2 (its session check opens two"
+                + " connections at once). Raise spring.datasource.hikari.maximum-pool-size to 2"
+                + " or more.");
+      }
+    }
+  }
+
   @Bean
   public org.springframework.beans.factory.SmartInitializingSingleton einvoiceSessionPinningCheck(
       ObjectProvider<JdbcIssuanceStore> store) {
     return () ->
         store.ifAvailable(
             s -> {
+              // D-PR43-2: the check needs two free connections. A pool that can never give them
+              // would hold its only connection for the pool's timeout on every issuance.
+              if (org.springframework.util.ClassUtils.isPresent(
+                  "com.zaxxer.hikari.HikariConfigMXBean", null)) {
+                HikariPoolSize.refuseBelowTwo(s.dataSource());
+              }
               try {
                 s.verifySessionPinning();
               } catch (EInvoiceException e) {
