@@ -319,7 +319,7 @@ second one. After the pool's connection timeout it ends `DEI-102`. The starter l
 the first issuance row lock instead", which is never true for this pool. Every issuance then holds
 the only connection for the whole timeout (30 s by default), starving the host, and ends DEI-102.
 The README says the check needs two free connections, but nothing enforces it.
-Fix (Isis): in `EInvoiceIssuanceAutoConfiguration.einvoiceSessionPinningCheck`, when the data
+Fix (fix pass): in `EInvoiceIssuanceAutoConfiguration.einvoiceSessionPinningCheck`, when the data
 source unwraps to `HikariDataSource` (or `HikariConfigMXBean`) with a maximum pool size below 2,
 fail the startup with `ErrorCodes.CONFIG` and a message naming the pool size and the minimum. Any
 other data source keeps today's path. README: one sentence. Test: the probe above, asserting
@@ -330,7 +330,7 @@ other data source keeps today's path. README: one sentence. Test: the probe abov
 Repro: mutation T1 (proof skipped in `HeldConnectionUnitOfWork.beforeTransaction`) leaves
 `probe_reset_always_pid_match_is_not_proof` green. Measured. The work is one read; the read runs
 without a proof, and only the release refuses. The design asked for this probe to be red under T1.
-Fix (Isis): the work sets a flag after its held read returns; assert that the flag was never set
+Fix (fix pass): the work sets a flag after its held read returns; assert that the flag was never set
 (the first held transaction refused, not the release). T1 must then turn it red.
 
 ### Prior findings on this branch
