@@ -267,10 +267,13 @@ class InboundEventStoreTest {
     String old = freshId();
     String recent = freshId();
     store.record(received(old), BODY);
+    // The purge takes the oldest rows first, LIMIT 100, over the shared test database. Every
+    // harness test leaves events dated in January 2026, so a row only 90 days before NOW was not
+    // among the first 100 once enough of them existed (order-dependent). The old row is dated
+    // before every other row instead.
     PostgresSupport.execute(
-        "UPDATE einvoice_inbound_event SET received_at = timestamptz '"
-            + NOW
-            + "' - interval '90 days' WHERE event_id = '"
+        "UPDATE einvoice_inbound_event SET received_at = timestamptz '2000-01-01T00:00:00Z'"
+            + " WHERE event_id = '"
             + old
             + "'");
     store.record(received(recent), BODY);

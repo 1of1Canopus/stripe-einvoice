@@ -73,7 +73,8 @@ public final class JdbcIssuanceStore
         IssuanceReader,
         IssuanceEventReader,
         IssuanceAnchor,
-        com.housedevinci.einvoice.application.IssuanceWriter {
+        com.housedevinci.einvoice.application.IssuanceWriter,
+        com.housedevinci.einvoice.application.IssuanceRowLock {
 
   private static final Logger log = LoggerFactory.getLogger(JdbcIssuanceStore.class);
 
@@ -237,6 +238,18 @@ public final class JdbcIssuanceStore
   private final IssueClock issueClock;
 
   /**
+   * The data sources R5's check has passed for. Per data source, not per store: the connection path
+   * is a property of the pool, and a second store on the same pool must not need two free
+   * connections again.
+   */
+  private static final java.util.Set<DataSource> SESSION_PINNED =
+      java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
+  /** A ReentrantLock, not a monitor: a virtual thread blocked in JDBC inside one pins (JDK 21). */
+  private static final java.util.concurrent.locks.ReentrantLock PINNING_CHECK =
+      new java.util.concurrent.locks.ReentrantLock();
+
+  /**
    * The configuration key of a series, before a fiscal year is known: one per seller, document type
    * and mode. The allocator resolves a request to exactly one of these and never falls back from
    * one type to another (credit-note series design, section 3).
@@ -339,6 +352,231 @@ public final class JdbcIssuanceStore
     this.allocationTimeout = Objects.requireNonNull(allocationTimeout, "allocationTimeout");
     this.maxClockRegression = requireRegressionBound(maxClockRegression);
     this.issueClock = Objects.requireNonNull(issueClock, "issueClock");
+  }
+
+  /** The same store, every statement on {@code bound} (D-RTR-7). No startup check runs again. */
+  private JdbcIssuanceStore(JdbcIssuanceStore base, JdbcUnitOfWork bound) {
+    this.unitOfWork = bound;
+    this.dataSource = base.dataSource;
+    this.chain = base.chain;
+    this.series = base.series;
+    this.taxZone = base.taxZone;
+    this.clock = base.clock;
+    this.allocationTimeout = base.allocationTimeout;
+    this.maxClockRegression = base.maxClockRegression;
+    this.issueClock = base.issueClock;
+  }
+
+  /**
+   * D-RTR-7. Tries the session lock of one issuance row on one connection, and runs {@code work}
+   * with ports bound to that connection, so the holder never asks the pool for a second one. The
+   * lock is released after {@code work} returns or throws; a failed release evicts the connection.
+   * R5's check runs once per store, before any connection is held, and refuses a connection path
+   * that does not keep one session.
+   */
+  @Override
+  public <T> Optional<T> whileHeld(
+      long issuanceId,
+      java.util.function.Function<com.housedevinci.einvoice.application.IssuanceRowLock.Held, T>
+          work) {
+    Objects.requireNonNull(work, "work");
+    Optional<Optional<T>> done = attempt(issuanceId, work);
+    if (done.isEmpty()) {
+      // D-PR42-1: the first own-connection holder on this data source. The session check needs
+      // two free connections, so it runs here with none held, then the lock is tried again.
+      verifySessionPinning();
+      done = attempt(issuanceId, work);
+    }
+    return done.orElseThrow(
+        () ->
+            new EInvoiceException(
+                ErrorCodes.SESSION_NOT_PINNED, "the session check did not settle for this pool"));
+  }
+
+  /**
+   * One try at the lock. Empty when an own-connection holder must first run R5's check, which it
+   * never does while it holds a connection. A joined holder needs no check: every statement from
+   * the TRY to the UNLOCK runs inside the caller's one open transaction, which any pooler keeps on
+   * one server connection.
+   */
+  private <T> Optional<Optional<T>> attempt(
+      long issuanceId,
+      java.util.function.Function<com.housedevinci.einvoice.application.IssuanceRowLock.Held, T>
+          work) {
+    return unitOfWork.onOneConnection(
+        (connection, bound, joined) -> {
+          if (joined) {
+            return Optional.of(heldJoined(connection, bound, issuanceId, work));
+          }
+          if (!sessionPinned()) {
+            return Optional.empty();
+          }
+          Object autosave = IssuanceRowLocks.autosaveNever(connection);
+          try {
+            Optional<String> token = IssuanceRowLocks.tryLock(connection, issuanceId, false);
+            if (token.isEmpty()) {
+              return Optional.of(Optional.<T>empty());
+            }
+            // Every held transaction proves this acquisition first (P1).
+            JdbcUnitOfWork held = new HeldConnectionUnitOfWork(connection, issuanceId, token.get());
+            boolean released = false;
+            try {
+              JdbcIssuanceStore locked = new JdbcIssuanceStore(this, held);
+              T result =
+                  work.apply(
+                      new com.housedevinci.einvoice.application.IssuanceRowLock.Held(
+                          locked, locked));
+              released = IssuanceRowLocks.unlock(connection, issuanceId, token.get(), false);
+              if (!released) {
+                // P2: the release refused to free a lock that is no longer this acquisition's.
+                throw IssuanceRowLocks.lostLock(issuanceId);
+              }
+              return Optional.of(Optional.of(result));
+            } finally {
+              if (!released
+                  && !IssuanceRowLocks.unlock(connection, issuanceId, token.get(), false)) {
+                IssuanceRowLocks.evict(connection, issuanceId);
+              }
+            }
+          } finally {
+            IssuanceRowLocks.restoreAutosave(connection, autosave);
+          }
+        });
+  }
+
+  /**
+   * Joined mode (D-PR43-1, candidate B; D-PR43-6). Refuses autosave ALWAYS, tries the lock inside
+   * the caller's transaction, runs every unit under a savepoint, and at the end, each step on its
+   * own: the release; the poison when a unit failed after the transaction wrote; the caller's
+   * rollback-only. The run's own outcome is what the caller gets. A caller's connection is never
+   * aborted or closed.
+   */
+  private <T> Optional<T> heldJoined(
+      java.sql.Connection connection,
+      JdbcUnitOfWork bound,
+      long issuanceId,
+      java.util.function.Function<com.housedevinci.einvoice.application.IssuanceRowLock.Held, T>
+          work)
+      throws java.sql.SQLException {
+    if (!(bound instanceof AbstractJdbcUnitOfWork caller)) {
+      throw new EInvoiceException(
+          ErrorCodes.CONFIG,
+          "the issuance row lock in joined mode needs one of this module's unit of work types");
+    }
+    IssuanceRowLocks.refuseAutosaveAlways(connection);
+    Optional<String> token = IssuanceRowLocks.tryLock(connection, issuanceId, true);
+    if (token.isEmpty()) {
+      return Optional.empty();
+    }
+    JoinedHeldUnitOfWork.Scope scope = new JoinedHeldUnitOfWork.Scope();
+    JdbcIssuanceStore locked =
+        new JdbcIssuanceStore(
+            this,
+            new JoinedHeldUnitOfWork(
+                connection, caller.ledger(connection), issuanceId, token.get(), scope));
+    T result = null;
+    RuntimeException failure = null;
+    try {
+      result =
+          work.apply(
+              new com.housedevinci.einvoice.application.IssuanceRowLock.Held(locked, locked));
+    } catch (RuntimeException e) {
+      failure = e;
+    }
+    boolean released = false;
+    try {
+      released = IssuanceRowLocks.unlock(connection, issuanceId, token.get(), true);
+    } catch (RuntimeException e) {
+      released = false;
+    }
+    IssuanceRowLocks.Poisoned poisoned = null;
+    if (scope.poisonPending()) {
+      try {
+        poisoned = IssuanceRowLocks.poison(connection, IssuanceRowLocks.POISON);
+      } catch (RuntimeException e) {
+        log.error("einvoice: the poison statement failed unexpectedly", e);
+      }
+      try {
+        caller.markRollbackOnly(connection);
+      } catch (RuntimeException e) {
+        log.error("einvoice: the caller's transaction could not be marked rollback-only", e);
+      }
+    }
+    if (!released) {
+      log.error(
+          "einvoice: the archive lock of issuance row {} could not be released ({}); this call's"
+              + " writes are in your transaction, and the lock on the row stays until this"
+              + " database session ends",
+          issuanceId,
+          ErrorCodes.ROW_LOCK_RELEASE_FAILED);
+    }
+    if (failure != null) {
+      if (poisoned != null && poisoned.seen() != null) {
+        failure.addSuppressed(poisoned.seen());
+      }
+      throw failure;
+    }
+    if (scope.poisonPending()) {
+      EInvoiceException refused =
+          new EInvoiceException(
+              scope.failureCode(),
+              "an issuance step failed in this call after the transaction had written through the"
+                  + " e-invoice store; the transaction is aborted and cannot commit. Roll it back"
+                  + " and call again");
+      if (poisoned != null && poisoned.seen() != null) {
+        refused.addSuppressed(poisoned.seen());
+      }
+      throw refused;
+    }
+    return Optional.of(result);
+  }
+
+  /**
+   * Test seam: marks a data source as checked without running R5's startup check, so a test can put
+   * a transaction pooler under the per-lock proof itself (Revision 3). Package-private.
+   */
+  static void trustSessionPinningForTest(DataSource dataSource) {
+    PINNING_CHECK.lock();
+    try {
+      SESSION_PINNED.add(dataSource);
+    } finally {
+      PINNING_CHECK.unlock();
+    }
+  }
+
+  /** The data source this store reads and writes, for the starter's startup checks. */
+  public DataSource dataSource() {
+    return dataSource;
+  }
+
+  /** True once R5's check has passed for this store's data source (for a startup probe). */
+  public boolean sessionPinningVerified() {
+    return sessionPinned();
+  }
+
+  private boolean sessionPinned() {
+    PINNING_CHECK.lock();
+    try {
+      return SESSION_PINNED.contains(dataSource);
+    } finally {
+      PINNING_CHECK.unlock();
+    }
+  }
+
+  /**
+   * R5, once per store: refuses with {@code DEI-104} a connection path that does not keep one
+   * server session, before any issuance row lock is taken. Public so a host can run it at startup.
+   */
+  public void verifySessionPinning() {
+    PINNING_CHECK.lock();
+    try {
+      if (!SESSION_PINNED.contains(dataSource)) {
+        IssuanceRowLocks.verifySessionPinning(dataSource);
+        SESSION_PINNED.add(dataSource);
+      }
+    } finally {
+      PINNING_CHECK.unlock();
+    }
   }
 
   /** The bound of design 5.2: above zero, and at most one hour. */
@@ -1580,7 +1818,9 @@ public final class JdbcIssuanceStore
             // this the only explanation lived on a row that can legitimately change; now it is in
             // the chain, with the failing rule id or the refusal code on it. FAILED_ARCHIVE is
             // deliberately not chained: it is retryable, not a disposition, and its eventual fate
-            // is ISSUED or VOID_UNUSED, both of which are.
+            // is ISSUED, VOID_UNUSED or - since QUESTIONS 38, after a resumed run that found no
+            // object at its key - FAILED_VALIDATION, all of which are. The event copies the row,
+            // so a burned resumed row's event carries the first attempt's hash and key.
             appendEvent(unit, failed, IssuanceEvent.failed(failed, state, ruleId, clock.instant()));
           }
           return failed;

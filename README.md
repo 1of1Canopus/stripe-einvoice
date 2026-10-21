@@ -124,11 +124,96 @@ re-picked automatically, because neither is cured by an upgrade.
 | A refusal consumes no number | Every refusal that depends on data happens before the allocator is called |
 | One number never names two documents | The archive key carries the SHA-256 of the exact bytes and the store is write-once; the same input renders the same bytes under any time zone and any locale |
 | A crash leaves something a retry can finish | Four phases, each with a recorded state: claim, render, write (the row predicts the object before the PUT), issue (state and chained disposition in one transaction). A disposition a retry cannot finish - a burned number, a voided one - is recorded with its code instead of being retried |
+| A resumed run never burns a number whose document exists | A row that recorded its hash reads its own archive key before it renders again. Same bytes: the number is issued, with no render. Other bytes: a content conflict (`DEI-240`). The read fails: retried later. No object: the run renders, validates and checks dates again, and a refusal burns the number with its rule id |
 | A store that quietly overwrites is refused | At startup, with a real conditional write against a scratch key - not on the strength of a capability flag |
 | A sale with no document is noticed | A reconciliation sweep lists what Stripe finalised and re-enqueues anything with no issued document **and no recorded reason for it**, through the same idempotent path. A number that was burned or voided already has its reason, chained: it is reported under its own code and never re-enqueued. The sweep alerts and never repairs |
 | A redelivery returns the stored document | After checking the archived bytes against the recorded hash. A tampered archive is refused; a legitimate upstream edit is not |
 | Back-pressure costs latency, never an event | A bounded queue and a concurrency limit below your connection pool; past capacity the event stays `RECEIVED` and the sweeper takes it |
 | Buyer data has a retention | The raw signed bodies are nulled the moment an event can no longer run, and purged at `einvoice.inbound.retention` |
+
+### Issuance states
+
+| From | May move to |
+|---|---|
+| `NUMBERED` | `ARCHIVING`, `FAILED_ARCHIVE`, `FAILED_VALIDATION`, `VOID_UNUSED` |
+| `ARCHIVING` | `ISSUED`, `FAILED_ARCHIVE`, `FAILED_VALIDATION`, `VOID_UNUSED` |
+| `FAILED_ARCHIVE` | `ARCHIVING`, `FAILED_VALIDATION`, `VOID_UNUSED` |
+| `FAILED_VALIDATION` | `VOID_UNUSED` |
+| `ISSUED`, `VOID_UNUSED` | nothing |
+
+The same table is enforced twice: by the Java enum and by the database trigger.
+
+`FAILED_VALIDATION` is a burned number: the document was refused, the rule id is on the row and in
+the chain, and an operator voids it. The unit of work takes it from `ARCHIVING` or
+`FAILED_ARCHIVE` only when a resumed run found no object at the row's archive key (or the row had
+no key yet). The row then keeps any hash it recorded the first time. **That hash names the first bytes, which passed and were never archived; the rule
+id names the refusal of the later bytes.** The run logs both hashes at WARN, never the content.
+
+Example. `F-2026-0042` is numbered on 10 January. The archive write times out and nothing lands.
+The host upgrades; the retry renders BT-2 = 3 January; `EINVOICE-DATES` refuses. The event ends on
+`DEI-250` with that rule id, the row is `FAILED_VALIDATION`, nothing is archived, and the sweep
+reports `DEI-279` until an operator voids the number.
+
+### Database connections: one session per connection
+
+Each issuance row is held under a session-level PostgreSQL advisory lock from the moment its
+archive write is announced until its outcome is recorded. Two workers never write and refuse the
+same number at once: the second one gets `DEI-245` and retries later.
+
+- **A pooler in transaction or statement mode is refused** (`DEI-104`). The startup check is an
+  early warning only: under low load a transaction pooler can pass it. What protects the number is
+  the proof every locked transaction runs first (this session still holds the key with this run's
+  random token); when it fails, the run stops with `DEI-104` before it reads, writes or burns. A
+  false pass needs two foreign acts on the same database backend (something frees the lock without
+  a reset, then something that is not this module takes the same key), which only code running as
+  the module's own database role can do. The session setting `einvoice.row_lock` is reserved.
+  Under such a pooler a session lock is no lock at all. PgBouncer in session mode, or a direct
+  connection, works. There is no setting that turns this check off.
+- A Hikari pool with a maximum size below 2 fails the startup with `DEI-100`: the check needs two
+  connections at once.
+- The check needs two free connections besides the caller's own, the first time. The starter runs
+  it once at startup, outside any transaction (a refused pooler fails the startup). A host that
+  wires the store by hand calls `JdbcIssuanceStore.verifySessionPinning()` at startup.
+- A lock that cannot be released on its own session (the backend died: a failover, a terminated
+  backend, a network cut) is logged at ERROR with `DEI-247`, and the connection is closed instead
+  of pooled.
+- If a database connection dies while it holds the lock, PostgreSQL releases the lock at once. A
+  half-open TCP connection keeps it until the server notices: set `tcp_keepalives_idle`,
+  `tcp_keepalives_interval` and `tcp_keepalives_count` on the server (and `tcpKeepAlive=true` on
+  the JDBC URL) so that this takes seconds, not hours. Until then the row only retries; it is never
+  burned.
+
+### Inside your own transaction (joined mode)
+
+When the store joins your transaction (Spring's transaction manager, or a connection you hand
+over), each locked step runs under its own savepoint, and the row lock is released before the call
+returns.
+
+- **Your PostgreSQL connection needs `autosave` NEVER (the default) or CONSERVATIVE.** `autosave
+  ALWAYS` undoes a failed statement inside the driver, so a failed step could leave your commit
+  keeping a half-written invoice. Every joined call, read or write, refuses it with `DEI-249`;
+  there is no opt-out.
+- **When a step fails after your transaction wrote through the store, the transaction is aborted on
+  purpose** (SQLState `DE248`), so it cannot commit. The exception you catch is the signal. A plain
+  JDBC `commit()` after a failed joined call returns normally and commits nothing; PostgreSQL
+  answers ROLLBACK. The module cannot make that call throw. Spring callers also get
+  `UnexpectedRollbackException`.
+- **A call on a transaction that was already aborted** is refused with `DEI-248`; roll it back and
+  call again. The module never aborts or closes your connection.
+- A caller that rolls back to its own savepoint, taken between two calls to this module, keeps the
+  first call's writes: PostgreSQL lets a rollback to an earlier savepoint undo any abort. Wrap the
+  whole issuance in one savepoint and never split it.
+- A lock attempt cancelled between taking the key and writing its token leaves a key with no token
+  until the database session ends; the row answers `DEI-245`, never a burn.
+
+### The filesystem archive and its mount point
+
+Until the archive marker lands (before 0.2.0), an empty directory where the volume should be looks
+like a new, empty archive. Then a resumed row can burn a number whose document is on the real
+volume, and new documents are written to the local disk. Make the start fail when the volume is
+not mounted: with systemd, `RequiresMountsFor=<archive root>` on the service; in a container
+entrypoint, `mountpoint -q <archive root> || exit 1`. A Kubernetes volume in the pod spec is
+mounted or the pod does not start.
 
 ### What it needs from you
 

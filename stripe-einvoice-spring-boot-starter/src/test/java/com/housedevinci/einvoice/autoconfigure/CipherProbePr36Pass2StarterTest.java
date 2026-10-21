@@ -125,6 +125,7 @@ class CipherProbePr36Pass2StarterTest {
           store,
           store,
           store,
+          store,
           renderer,
           validator,
           lenient,
