@@ -440,8 +440,17 @@ public final class IssuanceUnitOfWork {
       return fail(event, InboundState.FAILED_ISSUANCE, e.code(), retryIn);
     }
     if (concluded.isEmpty()) {
-      return fail(
-          event, InboundState.FAILED_ISSUANCE, ErrorCodes.ISSUANCE_IN_FLIGHT, backoffFor(event));
+      // D-PR9-F2: the lock holder is usually another run of this same event, and it may conclude
+      // before this write. So the in-flight answer is a compare-and-set from MAPPED, the state
+      // this run left: when the holder already wrote its outcome, this run answers from it and
+      // writes nothing over it. Example: A issues INV-2026-000001 and writes COMPLETED; B's
+      // in-flight write finds COMPLETED and B returns COMPLETED with that number.
+      return failFrom(
+          InboundState.MAPPED,
+          event,
+          InboundState.FAILED_ISSUANCE,
+          ErrorCodes.ISSUANCE_IN_FLIGHT,
+          backoffFor(event));
     }
     return apply(event, concluded.get());
   }
