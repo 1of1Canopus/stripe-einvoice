@@ -278,18 +278,29 @@ class CipherProbePr9Test {
     CyclicBarrier start = new CyclicBarrier(2);
     ExecutorService pool = Executors.newFixedThreadPool(2);
     try {
-      Callable<InboundState> run =
+      Callable<IssuanceUnitOfWork.Outcome> run =
           () -> {
             start.await();
-            return harness.unitOfWorkWithRenderer(renderer).process(eventId).state();
+            return harness.unitOfWorkWithRenderer(renderer).process(eventId);
           };
-      List<Future<InboundState>> futures = pool.invokeAll(List.of(run, run));
-      for (Future<InboundState> future : futures) {
-        assertThat(future.get()).isEqualTo(InboundState.COMPLETED);
+      List<Future<IssuanceUnitOfWork.Outcome>> futures = pool.invokeAll(List.of(run, run));
+      // Ruling 2026-10-21 (try-only row lock): a run that finds the other run holding the row may
+      // answer FAILED_ISSUANCE with DEI-245 "in flight"; the event itself must still end COMPLETED.
+      for (Future<IssuanceUnitOfWork.Outcome> future : futures) {
+        IssuanceUnitOfWork.Outcome outcome = future.get();
+        assertThat(
+                outcome.state() == InboundState.COMPLETED
+                    || (outcome.state() == InboundState.FAILED_ISSUANCE
+                        && ErrorCodes.ISSUANCE_IN_FLIGHT.equals(outcome.code())))
+            .as("each run: COMPLETED, or FAILED_ISSUANCE with DEI-245, was %s", outcome)
+            .isTrue();
       }
     } finally {
       pool.shutdownNow();
     }
+    assertThat(harness.inbound().find(eventId).orElseThrow().state())
+        .as("the event ends COMPLETED")
+        .isEqualTo(InboundState.COMPLETED);
     assertThat(harness.numberedRows()).isEqualTo(1);
     assertThat(harness.chainedEvents()).isEqualTo(1);
     assertThat(harness.archive().size()).isEqualTo(1);

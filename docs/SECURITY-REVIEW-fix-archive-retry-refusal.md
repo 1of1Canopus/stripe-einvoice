@@ -474,3 +474,26 @@ release failure alone" red in the PR body as J5b.
 2. D-PR43-8: 25P02 at a joined entry is `DEI-248` on every joined call; probe green.
 3. D-PR43-9: add the R2 next-call probe; J5b red in the PR body.
 4. Add all six `CipherProbePr43Pass3Test` probes to the suite before the production change.
+
+## Pass 3 addendum, D-PR9-F2 ruling (2026-10-21)
+
+Head `7858963`. **Ruling: A.** The try-only row lock stays (it never waits). A run that finds the
+other run holding the row may answer `FAILED_ISSUANCE` with `DEI-245`. That answer writes nothing
+over the event: the event still ends `COMPLETED` with one number, one chained event, one archive
+object. `CipherProbePr9Test.probe_a_reopened_row_run_twice_at_once_still_numbers_once` now accepts,
+per run, `COMPLETED` or `FAILED_ISSUANCE` with `DEI-245`, and asserts the event ends `COMPLETED`.
+B (polling for up to 30 s) is refused: a new mechanism that holds threads, for an answer the
+caller already gets on the next delivery.
+
+| check | result |
+|---|---|
+| `CipherProbePr9Test`, 10 runs | 10 of 10 green (5 tests each) |
+| `CipherProbePr43Pass3Test` at `7858963` | 6 of 6 green |
+
+D-PR43-7, D-PR43-8, D-PR43-9: closed at `432d4b0`. Probes green by name:
+`probe_a_joined_allocation_on_autosave_always_is_refused_before_any_number`,
+`probe_a_joined_allocation_on_an_aborted_transaction_is_dei_248`,
+`probe_a_release_failure_alone_leaves_the_next_call_usable` (J5 as briefed, red in the PR body).
+
+**Verdict: MERGE**, for the pass 3 scope. The compare-and-set in `7858963` (D-PR9-F2) was not
+given an adversarial pass here.
