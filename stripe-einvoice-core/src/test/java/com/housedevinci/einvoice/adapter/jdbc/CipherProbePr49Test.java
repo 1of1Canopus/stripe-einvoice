@@ -3,9 +3,12 @@ package com.housedevinci.einvoice.adapter.jdbc;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.housedevinci.einvoice.domain.EInvoiceException;
+import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
 import java.sql.Connection;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.Optional;
 import javax.sql.DataSource;
@@ -92,5 +95,52 @@ class CipherProbePr49Test {
     assertThat(runLocks(ds))
         .as("run locks left on a pooled session after the caller rolled back")
         .isZero();
+  }
+
+  /**
+   * Pass 2, D-PR49-1 on its own (mutation F1: the joined check removed). The host writes a row in
+   * its transaction, calls a run that would stamp the event, and rolls back. Nothing may stay
+   * committed: not the host's row, not the run's stamp. Without the guard the call falls through to
+   * the own-connection path on the caller's connection, whose commits publish both.
+   */
+  @Test
+  void probe_a_host_rollback_after_a_run_leaves_nothing_committed() throws Exception {
+    DataSource ds = PostgresSupport.freshDatabase("pr49rollback", 6);
+    IssuanceTestHarness harness = IssuanceTestHarness.createOn(ds);
+    String eventId = harness.receive("invoice.finalized", "in_pr49_rollback");
+    InboundEvent stored = harness.inbound().find(eventId).orElseThrow();
+    PostgresSupport.executeOn(ds, "CREATE TABLE test_host_row (x int)");
+    Throwable thrown = null;
+
+    try (Connection caller = ds.getConnection()) {
+      caller.setAutoCommit(false);
+      try (Statement st = caller.createStatement()) {
+        st.executeUpdate("INSERT INTO test_host_row VALUES (1)");
+      }
+      JdbcInboundRunLock joined = new JdbcInboundRunLock(JdbcUnitOfWork.using(caller), ds);
+      try {
+        joined.whileHeld(
+            stored,
+            held ->
+                held.inbound()
+                    .stampAttempt(
+                        eventId, InboundState.RECEIVED, harness.now(), Duration.ofMinutes(1)));
+      } catch (RuntimeException e) {
+        thrown = e;
+      }
+      caller.rollback();
+    }
+
+    assertThat(PostgresSupport.scalarOn(ds, "SELECT count(*) FROM test_host_row"))
+        .as("the host rolled back: its row must not stay committed")
+        .isZero();
+    assertThat(harness.inbound().find(eventId).orElseThrow())
+        .as("the host rolled back: the run's stamp must not stay committed")
+        .isEqualTo(stored);
+    assertThat(runLocks(ds)).as("run locks left after the host rolled back").isZero();
+    assertThat(thrown)
+        .as("a run inside a caller's transaction is refused")
+        .isInstanceOf(EInvoiceException.class);
+    assertThat(((EInvoiceException) thrown).code()).isEqualTo(ErrorCodes.RUN_IN_HOST_TRANSACTION);
   }
 }

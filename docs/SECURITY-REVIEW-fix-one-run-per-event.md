@@ -123,3 +123,57 @@ arithmetic.
 `CipherProbePr49Test` (core, package `adapter.jdbc`) and `CipherProbePr49StarterTest` (starter,
 package `autoconfigure`). They are kept with the review's internal probe files. The fix pass adds
 them to the suite red before it changes production code.
+
+## Pass 2 (2026-10-26, security review, head cc16f17)
+
+Limited pass: the two pass 1 findings, the verify numbers, and the DEI-246 note. Verdict: **MERGE**.
+
+### Numbers
+
+Full `verify` with `CIPHER_PROBE_MAVEN=1`, Docker up: core 815, starter 157, sample 9; 0 failed, 0
+skipped. The fix pass reported 814 / 156 / 9; the extra test in core and in starter is the pass 2
+probe below.
+
+### D-PR49-1: verified
+
+The run lock refuses a run inside a caller's transaction with `DEI-218 RUN_IN_HOST_TRANSACTION`
+before the lock is tried. `DEI-218` is in `ReservedErrorCodes`; T15 is green.
+
+Mutation F1 (the joined check disabled), run by the reviewer: the pass 1 probe stays green, as the
+fix pass said. The fall-through runs the own-connection path on the caller's connection, and that
+path releases its lock. So the pass 1 probe alone does not pin the guard.
+
+New probe `probe_a_host_rollback_after_a_run_leaves_nothing_committed`. Example: the host inserts a
+row in its transaction, calls a run that would stamp the event, then rolls back. Under F1 the host's
+row stays committed (expected 0, was 1): the run's commits publish the host's write. With the guard
+the call fails with `DEI-218`, and nothing stays committed: not the host row, not the stamp, no run
+lock. `JoinedRunRefusalTest` and `JoinedRunRefusalSpringTest` are also red under F1.
+
+### D-PR49-2: verified
+
+The pool rule now runs after every singleton exists, through `ObjectProvider<IssuanceUnitOfWork>`.
+In a started context, concurrency 3 on the shared pool of 8 fails startup. New probe
+`probe_the_refusal_is_the_pool_rule_and_the_boundary_starts` checks that the failure is the rule's
+own `DEI-100` naming 11 connections (not any startup error), and that concurrency 2 (needs exactly
+8) starts. Three mutations, each red: F2a unit-of-work check inverted, F2b comparison inverted
+(`need < max`), F2c off by one (`need >= max`). Changing `IssuanceOperationsTest` from concurrency
+3 to 1 is correct: 3 needs 11 connections and the test pool has 8.
+
+### DEI-246 note: new row D-PR49-3, LOW, not on this branch
+
+The note understates it. The approved archive marker design page reserves **two** codes:
+`DEI-246 ARCHIVE_UNMARKED` and `DEI-247 ARCHIVE_FOREIGN`. On main, `DEI-247` is already
+`ROW_LOCK_RELEASE_FAILED`. Example of the harm: built as designed, `DEI-247` would mean both "a
+lock could not be released, the outcome stands" and "wrong archive volume, this never heals". A
+handler keyed on the code would log and carry on. Neither code is in `ReservedErrorCodes`, so T15
+cannot catch it. This exists on main before PR 49 and does not block it.
+
+Fix, own small PR: add `DEI-246 ARCHIVE_UNMARKED` to `ReservedErrorCodes`; pick a free code for
+`ARCHIVE_FOREIGN` (DEI-248 and DEI-249 appear in another design page, so check the next free one),
+reserve it, and update the design page; extend `ErrorCodesUniquenessTest` with a case like the
+`DEI-218` one.
+
+### Verdict
+
+**MERGE.** D-PR49-1 and D-PR49-2 are closed with probes that fail on their own mutations. D-PR49-3
+goes to its own PR before the archive marker is built.

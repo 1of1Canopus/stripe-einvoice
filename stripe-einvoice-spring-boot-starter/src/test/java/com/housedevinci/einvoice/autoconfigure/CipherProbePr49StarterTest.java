@@ -51,4 +51,29 @@ class CipherProbePr49StarterTest {
   void probe_concurrency_three_on_a_pool_of_eight_refuses_a_started_context() {
     runner("einvoice.issuance.concurrency=3").run(context -> assertThat(context).hasFailed());
   }
+
+  /**
+   * Pass 2 (mutation F2: the rule inverted). The refusal must be the pool rule's own DEI-100, not
+   * any startup failure, and the boundary (concurrency 2 needs 3 x 2 + 2 = 8 on a pool of 8) must
+   * start.
+   */
+  @Test
+  void probe_the_refusal_is_the_pool_rule_and_the_boundary_starts() {
+    runner("einvoice.issuance.concurrency=3")
+        .run(
+            context -> {
+              assertThat(context).hasFailed();
+              Throwable cause = context.getStartupFailure();
+              while (cause != null
+                  && !(cause instanceof com.housedevinci.einvoice.domain.EInvoiceException)) {
+                cause = cause.getCause();
+              }
+              assertThat(cause).as("the startup failure is an EInvoiceException").isNotNull();
+              assertThat(((com.housedevinci.einvoice.domain.EInvoiceException) cause).code())
+                  .isEqualTo(com.housedevinci.einvoice.domain.ErrorCodes.CONFIG);
+              assertThat(cause.getMessage()).contains("= 11 connections");
+            });
+    runner("einvoice.issuance.concurrency=2")
+        .run(context -> assertThat(context).hasNotFailed().hasBean("einvoiceRunPoolRule"));
+  }
 }
