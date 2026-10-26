@@ -129,7 +129,7 @@ re-picked automatically, because neither is cured by an upgrade.
 | A sale with no document is noticed | A reconciliation sweep lists what Stripe finalised and re-enqueues anything with no issued document **and no recorded reason for it**, through the same idempotent path. A number that was burned or voided already has its reason, chained: it is reported under its own code and never re-enqueued. The sweep alerts and never repairs |
 | A redelivery returns the stored document | After checking the archived bytes against the recorded hash. A tampered archive is refused; a legitimate upstream edit is not |
 | Back-pressure costs latency, never an event | A bounded queue and a concurrency limit below your connection pool; past capacity the event stays `RECEIVED` and the sweeper takes it |
-| Buyer data has a retention | The raw signed bodies are nulled the moment an event can no longer run, and purged at `einvoice.inbound.retention` |
+| Buyer data has a retention | The raw signed bodies are nulled the moment an event can no longer run, and purged at `einvoice.inbound.retention`. One exception: the row of an invoice whose number is still open (neither issued nor voided) is kept until the number resolves, because the reprocess needs it to resume that number |
 
 ### Issuance states
 
@@ -200,6 +200,17 @@ on the invoice (the first four bytes of SHA-256 of the Stripe object id; the ses
   the run lock is tried: nothing is locked, read or recorded, and your transaction is untouched. A
   run fetches from Stripe, renders and archives, so it would hold your transaction open for minutes,
   and a failed write would leave its run lock on your pooled connection.
+- **A refused Stripe key is `DEI-219`.** Stripe answering 401 or 403 means the key was revoked or
+  lacks a permission. That does not improve with time, so the event stops with no retry. Each
+  reconciliation pass names every stopped event once (a finding with code `DEI-219`). The first
+  successful Stripe call after a refusal, and every startup, makes the stopped events due again.
+  Example: the key is revoked by mistake at 09:00, three events stop; you rotate the key and
+  restart at 09:20; the startup makes the three due and the next sweep finishes them.
+- **A run never leaves a number behind a refusal.** A row that may hold a number (`MAPPED`,
+  `FAILED_ISSUANCE`, or `FETCHED` when the issuance table has a number for the invoice) and meets a
+  Stripe outage, a pin change, a mode or account mismatch or an unsubscribed type is recorded
+  `FAILED_ISSUANCE` with that refusal's own code, keeping the number. It is retried with a backoff
+  (no retry for `DEI-205` and `DEI-219`), and the reprocess resumes it once the cause is fixed.
 - **A lost lock is `DEI-104`, at WARN.** If the server or the network ends the run's session
   mid-run, the run's next write refuses, the run writes nothing more, and one WARN names the event.
   The connection is closed, not pooled.
