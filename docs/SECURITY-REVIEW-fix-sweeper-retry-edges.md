@@ -151,3 +151,105 @@ not say.
 `CipherProbePr50Test` (core, package `application`), kept with the review's internal probe files.
 The fix pass adds it to the suite before it changes production code. The two `guard_` methods are
 green now and stay as regression guards. The B1 probe goes in with its own pull request.
+
+## Pass 2 (2026-10-26)
+
+Head `9974dc2` (PR 49 branch merged at `5c0acfd`). Limited pass: the two fixes, their side
+effects, the skipped probe. Last pass on this PR.
+
+**Verdict: MERGE WITH FIXES.** One INFO, documentation only (D-PR50-4). Both pass 1 findings are
+verified. No third pass is needed: the fix pass applies D-PR50-4 and the verifier reports the
+numbers.
+
+### Numbers
+
+Full `clean verify` on `9974dc2` plus the pass 2 guard file, Docker up.
+
+| Module | Tests | Skipped | Failures |
+|---|---|---|---|
+| core | 946 (943 of the branch + 3 pass 2 guards) | 1 | 0 |
+| starter | 157 | 0 | 0 |
+| sample | 9 | 0 | 0 |
+
+The one skipped test is `probe_a_stuck_number_is_never_named_when_the_list_fails_until_the_year_turns`.
+
+### D-PR50-1, verified
+
+The purge guard now keeps a row only while its number is open: `NUMBERED`, `ARCHIVING`,
+`FAILED_ARCHIVE`. The list comes from `IssuanceState.open()`, the same predicate the reprocess
+uses. The pass 1 probe is green.
+
+Adversarial variant. A voided number (`VOID_UNUSED`) has nothing to resume, so its row must leave
+at retention. It must not leave earlier. Example: the row arrived on 10 June. A purge with cutoff
+10 June (same instant) or 1 June keeps it. A purge with cutoff 10 June plus one microsecond removes
+it. Green: `guard_a_voided_number_row_is_purged_on_schedule_not_early`.
+
+Boundary. Each of the three open states still keeps its row past retention:
+`guard_every_open_state_keeps_its_row_past_retention`.
+
+### D-PR50-2, verified
+
+The reprocess accepts `FAILED_ISSUANCE` with any code. The re-open to `RECEIVED` keeps its
+`NOT EXISTS` number guard. The pass 1 probe is green.
+
+Side effect. A reprocess of a voided number now answers `REFUSED_NUMBERED`, not
+`REFUSED_NOT_ELIGIBLE`. Checked from three starts: `FAILED_ISSUANCE DEI-211`,
+`FAILED_ISSUANCE DEI-132`, `FAILED_MAPPING DEI-221`. Each one: no Stripe fetch, no reprocess
+record, no series counter move, no new numbered row, no chained event, inbound row unchanged
+(state, code, attempts), issuance still `VOID_UNUSED`. Green:
+`guard_a_voided_number_reprocess_runs_nothing_records_nothing_takes_no_number`. The new answer is
+correct and matches the `Disposition.REFUSED_NUMBERED` javadoc. No code in core, starter or sample
+branches on either value. But the public text does not say it: see D-PR50-4.
+
+### D-PR50-4, INFO (documentation). The new answer for a closed number is not in the public text
+
+In 0.1.0 a reprocess of an event whose invoice holds a voided number answered
+`REFUSED_NOT_ELIGIBLE` (the old `VoidTerminalDispositionTest` asserted it). It now answers
+`REFUSED_NUMBERED`. An operator script that branches on the answer sees a new value. The public
+text says otherwise:
+
+- `docs/index.md`, reprocess list: "Every other state ... is answered `REFUSED_NOT_ELIGIBLE`". It
+  never says what a `FAILED_ISSUANCE` or `FAILED_MAPPING` row with an issued, burned or voided
+  number gets.
+- `CHANGELOG.md`, D-SRE-2 entry: "`REFUSED_NUMBERED` now means a number appeared between the read
+  and that statement". That is one of two cases; the main one is missing.
+
+Example. An operator voids `INV-2026-000012`, then by mistake calls reprocess on its event. The
+docs promise `REFUSED_NOT_ELIGIBLE`; the call returns `REFUSED_NUMBERED` with code
+`DEI-111`. Nothing runs either way.
+
+Repro: `CipherProbePr50Pass2Test.guard_a_voided_number_reprocess_runs_nothing_records_nothing_takes_no_number`
+(green, asserts `REFUSED_NUMBERED`) against `docs/index.md` lines 209 to 213.
+
+Fix (Isis, docs only). `docs/index.md`, reprocess list: add one bullet: a `FAILED_ISSUANCE` or
+`FAILED_MAPPING` row whose invoice holds an issued, burned or voided number is answered
+`REFUSED_NUMBERED` with `DEI-111`; nothing runs, nothing is recorded, no
+number is taken. `CHANGELOG.md`: under the D-PR50-2 entry, state the change from 0.1.0
+(`REFUSED_NOT_ELIGIBLE` to `REFUSED_NUMBERED` for a closed number), and correct the D-SRE-2 line to
+name both cases. No code change.
+
+### D-PR50-B1, handling accepted
+
+The probe is in the suite, `@Disabled`, with a message that names QUESTIONS 58 and the commit where
+it was red. QUESTIONS 58 puts the fix in its own small PR, with D-PR49-3, before the 0.2.0 tag. The
+finding is pre-existing on main and not touched by this branch. Accepted. It stays a tag blocker:
+that PR removes the annotation and the probe must be green there.
+
+### Mutations
+
+| Mutation | Result |
+|---|---|
+| `OPEN_NUMBER_KEEPS_ROW` filter narrowed from `open()` to `NUMBERED` | red: `guard_every_open_state_keeps_its_row_past_retention` at `ARCHIVING` |
+| numbered gate in `IssuanceReprocess.reprocessPermitted` removed | red: the pass 2 reprocess guard and `VoidTerminalDispositionTest.a_privileged_reprocess_of_a_voided_invoice_is_still_refused`; the second gate still refused (`REFUSED_NOT_ELIGIBLE`), nothing ran |
+
+Both restored; tree clean before the full run. JaCoCo line gate met in core and starter.
+
+### New surfaces
+
+None in code beyond D-PR50-4. The fix removes a constant (`ELIGIBLE_ISSUANCE_CODE`) and a private copy of `open()`.
+The purge SQL is built from enum names, not from input.
+
+### Probes
+
+`CipherProbePr50Pass2Test` (core, package `application`): three guards, green on `9974dc2`. Added
+to the suite on this branch and kept with the review's internal probe files.
