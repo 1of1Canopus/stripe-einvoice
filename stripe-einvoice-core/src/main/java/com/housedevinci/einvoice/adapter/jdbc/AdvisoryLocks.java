@@ -32,6 +32,7 @@ import java.sql.SQLException;
  *   <tr><td>stripe-einvoice</td><td>schema init</td><td>2-arg</td><td>class 0x45494E49</td></tr>
  *   <tr><td>stripe-einvoice</td><td>issuance chain append</td><td>2-arg</td><td>class 0x45494E43</td></tr>
  *   <tr><td>stripe-einvoice</td><td>issuance row archive write</td><td>2-arg, session</td><td>class 0x45494E41, low 32 bits of the row id</td></tr>
+ *   <tr><td>stripe-einvoice</td><td>one run per invoice</td><td>2-arg, session; xact for the purge</td><td>class 0x45494E52, first 4 bytes of SHA-256 of the object id</td></tr>
  * </table>
  *
  * <p>The schema and chain locks are <b>transaction-scoped</b>. A lock released before commit would
@@ -55,6 +56,15 @@ public final class AdvisoryLocks {
 
   /** One issuance row between its ARCHIVING marker and its outcome. "EINA". Session-scoped. */
   public static final int ROW_CLASS_ID = 0x45494E41;
+
+  /**
+   * One run per Stripe invoice (D-PR45-1). "EINR". Session-scoped, tried and never waited for, held
+   * for the whole run. The retention purge takes the same key transaction-scoped, so it never
+   * deletes a row a run holds. The second key is the first four bytes of SHA-256 of the stored
+   * row's object id, computed in Java ({@code hashtext} is not promised stable across PostgreSQL
+   * versions). A collision of two invoices only makes one of them wait a sweep.
+   */
+  public static final int RUN_CLASS_ID = 0x45494E52;
 
   /** The object each class id is keyed on inside its namespace. */
   public static final String SCHEMA_KEY = "einvoice_schema";

@@ -258,6 +258,8 @@ class CipherProbePr11Test {
       DocumentValidator validator) {
     return new IssuanceUnitOfWork(
         harness.inbound(),
+        harness.runLock(),
+        harness.permits(),
         harness.source(),
         harness.store(),
         reader,

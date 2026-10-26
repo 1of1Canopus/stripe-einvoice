@@ -67,6 +67,34 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   static final String TRANSITION_FROM = TRANSITION + " AND state = ?";
 
   /**
+   * A conclusion written by a run that holds the run lock (D-ORPE-3): no {@code + 1}. One run is
+   * one attempt, and the run's only {@code + 1} is its stamp. Writes outside a run keep {@link
+   * #TRANSITION_FROM}.
+   */
+  static final String HELD_TRANSITION_FROM =
+      TRANSITION_FROM.replace(" attempts = attempts + 1,", "");
+
+  /**
+   * The stamp of a run that took the run lock (D-PR45-1): one attempt more, and the time a
+   * successor may start if this run dies. No state change; a compare on the state the run decided
+   * on.
+   */
+  static final String STAMP_ATTEMPT =
+      "UPDATE einvoice_inbound_event SET attempts = attempts + 1, next_attempt_at = ?,"
+          + " updated_at = ? WHERE event_id = ? AND state = ?";
+
+  /** The retention purge's candidates; each is deleted under the run key (design row 10). */
+  static final String PURGE_CANDIDATES =
+      "SELECT event_id, object_id FROM einvoice_inbound_event WHERE received_at < ?"
+          + " ORDER BY received_at LIMIT ?";
+
+  /** Tried, never waited for: a row whose run is live is skipped this hour. */
+  static final String PURGE_TRY_RUN_KEY = "SELECT pg_catalog.pg_try_advisory_xact_lock(?, ?)";
+
+  static final String PURGE_ONE =
+      "DELETE FROM einvoice_inbound_event WHERE event_id = ? AND received_at < ?";
+
+  /**
    * The privileged re-open (QUESTIONS 26), run by {@code JdbcReprocessLedger} in the same
    * transaction as the record of who asked (D9-03) - which is why the statement lives here, beside
    * the table it writes, and is executed there, beside the row that attributes it.
@@ -116,8 +144,43 @@ public final class JdbcInboundEventStore implements InboundEventStore {
 
   private final JdbcUnitOfWork unitOfWork;
 
+  /** False for the store a run lock holder writes through: its conclusions add no attempt. */
+  private final boolean countsAttempts;
+
   public JdbcInboundEventStore(JdbcUnitOfWork unitOfWork) {
+    this(unitOfWork, true);
+  }
+
+  private JdbcInboundEventStore(JdbcUnitOfWork unitOfWork, boolean countsAttempts) {
     this.unitOfWork = Objects.requireNonNull(unitOfWork, "unitOfWork");
+    this.countsAttempts = countsAttempts;
+  }
+
+  /** The store a run lock holder writes through: every unit proves the lock (D-PR45-1). */
+  static JdbcInboundEventStore heldBy(JdbcUnitOfWork held) {
+    return new JdbcInboundEventStore(held, false);
+  }
+
+  @Override
+  public Optional<InboundEvent> stampAttempt(
+      String eventId, InboundState expected, Instant now, Duration retryIn) {
+    Objects.requireNonNull(expected, "expected");
+    Objects.requireNonNull(retryIn, "retryIn");
+    return unitOfWork.inTransaction(
+        unit -> {
+          Connection c = unit.connection();
+          Instant when = Timestamps.toStorage(now);
+          try (PreparedStatement ps = c.prepareStatement(STAMP_ATTEMPT)) {
+            ps.setObject(1, ts(Timestamps.toStorage(now.plus(retryIn))));
+            ps.setObject(2, ts(when));
+            ps.setString(3, eventId);
+            ps.setString(4, expected.name());
+            if (ps.executeUpdate() != 1) {
+              return Optional.<InboundEvent>empty();
+            }
+          }
+          return find(c, eventId, false);
+        });
   }
 
   @Override
@@ -293,7 +356,8 @@ public final class JdbcInboundEventStore implements InboundEventStore {
     // must not be able to move it backwards.
     InboundState resolved = current.state().transitionTo(next);
     Instant when = Timestamps.toStorage(now);
-    try (PreparedStatement ps = c.prepareStatement(TRANSITION_FROM)) {
+    try (PreparedStatement ps =
+        c.prepareStatement(countsAttempts ? TRANSITION_FROM : HELD_TRANSITION_FROM)) {
       int i = 1;
       ps.setString(i++, resolved.name());
       ps.setString(i++, code == null ? "" : code);
@@ -376,18 +440,53 @@ public final class JdbcInboundEventStore implements InboundEventStore {
         });
   }
 
+  /**
+   * Deletes up to {@code limit} rows past the retention ceiling, each in its own transaction under
+   * its run key (design one-run-per-event, row 10). A row whose run is live is skipped this hour:
+   * deleting it would let the run write into a row that no longer exists, and its next sweep
+   * re-create nothing. The key is tried, never waited for.
+   */
   @Override
   public int purgeOlderThan(Instant cutoff, int limit) {
+    List<String[]> candidates =
+        unitOfWork.inReadUnit(
+            unit -> {
+              List<String[]> rows = new ArrayList<>();
+              try (PreparedStatement ps = unit.connection().prepareStatement(PURGE_CANDIDATES)) {
+                ps.setObject(1, ts(cutoff));
+                ps.setInt(2, Math.max(1, limit));
+                try (ResultSet rs = ps.executeQuery()) {
+                  while (rs.next()) {
+                    rows.add(new String[] {rs.getString(1), rs.getString(2)});
+                  }
+                }
+              }
+              return rows;
+            });
+    int purged = 0;
+    for (String[] row : candidates) {
+      purged += purgeOne(row[0], row[1], cutoff);
+    }
+    return purged;
+  }
+
+  private int purgeOne(String eventId, String objectId, Instant cutoff) {
     return unitOfWork.inTransaction(
         unit -> {
-          try (PreparedStatement ps =
-              unit.connection()
-                  .prepareStatement(
-                      "DELETE FROM einvoice_inbound_event WHERE event_id IN ("
-                          + " SELECT event_id FROM einvoice_inbound_event"
-                          + " WHERE received_at < ? ORDER BY received_at LIMIT ?)")) {
-            ps.setObject(1, ts(cutoff));
-            ps.setInt(2, Math.max(1, limit));
+          Connection c = unit.connection();
+          try (PreparedStatement lock = c.prepareStatement(PURGE_TRY_RUN_KEY)) {
+            lock.setInt(1, AdvisoryLocks.RUN_CLASS_ID);
+            lock.setInt(2, JdbcInboundRunLock.runKey(objectId));
+            try (ResultSet rs = lock.executeQuery()) {
+              rs.next();
+              if (!rs.getBoolean(1)) {
+                return 0;
+              }
+            }
+          }
+          try (PreparedStatement ps = c.prepareStatement(PURGE_ONE)) {
+            ps.setString(1, eventId);
+            ps.setObject(2, ts(cutoff));
             return ps.executeUpdate();
           }
         });

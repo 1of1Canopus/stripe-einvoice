@@ -168,6 +168,8 @@ class CipherProbePr14bTest {
     @Bean
     IssuanceUnitOfWork hostUnitOfWork(
         InboundEventStore inbound,
+        com.housedevinci.einvoice.application.InboundRunLock runLock,
+        com.housedevinci.einvoice.application.RunPermits permits,
         StripeInvoiceSource source,
         JdbcIssuanceStore store,
         DocumentRenderer renderer,
@@ -178,6 +180,8 @@ class CipherProbePr14bTest {
         EInvoiceProperties properties) {
       return new IssuanceUnitOfWork(
           inbound,
+          runLock,
+          permits,
           source,
           store,
           store,

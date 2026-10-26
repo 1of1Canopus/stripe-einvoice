@@ -12,14 +12,20 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
- * Security review, PR 45 pass 1 (D-PR45-1). Two runs on ONE event both reach the number claim:
- * the sweeper re-picks a MAPPED row (due at once) while the worker that wrote it is rendering.
- * The second run's FETCHED and MAPPED writes land (QUESTIONS 44), it loses the claim, and the
- * second run resumes the winner's NUMBERED row and documents it. When the winner's own render then
- * fails, its post-claim FAILED_ISSUANCE write is an unconditional transition from COMPLETED:
- * DEI-210 escapes process, the D-PR9-F1 symptom on the post-claim side.
+ * Security review, PR 45 pass 1 (D-PR45-1). Two runs on ONE event both reach the number claim: the
+ * sweeper re-picks a MAPPED row (due at once) while the worker that wrote it is rendering. The
+ * second run's FETCHED and MAPPED writes land (QUESTIONS 44), it loses the claim, and the second
+ * run resumes the winner's NUMBERED row and documents it. When the winner's own render then fails,
+ * its post-claim FAILED_ISSUANCE write is an unconditional transition from COMPLETED: DEI-210
+ * escapes process, the D-PR9-F1 symptom on the post-claim side.
  *
  * <p>Install under stripe-einvoice-core/src/test/java/com/housedevinci/einvoice/application/.
+ *
+ * <p>Build of the one-run-per-event design (Revision 2): the probe went in unchanged and was red on
+ * main, 3 of 3. Its escape assertions stand as written. The outcome assertions that described the
+ * race (the second run documenting the number) now describe the design's T2 and T3: the second run
+ * of one invoice is busy ({@code DEI-217}), writes nothing, and the first run's own conclusion is
+ * the row's conclusion.
  */
 class CipherProbePr45Test {
 
@@ -80,7 +86,9 @@ class CipherProbePr45Test {
       Future<IssuanceUnitOfWork.Outcome> workerA =
           pool.submit(
               () ->
-                  harness.unitOfWorkWithSourceAndRenderer(harness.source(), heldA).process(eventId));
+                  harness
+                      .unitOfWorkWithSourceAndRenderer(harness.source(), heldA)
+                      .process(eventId));
       assertThat(heldA.reached.await(WAIT, TimeUnit.SECONDS)).isTrue();
       // The sweeper's run on the same MAPPED row while A renders.
       b = harness.unitOfWork().process(eventId);
@@ -96,7 +104,10 @@ class CipherProbePr45Test {
     }
     assertThat(escaped).as("the winner must not throw").isNull();
     assertThat(a.state()).isEqualTo(InboundState.COMPLETED);
-    assertThat(b.state()).isEqualTo(InboundState.COMPLETED);
+    // T2/T3: the sweeper's run is busy and writes nothing.
+    assertThat(b.code())
+        .isEqualTo(com.housedevinci.einvoice.domain.ErrorCodes.INBOUND_RUN_IN_PROGRESS);
+    assertThat(b.state()).isEqualTo(InboundState.MAPPED);
     assertThat(harness.numberedRows()).isEqualTo(1);
     assertThat(harness.chainedEvents()).isEqualTo(1);
     assertThat(harness.archive().size()).isEqualTo(1);
@@ -115,9 +126,13 @@ class CipherProbePr45Test {
       Future<IssuanceUnitOfWork.Outcome> workerA =
           pool.submit(
               () ->
-                  harness.unitOfWorkWithSourceAndRenderer(harness.source(), heldA).process(eventId));
+                  harness
+                      .unitOfWorkWithSourceAndRenderer(harness.source(), heldA)
+                      .process(eventId));
       assertThat(heldA.reached.await(WAIT, TimeUnit.SECONDS)).isTrue();
-      harness.unitOfWork().process(eventId);
+      IssuanceUnitOfWork.Outcome sweeper = harness.unitOfWork().process(eventId);
+      assertThat(sweeper.code())
+          .isEqualTo(com.housedevinci.einvoice.domain.ErrorCodes.INBOUND_RUN_IN_PROGRESS);
       heldA.release.countDown();
       try {
         workerA.get(WAIT, TimeUnit.SECONDS);
@@ -129,9 +144,12 @@ class CipherProbePr45Test {
       pool.shutdownNow();
     }
     assertThat(escaped).as("the winner's failure write must not escape (was DEI-210?)").isNull();
+    // T2: one run, one render. The winner's render failed, so the winner's failure is the row's
+    // conclusion: FAILED_ISSUANCE from MAPPED, a legal edge, and no document.
     assertThat(harness.inbound().find(eventId).orElseThrow().state())
-        .as("the run that documented the number concluded it")
-        .isEqualTo(InboundState.COMPLETED);
+        .as("the only run that rendered concluded it")
+        .isEqualTo(InboundState.FAILED_ISSUANCE);
+    assertThat(harness.archive().size()).isZero();
   }
 
   /** Holds a run inside the preflight: after findBySource, before its MAPPED write. */
@@ -189,29 +207,35 @@ class CipherProbePr45Test {
       Future<IssuanceUnitOfWork.Outcome> workerB =
           pool.submit(
               () ->
-                  harness.unitOfWorkWithSourceAndRenderer(harness.source(), heldB).process(eventId));
+                  harness
+                      .unitOfWorkWithSourceAndRenderer(harness.source(), heldB)
+                      .process(eventId));
       assertThat(heldB.reached.await(WAIT, TimeUnit.SECONDS)).isTrue();
       Future<IssuanceUnitOfWork.Outcome> workerA =
           pool.submit(
               () ->
-                  harness.unitOfWorkWithSourceAndRenderer(harness.source(), heldA).process(eventId));
-      assertThat(heldA.reached.await(WAIT, TimeUnit.SECONDS)).isTrue();
-      heldB.release.countDown();
-      b = workerB.get(WAIT, TimeUnit.SECONDS);
-      // B resumed A's NUMBERED row at P1 and documented the number itself.
-      assertThat(b.state()).isEqualTo(InboundState.COMPLETED);
-      heldA.release.countDown();
+                  harness
+                      .unitOfWorkWithSourceAndRenderer(harness.source(), heldA)
+                      .process(eventId));
+      // T3: B holds the run lock in its preflight, so A is busy at once: it never reaches P1, never
+      // renders, and writes nothing. The carry-on-behind branch no longer exists.
       try {
-        workerA.get(WAIT, TimeUnit.SECONDS);
+        IssuanceUnitOfWork.Outcome a = workerA.get(WAIT, TimeUnit.SECONDS);
+        assertThat(a.code())
+            .isEqualTo(com.housedevinci.einvoice.domain.ErrorCodes.INBOUND_RUN_IN_PROGRESS);
       } catch (java.util.concurrent.ExecutionException e) {
         escaped = e.getCause();
       }
+      assertThat(heldA.reached.getCount()).as("A never rendered").isEqualTo(1);
+      heldB.release.countDown();
+      b = workerB.get(WAIT, TimeUnit.SECONDS);
+      assertThat(b.state()).isEqualTo(InboundState.COMPLETED);
     } finally {
       heldA.release.countDown();
       heldB.release.countDown();
       pool.shutdownNow();
     }
-    assertThat(escaped).as("A's failure write must not escape").isNull();
+    assertThat(escaped).as("A must not throw").isNull();
     assertThat(harness.archive().size()).isEqualTo(1);
     assertThat(harness.inbound().find(eventId).orElseThrow().state())
         .isEqualTo(InboundState.COMPLETED);

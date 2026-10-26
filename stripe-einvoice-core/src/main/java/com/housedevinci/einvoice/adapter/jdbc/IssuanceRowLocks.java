@@ -41,7 +41,10 @@ final class IssuanceRowLocks {
     /** The issuance row lock: class "EINA", the low 32 bits of the row id. */
     static SessionLock row(long issuanceId) {
       return new SessionLock(
-          AdvisoryLocks.ROW_CLASS_ID, rowKey(issuanceId), TOKEN_SETTING, String.valueOf(issuanceId));
+          AdvisoryLocks.ROW_CLASS_ID,
+          rowKey(issuanceId),
+          TOKEN_SETTING,
+          String.valueOf(issuanceId));
     }
   }
 
@@ -117,8 +120,7 @@ final class IssuanceRowLocks {
     return (int) issuanceId;
   }
 
-  private static int bindKey(PreparedStatement ps, int from, SessionLock lock)
-      throws SQLException {
+  private static int bindKey(PreparedStatement ps, int from, SessionLock lock) throws SQLException {
     ps.setLong(from, lock.classId() & 0xFFFFFFFFL);
     ps.setLong(from + 1, lock.objectId() & 0xFFFFFFFFL);
     return from + 2;
@@ -407,6 +409,14 @@ final class IssuanceRowLocks {
             + " the connection is closed instead of pooled ({})",
         issuanceId,
         ErrorCodes.ROW_LOCK_RELEASE_FAILED);
+    terminate(c);
+  }
+
+  /**
+   * Ends this connection's server session and aborts the connection, so no pool hands it out again.
+   * Never throws: it runs in finally blocks.
+   */
+  static void terminate(Connection c) {
     try (Statement st = c.createStatement()) {
       st.execute(EVICT);
     } catch (SQLException expected) {
