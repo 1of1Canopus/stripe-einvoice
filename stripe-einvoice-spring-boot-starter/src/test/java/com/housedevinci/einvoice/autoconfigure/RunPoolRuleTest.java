@@ -41,9 +41,29 @@ class RunPoolRuleTest {
   }
 
   private static void startup(DataSource dataSource, int concurrency) {
-    new EInvoiceIssuanceAutoConfiguration()
-        .einvoiceRunPoolRule(dataSource, new RunPermits(concurrency))
-        .afterSingletonsInstantiated();
+    EInvoiceIssuanceAutoConfiguration.refusePoolBelowRunNeed(
+        dataSource, new RunPermits(concurrency));
+  }
+
+  /**
+   * D-PR49-2: with no unit of work in the context no run can start, so the rule has nothing to
+   * check. The started-context case is {@code CipherProbePr49StarterTest}.
+   */
+  @Test
+  void without_a_unit_of_work_the_rule_checks_nothing() {
+    org.springframework.beans.factory.ObjectProvider<
+            com.housedevinci.einvoice.application.IssuanceUnitOfWork>
+        none =
+            new org.springframework.beans.factory.support.StaticListableBeanFactory()
+                .getBeanProvider(com.housedevinci.einvoice.application.IssuanceUnitOfWork.class);
+    try (HikariDataSource one = pool(1)) {
+      assertThatCode(
+              () ->
+                  new EInvoiceIssuanceAutoConfiguration()
+                      .einvoiceRunPoolRule(one, new RunPermits(3), none)
+                      .afterSingletonsInstantiated())
+          .doesNotThrowAnyException();
+    }
   }
 
   /** T12: concurrency 3 needs 11 connections; Hikari's default pool of 10 is refused. */

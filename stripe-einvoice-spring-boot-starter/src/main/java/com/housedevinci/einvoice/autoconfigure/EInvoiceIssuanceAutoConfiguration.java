@@ -211,19 +211,32 @@ public class EInvoiceIssuanceAutoConfiguration {
    * sweeper thread, so the jobs count one. The host counts one. Refused with {@code DEI-100}; a
    * host lowers {@code einvoice.issuance.concurrency} or raises the pool. A pool that does not
    * unwrap to HikariCP cannot be checked: a WARN at every startup says so.
+   *
+   * <p>No {@code @ConditionalOnBean} (D-PR49-2): that condition is evaluated when this definition
+   * is registered, before the unit of work's own definition below, so the rule never existed in a
+   * started context. The unit of work is looked up after every singleton exists instead, which also
+   * covers one the host builds.
    */
   @Bean
-  @ConditionalOnBean(IssuanceUnitOfWork.class)
   public org.springframework.beans.factory.SmartInitializingSingleton einvoiceRunPoolRule(
-      javax.sql.DataSource dataSource, RunPermits permits) {
+      javax.sql.DataSource dataSource,
+      RunPermits permits,
+      ObjectProvider<IssuanceUnitOfWork> unitOfWork) {
     return () -> {
-      if (!org.springframework.util.ClassUtils.isPresent(
-          "com.zaxxer.hikari.HikariConfigMXBean", null)) {
-        HikariPoolSize.cannotCheck();
-        return;
+      if (unitOfWork.stream().findAny().isPresent()) {
+        refusePoolBelowRunNeed(dataSource, permits);
       }
-      HikariPoolSize.refuseBelowRunNeed(dataSource, permits.permits());
     };
+  }
+
+  /** The rule's arithmetic, for {@code RunPoolRuleTest}. */
+  static void refusePoolBelowRunNeed(javax.sql.DataSource dataSource, RunPermits permits) {
+    if (!org.springframework.util.ClassUtils.isPresent(
+        "com.zaxxer.hikari.HikariConfigMXBean", null)) {
+      HikariPoolSize.cannotCheck();
+      return;
+    }
+    HikariPoolSize.refuseBelowRunNeed(dataSource, permits.permits());
   }
 
   @Bean

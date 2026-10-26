@@ -49,7 +49,6 @@ class CipherProbePr49StarterTest {
 
   @Test
   void probe_concurrency_three_on_a_pool_of_eight_refuses_a_started_context() {
-    runner("einvoice.issuance.concurrency=3")
-        .run(context -> assertThat(context).hasFailed());
+    runner("einvoice.issuance.concurrency=3").run(context -> assertThat(context).hasFailed());
   }
 }
