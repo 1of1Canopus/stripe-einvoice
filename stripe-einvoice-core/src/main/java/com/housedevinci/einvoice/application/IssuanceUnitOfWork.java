@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -99,6 +100,14 @@ public final class IssuanceUnitOfWork {
   private final PreflightSupport preflightSupport;
   private final Clock clock;
   private final Configuration configuration;
+
+  /**
+   * True from a committed {@code DEI-219} conclusion until the next successful Stripe call of this
+   * process (design "sweeper retry edges" section 5, D-SRE-3). One object, shared by the instance
+   * the host builds and every per-run instance, so a refusal in one run and a success in another
+   * meet here.
+   */
+  private final AtomicBoolean accessRefused;
 
   /**
    * Everything the unit of work needs that is not a port.
@@ -214,7 +223,9 @@ public final class IssuanceUnitOfWork {
           throw new EInvoiceException(
               ErrorCodes.SESSION_NOT_PINNED, "this step runs only under an inbound run lock");
         };
-    this.source = Objects.requireNonNull(source, "source");
+    this.accessRefused = new AtomicBoolean();
+    this.source =
+        new AccessWatchingSource(Objects.requireNonNull(source, "source"), this::accepted);
     this.allocator = Objects.requireNonNull(allocator, "allocator");
     this.reader = Objects.requireNonNull(reader, "reader");
     this.writer = Objects.requireNonNull(writer, "writer");
@@ -246,6 +257,7 @@ public final class IssuanceUnitOfWork {
     this.runLock = base.runLock;
     this.permits = base.permits;
     this.runProof = Objects.requireNonNull(held.proof(), "held proof");
+    this.accessRefused = base.accessRefused;
     this.source = base.source;
     this.allocator = base.allocator;
     this.reader = base.reader;
@@ -407,12 +419,16 @@ public final class IssuanceUnitOfWork {
     } catch (EInvoiceException e) {
       // An outage, a rate limit, a 5xx, or a collection that would not read to exhaustion. None of
       // them is a verdict about the sale, so all of them are retryable up to the ceiling (I-08).
-      return failFrom(read, event, InboundState.FAILED_FETCH, e.code(), backoffFor(event));
+      // A refused key (DEI-219) is the exception: it does not improve with time, so it stops
+      // with no retry until a success or a restart re-arms it (design section 5).
+      return concludeBeforeFetch(
+          read, event, InboundState.FAILED_FETCH, e.code(), backoffFor(event));
     }
     if (invoice.livemode() != (configuration.mode() == Mode.LIVE)) {
       // The event said one thing and the object says another. The authoritative answer wins, and
       // in this direction it is the one that keeps a test invoice out of the live series (D-01).
-      return failFrom(read, event, InboundState.REFUSED_MODE, ErrorCodes.MODE_MISMATCH, null);
+      return concludeBeforeFetch(
+          read, event, InboundState.REFUSED_MODE, ErrorCodes.MODE_MISMATCH, null);
     }
     Optional<Outcome> fetchedElsewhere = step(event, read, InboundState.FETCHED);
     if (fetchedElsewhere.isPresent()) {
@@ -876,25 +892,171 @@ public final class IssuanceUnitOfWork {
   private Optional<Outcome> route(InboundEvent event, InboundState read) {
     if (!SUBSCRIBED_TYPES.contains(event.type())) {
       return Optional.of(
-          failFrom(read, event, InboundState.DROPPED, ErrorCodes.UNSUBSCRIBED_EVENT_TYPE, null));
+          concludeBeforeFetch(
+              read, event, InboundState.DROPPED, ErrorCodes.UNSUBSCRIBED_EVENT_TYPE, null));
     }
     if (!configuration.pinnedApiVersion().equals(event.apiVersion())) {
       // Never a lenient fallback deserialiser: the mapping table and the golden files are written
       // against the pinned version, so drift is loud and recorded rather than silently absorbed.
       return Optional.of(
-          failFrom(
+          concludeBeforeFetch(
               read, event, InboundState.REFUSED_VERSION_SKEW, ErrorCodes.API_VERSION_SKEW, null));
     }
     if (event.livemode() != (configuration.mode() == Mode.LIVE)) {
       return Optional.of(
-          failFrom(read, event, InboundState.REFUSED_MODE, ErrorCodes.MODE_MISMATCH, null));
+          concludeBeforeFetch(
+              read, event, InboundState.REFUSED_MODE, ErrorCodes.MODE_MISMATCH, null));
     }
     if (!configuration.stripeAccountId().equals(event.stripeAccountId())) {
       return Optional.of(
-          failFrom(read, event, InboundState.REFUSED_ACCOUNT, ErrorCodes.UNKNOWN_ACCOUNT, null));
+          concludeBeforeFetch(
+              read, event, InboundState.REFUSED_ACCOUNT, ErrorCodes.UNKNOWN_ACCOUNT, null));
     }
     inbound.bindSeller(event.eventId(), configuration.sellerId(), clock.instant());
     return Optional.empty();
+  }
+
+  /**
+   * Every conclusion a run reaches before {@code FETCHED} goes through here (D-PR45-B1, design
+   * "sweeper retry edges" section 4): the route's four refusals, the fetch failure and the fetched
+   * object's mode.
+   *
+   * <p>A row that may hold a number never writes a pre-{@code FETCHED} state: that state would say
+   * "this event never got going" while a legal number waits behind it. Such a row is written {@code
+   * FAILED_ISSUANCE} with the conclusion's own code, an edge every number-capable start already
+   * has, so no new edge leaves a numbered state. Its retry: a backoff, bounded by the {@code DUE}
+   * ceiling, except for an unsubscribed type ({@code DEI-205}, an operator decides) and a refused
+   * key ({@code DEI-219}, re-armed by the next success or startup). A row that cannot hold a number
+   * writes {@code target}; a refused key there also stops with no retry.
+   *
+   * @param retryIn the retry of the unmapped conclusion
+   */
+  private Outcome concludeBeforeFetch(
+      InboundState read, InboundEvent event, InboundState target, String code, Duration retryIn) {
+    boolean keyRefused = ErrorCodes.STRIPE_ACCESS_REFUSED.equals(code);
+    Outcome outcome;
+    if (mayHoldNumber(read, event)) {
+      Duration mapped = target == InboundState.DROPPED || keyRefused ? null : backoffFor(event);
+      outcome = failFrom(read, event, InboundState.FAILED_ISSUANCE, code, mapped);
+    } else {
+      outcome = failFrom(read, event, target, code, keyRefused ? null : retryIn);
+    }
+    if (keyRefused && code.equals(outcome.code())) {
+      // D-SRE-9: only after the write committed. A success that wins the flag from here on runs
+      // its re-arm after this row is visible, so the row cannot miss it.
+      accessRefused.set(true);
+    }
+    return outcome;
+  }
+
+  /**
+   * Whether the row a run started from may hold a number (design section 3). An exhaustive switch
+   * with no {@code default}: a new state fails to compile until it is given an answer here.
+   *
+   * <p>{@code FETCHED} is either: a retry of a numbered row that crashed after its {@code FETCHED}
+   * write, or a first run that crashed before {@code MAPPED}. The issuance table tells them apart
+   * (D-SRE-4), asked by invoice id only, across every seller and mode (D-SRE-6), so a wrong mode
+   * can only make a row look numbered. The read is safe without the claim's lock: a claimer must
+   * first move this row to {@code MAPPED}, which breaks this run's compare on {@code FETCHED}. It
+   * is never used for {@code MAPPED}, where a claimer can be inside the claim while the row still
+   * reads {@code MAPPED}.
+   */
+  private boolean mayHoldNumber(InboundState read, InboundEvent event) {
+    return switch (read) {
+      case MAPPED, FAILED_ISSUANCE -> true;
+      case FETCHED -> !reader.issuanceStates(event.objectId()).isEmpty();
+      case RECEIVED,
+          PARKED,
+          FAILED_FETCH,
+          REFUSED_VERSION_SKEW,
+          REFUSED_MODE,
+          REFUSED_ACCOUNT,
+          COMPLETED,
+          DROPPED,
+          FAILED_MAPPING,
+          FAILED_TOTALS ->
+          false;
+    };
+  }
+
+  /**
+   * A Stripe call succeeded. The first success after a committed refusal re-arms the stopped rows;
+   * every other success costs one compare (D-SRE-3).
+   */
+  private void accepted() {
+    if (accessRefused.compareAndSet(true, false)) {
+      rearm("a Stripe call succeeded after a refused key");
+    }
+  }
+
+  /**
+   * Makes every row this instance stopped on a refused key due now: once at startup, from the
+   * sweeper's thread, and once per change from "refused" to "accepted" (D-SRE-3). Only rows of this
+   * instance's mode and Stripe account, and only rows with no next attempt, so a stamped live run
+   * is never touched. The rows stay inside the {@code DUE} ceiling measured from arrival; a row
+   * past it is resumed by {@link IssuanceReprocess}.
+   *
+   * @return how many rows were made due
+   */
+  public int rearmAccessRefused() {
+    return rearm("startup");
+  }
+
+  private int rearm(String why) {
+    try {
+      int rows =
+          inbound.rearmAccessRefused(
+              configuration.mode() == Mode.LIVE, configuration.stripeAccountId(), clock.instant());
+      if (rows > 0) {
+        log.info(
+            "einvoice: {} event(s) stopped on a refused Stripe key ({}) are due again: {}",
+            rows,
+            ErrorCodes.STRIPE_ACCESS_REFUSED,
+            why);
+      }
+      return rows;
+    } catch (EInvoiceException e) {
+      // The next success tries again: the flag goes back up rather than losing the re-arm.
+      accessRefused.set(true);
+      log.warn(
+          "einvoice: the re-arm of events stopped on a refused Stripe key failed ({}); the next"
+              + " successful Stripe call tries again",
+          e.code());
+      return 0;
+    }
+  }
+
+  /**
+   * The Stripe source every run of this unit of work reads through. A success reports to {@link
+   * #accepted()}; a failure passes through unchanged. Hand it to the reconciliation sweep, so its
+   * list call counts as a success too.
+   */
+  public StripeInvoiceSource stripeSource() {
+    return source;
+  }
+
+  /** Reports each successful call; adds nothing else. */
+  private record AccessWatchingSource(StripeInvoiceSource delegate, Runnable onSuccess)
+      implements StripeInvoiceSource {
+
+    @Override
+    public SourceInvoice fetchInvoice(String invoiceId) {
+      SourceInvoice invoice = delegate.fetchInvoice(invoiceId);
+      onSuccess.run();
+      return invoice;
+    }
+
+    @Override
+    public List<String> finalisedInvoiceIds(Instant from, Instant to) {
+      List<String> ids = delegate.finalisedInvoiceIds(from, to);
+      onSuccess.run();
+      return ids;
+    }
+
+    @Override
+    public String pinnedApiVersion() {
+      return delegate.pinnedApiVersion();
+    }
   }
 
   /**

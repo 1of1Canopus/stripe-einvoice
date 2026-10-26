@@ -13,7 +13,6 @@ import com.housedevinci.einvoice.domain.Mode;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.time.Duration;
-import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -271,7 +270,7 @@ class SweeperRetryEdgesProbeTest {
             (proxy, method, args) -> {
               if (method.getName().startsWith("transition")
                   && args != null
-                  && List.of(args).contains(RetryEdgeFixture.ACCESS_REFUSED)) {
+                  && java.util.Arrays.asList(args).contains(RetryEdgeFixture.ACCESS_REFUSED)) {
                 hook.run();
               }
               try {

@@ -95,7 +95,8 @@ public final class ReconciliationSweep {
       int stuckIssuances,
       int unfinishedReprocesses,
       int voidedNoDocument,
-      int burnedNoDocument) {
+      int burnedNoDocument,
+      int accessRefused) {
 
     public int total() {
       return missingIssuance
@@ -105,7 +106,8 @@ public final class ReconciliationSweep {
           + stuckIssuances
           + unfinishedReprocesses
           + voidedNoDocument
-          + burnedNoDocument;
+          + burnedNoDocument
+          + accessRefused;
     }
   }
 
@@ -134,6 +136,18 @@ public final class ReconciliationSweep {
     Instant now = clock.instant();
     Instant to = now.minus(settings.grace());
     Instant from = to.minus(settings.window());
+    // D-SRE-5a: an event stopped on a refused Stripe key (DEI-219, no next attempt) is named once
+    // per event id; record() dedupes, so a row stopped for a week is one finding, not one per pass.
+    // First, before any Stripe call: with the key still refused, the list call below throws, and
+    // these findings are the ones that must still be written.
+    int keyRefused = 0;
+    for (String eventId :
+        inbound.accessRefused(
+            configuration.sellerId(), configuration.mode(), settings.pageSize())) {
+      keyRefused++;
+      record(ErrorCodes.STRIPE_ACCESS_REFUSED, eventId, now);
+    }
+
     int checked = 0;
     int missing = 0;
     int voided = 0;
@@ -231,11 +245,12 @@ public final class ReconciliationSweep {
             stuck,
             unfinished,
             voided,
-            burned);
+            burned,
+            keyRefused);
     log.info(
         "einvoice: reconciliation checked {} finalised invoices and raised {} findings"
             + " (missing {}, archive missing {}, drift {}, orphan {}, stuck {},"
-            + " unfinished reprocess {}, voided {}, burned {})",
+            + " unfinished reprocess {}, voided {}, burned {}, key refused {})",
         checked,
         result.total(),
         missing,
@@ -245,7 +260,8 @@ public final class ReconciliationSweep {
         stuck,
         unfinished,
         voided,
-        burned);
+        burned,
+        keyRefused);
     return result;
   }
 

@@ -78,6 +78,7 @@ class StripeAccessRefusedTest {
     harness.sweep(settings).sweep();
     harness.sweep(settings).sweep();
 
+    // Exactly three after two passes: one finding per event id, deduped by record().
     List<ComplianceFinding> named =
         harness.openFindings().stream()
             .filter(f -> RetryEdgeFixture.ACCESS_REFUSED.equals(f.code()))
@@ -85,9 +86,6 @@ class StripeAccessRefusedTest {
     assertThat(named)
         .extracting(ComplianceFinding::subjectId)
         .containsExactlyInAnyOrderElementsOf(ids);
-    for (String id : ids) {
-      assertThat(harness.findingRows(id)).as("one finding per event, deduped").isEqualTo(1);
-    }
   }
 
   @Test
@@ -135,5 +133,127 @@ class StripeAccessRefusedTest {
     }
 
     assertThat(rearms.get()).isEqualTo(1);
+  }
+
+  @Test
+  void a_restart_with_a_fixed_key_re_arms_without_a_new_event() {
+    IssuanceTestHarness harness =
+        IssuanceTestHarness.createOn(PostgresSupport.freshDatabase("sre_restart"));
+    List<String> ids = threeRefused(harness, "in_sre_restart_");
+    harness.source().heal();
+
+    // A new process: a fresh unit of work, whose flag knows nothing of the old refusals.
+    int rearmed = harness.unitOfWork().rearmAccessRefused();
+
+    assertThat(rearmed).isEqualTo(3);
+    assertThat(harness.due()).extracting(InboundEvent::eventId).containsAll(ids);
+    for (String id : ids) {
+      assertThat(harness.unitOfWork().process(id).state()).isEqualTo(InboundState.COMPLETED);
+    }
+  }
+
+  @Test
+  void a_re_arm_from_a_test_mode_instance_leaves_live_rows_stopped() {
+    IssuanceTestHarness harness =
+        IssuanceTestHarness.createOn(PostgresSupport.freshDatabase("sre_test_mode"));
+    List<String> ids = threeRefused(harness, "in_sre_test_mode_");
+
+    int rearmed =
+        harness.unitOfWorkInMode(com.housedevinci.einvoice.domain.Mode.TEST).rearmAccessRefused();
+
+    assertThat(rearmed).isZero();
+    assertThat(harness.due()).extracting(InboundEvent::eventId).doesNotContainAnyElementsOf(ids);
+  }
+
+  @Test
+  void a_re_arm_leaves_a_stamped_row_alone() {
+    IssuanceTestHarness harness =
+        IssuanceTestHarness.createOn(PostgresSupport.freshDatabase("sre_stamped"));
+    String eventId = threeRefused(harness, "in_sre_stamped_").get(0);
+    InboundEvent stopped = RetryEdgeFixture.row(harness, eventId);
+    // A live run's stamp: the row keeps its state and gets a next attempt one hour away.
+    harness.inbound().stampAttempt(eventId, stopped.state(), harness.now(), Duration.ofHours(1));
+    InboundEvent stamped = RetryEdgeFixture.row(harness, eventId);
+
+    harness.unitOfWork().rearmAccessRefused();
+
+    assertThat(RetryEdgeFixture.row(harness, eventId).nextAttempt())
+        .isEqualTo(stamped.nextAttempt());
+  }
+
+  @Test
+  void a_stopped_row_is_never_due_until_it_is_re_armed() {
+    IssuanceTestHarness harness =
+        IssuanceTestHarness.createOn(PostgresSupport.freshDatabase("sre_due"));
+    String eventId = threeRefused(harness, "in_sre_due_").get(0);
+    harness.moveClockForward(Duration.ofHours(48));
+    assertThat(harness.due()).extracting(InboundEvent::eventId).doesNotContain(eventId);
+
+    harness.unitOfWork().rearmAccessRefused();
+
+    assertThat(harness.due()).extracting(InboundEvent::eventId).contains(eventId);
+  }
+
+  @Test
+  void a_mapped_failed_issuance_row_is_due_after_its_backoff_and_not_before() {
+    IssuanceTestHarness harness =
+        IssuanceTestHarness.createOn(PostgresSupport.freshDatabase("sre_backoff"));
+    String eventId = RetryEdgeFixture.numberWithArchiveDown(harness, "in_sre_backoff");
+    harness.inbound().transition(eventId, InboundState.MAPPED, "", harness.now(), null);
+    harness
+        .source()
+        .breakWith(
+            new EInvoiceException(
+                com.housedevinci.einvoice.domain.ErrorCodes.STRIPE_UNAVAILABLE, "down"));
+    harness.unitOfWork().process(eventId);
+    InboundEvent row = RetryEdgeFixture.row(harness, eventId);
+    assertThat(row.state()).isEqualTo(InboundState.FAILED_ISSUANCE);
+
+    assertThat(harness.due()).extracting(InboundEvent::eventId).doesNotContain(eventId);
+    harness.moveClockForward(Duration.ofHours(2));
+    assertThat(harness.due()).extracting(InboundEvent::eventId).contains(eventId);
+  }
+
+  @Test
+  void a_failed_re_arm_is_tried_again_by_the_next_success() {
+    IssuanceTestHarness harness =
+        IssuanceTestHarness.createOn(PostgresSupport.freshDatabase("sre_rearm_fail"));
+    AtomicInteger rearms = new AtomicInteger();
+    java.util.concurrent.atomic.AtomicBoolean failNext =
+        new java.util.concurrent.atomic.AtomicBoolean(true);
+    InboundEventStore failingOnce =
+        (InboundEventStore)
+            java.lang.reflect.Proxy.newProxyInstance(
+                InboundEventStore.class.getClassLoader(),
+                new Class<?>[] {InboundEventStore.class},
+                (proxy, method, args) -> {
+                  if (method.getName().equals("rearmAccessRefused")) {
+                    rearms.incrementAndGet();
+                    if (failNext.getAndSet(false)) {
+                      throw new EInvoiceException(
+                          com.housedevinci.einvoice.domain.ErrorCodes.STORE_UNAVAILABLE, "down");
+                    }
+                  }
+                  try {
+                    return method.invoke(harness.inbound(), args);
+                  } catch (java.lang.reflect.InvocationTargetException e) {
+                    throw e.getCause();
+                  }
+                });
+    IssuanceUnitOfWork unitOfWork =
+        harness.unitOfWorkWithRun(
+            failingOnce, harness.runLock(), harness.permits(), harness.renderer());
+    harness.source().with(TestInvoices.finalised("in_sre_rf_refused"));
+    harness.source().breakFor("in_sre_rf_refused", refused());
+    String stopped = harness.receive("invoice.finalized", "in_sre_rf_refused");
+    unitOfWork.process(stopped);
+    harness.source().with(TestInvoices.draft("in_sre_rf_ok"));
+    String parked = harness.receive("invoice.finalized", "in_sre_rf_ok");
+
+    unitOfWork.process(parked);
+    unitOfWork.process(parked);
+
+    assertThat(rearms.get()).isEqualTo(2);
+    assertThat(harness.due()).extracting(InboundEvent::eventId).contains(stopped);
   }
 }

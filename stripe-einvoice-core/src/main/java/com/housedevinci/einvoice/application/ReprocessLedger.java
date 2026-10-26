@@ -1,5 +1,6 @@
 package com.housedevinci.einvoice.application;
 
+import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
 import com.housedevinci.einvoice.domain.Mode;
 import java.time.Instant;
@@ -41,6 +42,22 @@ public interface ReprocessLedger {
    */
   OptionalLong reopenAndRecord(
       ReprocessRequest request, String sellerId, Mode mode, String code, Instant now);
+
+  /**
+   * Re-opens one numbered row in place and records who asked, in one transaction (D-SRE-2,
+   * D-SRE-8). The row goes to, or stays, {@code FAILED_ISSUANCE} with its code kept; never to
+   * {@code RECEIVED}. The {@code UPDATE} is conditional on the row as {@code asRead} saw it (state,
+   * code, attempts, last update) and on a number existing for its invoice, so two simultaneous
+   * operator calls produce exactly one winner, and the loser records nothing.
+   *
+   * <p>No default implementation: one built from {@link #reopenAndRecord} would re-open a numbered
+   * row to {@code RECEIVED}.
+   *
+   * @return the sequence of the {@code REQUESTED} row, or empty when the row moved since it was
+   *     read
+   */
+  OptionalLong reopenInPlaceAndRecord(
+      ReprocessRequest request, String sellerId, Mode mode, InboundEvent asRead, Instant now);
 
   /**
    * Appends the {@code CONCLUDED} row for one request.

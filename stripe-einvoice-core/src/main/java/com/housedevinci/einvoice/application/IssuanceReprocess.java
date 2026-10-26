@@ -5,11 +5,13 @@ import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
 import com.housedevinci.einvoice.domain.Issuance;
+import com.housedevinci.einvoice.domain.IssuanceState;
 import com.housedevinci.einvoice.domain.LegalNumber;
 import java.time.Clock;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,11 +50,27 @@ public final class IssuanceReprocess {
    */
   public static final String ELIGIBLE_ISSUANCE_CODE = ErrorCodes.ISSUE_CLOCK_BEHIND_SERIES;
 
-  /** True for the two terminals a reprocess may start from. */
+  /**
+   * True for the two terminals a reprocess may start from when the invoice holds no number. These
+   * rows are re-opened to {@code RECEIVED}.
+   */
   public static boolean eligible(InboundEvent event) {
     return event.state() == ELIGIBLE
         || (event.state() == InboundState.FAILED_ISSUANCE
             && ELIGIBLE_ISSUANCE_CODE.equals(event.lastCode()));
+  }
+
+  /**
+   * True for the terminals a reprocess may start from when the invoice holds a number (D-SRE-2):
+   * {@code FAILED_ISSUANCE} with any code, and {@code FAILED_MAPPING}. These rows are re-opened in
+   * place, never to {@code RECEIVED}, and the run resumes the same number. Example: the archive was
+   * down for four days, the row holding {@code INV-2026-000012} passed the retry ceiling; once the
+   * archive is back, the reprocess resumes {@code INV-2026-000012} and writes {@code COMPLETED}. A
+   * row still due is accepted too: its run is the sweeper's next run, taken now, under the same run
+   * lock, with a name on it.
+   */
+  public static boolean eligibleNumbered(InboundEvent event) {
+    return event.state() == InboundState.FAILED_ISSUANCE || event.state() == ELIGIBLE;
   }
 
   private final IssuanceUnitOfWork unitOfWork;
@@ -93,9 +111,11 @@ public final class IssuanceReprocess {
     REFUSED_NOT_ELIGIBLE,
 
     /**
-     * A legal number is already allocated for this event's invoice. A mapping refusal never
-     * allocates one, so this means the number came from somewhere else, and re-running the pipeline
-     * over a numbered invoice is exactly what this method must never do.
+     * A legal number exists for this event's invoice and there is nothing to resume: it is issued,
+     * burned or voided. Or a number appeared between the read and the re-open to {@code RECEIVED},
+     * and the re-open's own statement refused it (D-SRE-6). Nothing was re-opened or recorded.
+     * Since the sweeper retry edges, a row whose invoice holds an <em>open</em> number is re-opened
+     * in place and resumes that number instead of being refused here.
      */
     REFUSED_NUMBERED,
 
@@ -135,20 +155,18 @@ public final class IssuanceReprocess {
     IssuanceUnitOfWork.Configuration configuration = unitOfWork.configuration();
     Optional<Issuance> existing =
         reader.findBySource(configuration.sellerId(), configuration.mode(), event.objectId());
+    // D-SRE-6: "does this row hold a number?" is asked by invoice id only, across every seller and
+    // mode. An instance of the other mode then sees a live number and re-opens the row in place;
+    // asked with its own mode it would see none and re-open the row to RECEIVED.
+    // In place only while the number is open: a voided or burned number has nothing to resume, and
+    // an issued one nothing to finish. Those rows are refused, as before.
+    Set<IssuanceState> states = reader.issuanceStates(event.objectId());
+    boolean numbered = !states.isEmpty();
+    boolean inPlace = eligibleNumbered(event) && states.stream().anyMatch(s -> classifyOpen(s));
 
-    if (!eligible(event)) {
-      // Includes the second call after a success: the row is COMPLETED, so this is a stated no-op
-      // carrying the number the first call produced, never a second run.
-      return refused(
-          Disposition.REFUSED_NOT_ELIGIBLE,
-          event.eventId(),
-          event.state(),
-          event.lastCode(),
-          existing);
-    }
-    if (existing.isPresent()) {
-      // Defence in depth. A FAILED_MAPPING row has no number by construction - the preflight
-      // refuses before the allocator - and "by construction" is not a control.
+    if (!inPlace && numbered && eligible(event)) {
+      // The number is issued, burned or voided: nothing to resume, and a re-open to RECEIVED
+      // would run the pipeline over a numbered invoice. Refused before anything is written.
       log.warn(
           "einvoice: reprocess of event {} refused: a legal number already exists for its invoice",
           eventId);
@@ -159,9 +177,21 @@ public final class IssuanceReprocess {
           ErrorCodes.ISSUANCE_ALREADY_CLAIMED,
           existing);
     }
+    if (!inPlace && !(eligible(event) && !numbered)) {
+      // Includes the second call after a success: the row is COMPLETED, so this is a stated no-op
+      // carrying the number the first call produced, never a second run.
+      return refused(
+          Disposition.REFUSED_NOT_ELIGIBLE,
+          event.eventId(),
+          event.state(),
+          event.lastCode(),
+          existing);
+    }
     Optional<Result> ran;
     try {
-      ran = unitOfWork.runLocked(event, run -> reopenAndRun(run, request, event, configuration));
+      ran =
+          unitOfWork.runLocked(
+              event, run -> reopenAndRun(run, request, event, configuration, inPlace));
     } catch (EInvoiceException e) {
       if (!ErrorCodes.SESSION_NOT_PINNED.equals(e.code())) {
         throw e;
@@ -190,18 +220,37 @@ public final class IssuanceReprocess {
       IssuanceUnitOfWork run,
       ReprocessRequest request,
       InboundEvent event,
-      IssuanceUnitOfWork.Configuration configuration) {
+      IssuanceUnitOfWork.Configuration configuration,
+      boolean inPlace) {
     String eventId = request.eventId();
     // A check, then the re-open on another connection: the re-open is still a conditional update
     // on the state, so a lock lost in between can only cost a run, never a second winner.
     run.assertRunHeld();
     OptionalLong requestSeq =
-        ledger.reopenAndRecord(
-            request,
-            configuration.sellerId(),
-            configuration.mode(),
-            ErrorCodes.REPROCESS_REQUESTED,
-            clock.instant());
+        inPlace
+            // D-SRE-2, D-SRE-8: a numbered row stays FAILED_ISSUANCE (or goes there from
+            // FAILED_MAPPING) with its code kept, conditional on the row as read.
+            ? ledger.reopenInPlaceAndRecord(
+                request, configuration.sellerId(), configuration.mode(), event, clock.instant())
+            : ledger.reopenAndRecord(
+                request,
+                configuration.sellerId(),
+                configuration.mode(),
+                ErrorCodes.REPROCESS_REQUESTED,
+                clock.instant());
+    if (requestSeq.isEmpty() && !inPlace && !reader.issuanceStates(event.objectId()).isEmpty()) {
+      // The re-open to RECEIVED refuses a numbered row in its own statement (D-SRE-6): a number
+      // appeared after the read. Nothing was re-opened or recorded.
+      log.warn(
+          "einvoice: reprocess of event {} refused: a legal number exists for its invoice",
+          eventId);
+      return refused(
+          Disposition.REFUSED_NUMBERED,
+          eventId,
+          event.state(),
+          ErrorCodes.ISSUANCE_ALREADY_CLAIMED,
+          reader.findBySource(configuration.sellerId(), configuration.mode(), event.objectId()));
+    }
     if (requestSeq.isEmpty()) {
       // Another call moved the row between the read and the update. One winner, by the database's
       // own row lock, and the loser runs nothing and records nothing.
@@ -286,6 +335,14 @@ public final class IssuanceReprocess {
           event.eventId(),
           ledgerFailure);
     }
+  }
+
+  /** An open number: allocated, not yet issued, and not disposed. */
+  private static boolean classifyOpen(IssuanceState state) {
+    return switch (state) {
+      case NUMBERED, ARCHIVING, FAILED_ARCHIVE -> true;
+      case ISSUED, FAILED_VALIDATION, VOID_UNUSED -> false;
+    };
   }
 
   private static Result refused(

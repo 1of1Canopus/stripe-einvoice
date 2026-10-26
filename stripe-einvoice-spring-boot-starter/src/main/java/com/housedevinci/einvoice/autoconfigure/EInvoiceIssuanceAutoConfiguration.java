@@ -430,7 +430,7 @@ public class EInvoiceIssuanceAutoConfiguration {
   @ConditionalOnMissingBean
   @ConditionalOnBean(IssuanceUnitOfWork.class)
   public ReconciliationSweep einvoiceReconciliationSweep(
-      StripeInvoiceSource source,
+      IssuanceUnitOfWork unitOfWork,
       JdbcIssuanceStore store,
       InboundEventStore inbound,
       ArchiveStore archive,
@@ -438,8 +438,10 @@ public class EInvoiceIssuanceAutoConfiguration {
       ReprocessLedger reprocessLedger,
       Clock clock,
       EInvoiceProperties properties) {
+    // The unit of work's own source: a successful list call counts as an accepted key and re-arms
+    // the events a refused key stopped (D-SRE-3).
     return new ReconciliationSweep(
-        source,
+        unitOfWork.stripeSource(),
         store,
         inbound,
         archive,
@@ -452,7 +454,7 @@ public class EInvoiceIssuanceAutoConfiguration {
             properties.getIssuance().getAlertAfter(),
             properties.getReconcile().getDriftSample(),
             properties.getReconcile().getPageSize()),
-        configuration(properties, source));
+        unitOfWork.configuration());
   }
 
   @Bean

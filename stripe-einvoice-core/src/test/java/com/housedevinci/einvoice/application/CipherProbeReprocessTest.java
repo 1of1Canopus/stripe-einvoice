@@ -26,7 +26,14 @@ import org.junit.jupiter.api.Test;
  */
 class CipherProbeReprocessTest {
 
-  private static final String INVOICE_ID = "in_test_1";
+  /**
+   * One invoice per test: "does this invoice hold a number?" is asked under any seller since the
+   * sweeper retry edges (D-SRE-6), and Stripe invoice ids are unique, so a fixed id shared with the
+   * rest of the suite in one database would read another test's number.
+   */
+  private final String invoiceId =
+      "in_reprocess_" + java.util.UUID.randomUUID().toString().replace("-", "");
+
   private static final String ACTOR = "ops-jane";
   private static final String REASON = "seller VAT identifier corrected in the profile";
 
@@ -61,9 +68,9 @@ class CipherProbeReprocessTest {
     }
   }
 
-  private static String refusedEvent(IssuanceTestHarness harness, RepairableRenderer renderer) {
-    harness.source().with(TestInvoices.finalised(INVOICE_ID));
-    String eventId = harness.receive("invoice.finalized", INVOICE_ID);
+  private String refusedEvent(IssuanceTestHarness harness, RepairableRenderer renderer) {
+    harness.source().with(TestInvoices.finalised(invoiceId));
+    String eventId = harness.receive("invoice.finalized", invoiceId);
     IssuanceUnitOfWork.Outcome first = harness.unitOfWorkWithRenderer(renderer).process(eventId);
     assertThat(first.state()).isEqualTo(InboundState.FAILED_MAPPING);
     assertThat(harness.numberedRows()).isZero();
@@ -143,7 +150,7 @@ class CipherProbeReprocessTest {
     assertThat(harness.due()).extracting("eventId").doesNotContain(eventId);
     // The shared database carries other tests' events too; only this invoice's are this probe's.
     for (var due : harness.due()) {
-      if (INVOICE_ID.equals(due.objectId())) {
+      if (invoiceId.equals(due.objectId())) {
         harness.unitOfWorkWithRenderer(renderer).process(due.eventId());
       }
     }
@@ -159,8 +166,8 @@ class CipherProbeReprocessTest {
   @Test
   void probe_a_passed_event_is_refused() {
     IssuanceTestHarness harness = IssuanceTestHarness.create();
-    harness.source().with(TestInvoices.finalised(INVOICE_ID));
-    String eventId = harness.receive("invoice.finalized", INVOICE_ID);
+    harness.source().with(TestInvoices.finalised(invoiceId));
+    String eventId = harness.receive("invoice.finalized", invoiceId);
     IssuanceUnitOfWork.Outcome issued = harness.unitOfWork().process(eventId);
     assertThat(issued.state()).isEqualTo(InboundState.COMPLETED);
     long chainedBefore = harness.chainedEvents();
@@ -227,7 +234,7 @@ class CipherProbeReprocessTest {
     renderer.repair();
     // A number allocated for this same invoice by another route, which is what makes this a guard
     // rather than a restatement of the pipeline's own order.
-    var invoice = harness.source().fetchInvoice(INVOICE_ID);
+    var invoice = harness.source().fetchInvoice(invoiceId);
     harness
         .store()
         .allocate(
@@ -240,14 +247,19 @@ class CipherProbeReprocessTest {
                 "fr-2026.1"));
     long numberedBefore = harness.numberedRows();
 
+    String allocated = harness.issuance(invoiceId).orElseThrow().legalNumber().value();
+
     IssuanceReprocess.Result result = harness.reprocessWith(renderer).reprocess(request(eventId));
 
-    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REFUSED_NUMBERED);
-    assertThat(result.legalNumber()).isNotNull();
+    // Sweeper retry edges, D-SRE-2 (approved by the security review, round 2): a numbered
+    // FAILED_MAPPING row is re-opened in place and resumes the number its invoice already holds.
+    // The guard this probe proved still holds in its stronger form: no second number is taken,
+    // and the row is never re-opened to RECEIVED. A voided or burned number is still refused
+    // (VoidTerminalDispositionTest).
+    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REPROCESSED);
+    assertThat(result.legalNumber()).isEqualTo(allocated);
     assertThat(harness.numberedRows()).isEqualTo(numberedBefore);
-    assertThat(harness.archive().size()).isZero();
-    assertThat(harness.inbound().find(eventId).orElseThrow().state())
-        .isEqualTo(InboundState.FAILED_MAPPING);
+    assertThat(result.state()).isEqualTo(InboundState.COMPLETED);
   }
 
   // -------------------------------------------------------------------------------------------

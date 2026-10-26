@@ -145,4 +145,92 @@ class NumberedRowResumeTest {
               assertThat(f.subjectId()).isEqualTo("in_sre_totals");
             });
   }
+
+  /** D-SRE-8, at the statement: a re-open decided on a stale read records nothing. */
+  @Test
+  void an_in_place_re_open_on_a_stale_read_records_nothing() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    String eventId = stoppedWith(harness, "in_sre_stale", RetryEdgeFixture.ACCESS_REFUSED);
+    InboundEvent asRead = RetryEdgeFixture.row(harness, eventId);
+    // Another run moved the row after this call read it: the stamp adds an attempt.
+    harness.inbound().stampAttempt(eventId, asRead.state(), harness.now(), Duration.ofMinutes(1));
+
+    var seq =
+        harness
+            .reprocessLedger()
+            .reopenInPlaceAndRecord(
+                request(eventId),
+                harness.sellerId(),
+                com.housedevinci.einvoice.domain.Mode.LIVE,
+                asRead,
+                harness.now());
+
+    assertThat(seq).isEmpty();
+    assertThat(harness.reprocessRecords(eventId)).isEmpty();
+  }
+
+  /** D-SRE-6, at the statement: the re-open to RECEIVED refuses a numbered row by itself. */
+  @Test
+  void the_re_open_to_received_refuses_a_row_whose_invoice_holds_a_number() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    String eventId = RetryEdgeFixture.numberWithArchiveDown(harness, "in_sre_received_guard");
+    harness.inbound().transition(eventId, InboundState.FETCHED, "", harness.now(), null);
+    harness
+        .inbound()
+        .transition(
+            eventId,
+            InboundState.FAILED_MAPPING,
+            ErrorCodes.CLOSED_FISCAL_YEAR,
+            harness.now(),
+            null);
+
+    var seq =
+        harness
+            .reprocessLedger()
+            .reopenAndRecord(
+                request(eventId),
+                harness.sellerId(),
+                com.housedevinci.einvoice.domain.Mode.LIVE,
+                ErrorCodes.REPROCESS_REQUESTED,
+                harness.now());
+
+    assertThat(seq).isEmpty();
+    assertThat(RetryEdgeFixture.row(harness, eventId).state())
+        .isEqualTo(InboundState.FAILED_MAPPING);
+  }
+
+  /** The unnumbered path is unchanged: a FAILED_MAPPING row with no number goes to RECEIVED. */
+  @Test
+  void an_unnumbered_failed_mapping_row_is_still_re_opened_to_received() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    harness.source().with(TestInvoices.finalised("in_sre_unnumbered"));
+    String eventId = harness.receive("invoice.finalized", "in_sre_unnumbered");
+    harness.inbound().transition(eventId, InboundState.FETCHED, "", harness.now(), null);
+    harness
+        .inbound()
+        .transition(
+            eventId,
+            InboundState.FAILED_MAPPING,
+            ErrorCodes.MAPPING_INCOMPLETE,
+            harness.now(),
+            null);
+
+    IssuanceReprocess.Result result = harness.reprocess().reprocess(request(eventId));
+
+    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REPROCESSED);
+    assertThat(result.state()).isEqualTo(InboundState.COMPLETED);
+  }
+
+  /** A numbered row in a state the in-place re-open does not take is refused, not re-opened. */
+  @Test
+  void a_numbered_running_row_is_not_eligible() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    String eventId = RetryEdgeFixture.numberWithArchiveDown(harness, "in_sre_running");
+    harness.inbound().transition(eventId, InboundState.FETCHED, "", harness.now(), null);
+
+    IssuanceReprocess.Result result = harness.reprocess().reprocess(request(eventId));
+
+    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REFUSED_NOT_ELIGIBLE);
+    assertThat(RetryEdgeFixture.row(harness, eventId).state()).isEqualTo(InboundState.FETCHED);
+  }
 }

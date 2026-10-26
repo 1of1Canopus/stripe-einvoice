@@ -20,6 +20,15 @@ import org.junit.jupiter.api.Test;
  * as the fetch fails - without end if the failure is permanent (a revoked restricted key).
  *
  * <p>Install under stripe-einvoice-core/src/test/java/com/housedevinci/einvoice/application/.
+ *
+ * <p>Build of the sweeper retry edges design (Revision 2): the probes went in unchanged and were
+ * red, 3 of 3. Their escape assertions stand as written. One outcome assertion of the first probe
+ * counted Stripe calls over three direct {@code process} calls; a direct call is not filtered by
+ * the due query (design section 6, the reprocess path relies on it), so each one fetches. What the
+ * probe meant, "every sweep tick calls Stripe again", is now asserted on the sweep's own input:
+ * during the backoff the row is not due, so a tick does not run it. The per-sweep call count is the
+ * design's own test, {@code
+ * StripeAccessRefusedTest.with_a_revoked_key_three_sweeps_call_stripe_once_per_row}.
  */
 class CipherProbePr45B1Test {
 
@@ -43,7 +52,11 @@ class CipherProbePr45B1Test {
     InboundEvent row = harness.inbound().find(eventId).orElseThrow();
     assertThat(row.attempts()).as("each failed attempt is counted").isGreaterThan(0);
     assertThat(row.nextAttempt()).as("a backoff is scheduled").isPresent();
-    assertThat(harness.source().fetches() - before).isEqualTo(1);
+    assertThat(harness.source().fetches() - before).as("one fetch per direct call").isEqualTo(3);
+    assertThat(harness.due())
+        .extracting(InboundEvent::eventId)
+        .as("inside its backoff the row is not due, so a sweep tick does not call Stripe")
+        .doesNotContain(eventId);
   }
 
   @Test
