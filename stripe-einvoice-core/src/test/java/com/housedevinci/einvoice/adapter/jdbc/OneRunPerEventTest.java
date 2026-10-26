@@ -292,6 +292,61 @@ class OneRunPerEventTest {
   }
 
   /**
+   * T7, the stamp on its own: a holder that dies inside its first Stripe fetch has written no step
+   * yet, so the stamp is the only thing that keeps the row from being due at once.
+   */
+  @Test
+  void a_holder_that_dies_in_its_first_fetch_is_not_due_before_its_stamp() throws Exception {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    harness.source().with(TestInvoices.finalised("in_orpe_t7b"));
+    String eventId = harness.receive("invoice.finalized", "in_orpe_t7b");
+    CountDownLatch inFetch = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    com.housedevinci.einvoice.application.StripeInvoiceSource held =
+        new com.housedevinci.einvoice.application.StripeInvoiceSource() {
+          @Override
+          public com.housedevinci.einvoice.application.SourceInvoice fetchInvoice(String id) {
+            inFetch.countDown();
+            try {
+              release.await(WAIT, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            throw new EInvoiceException(ErrorCodes.STRIPE_UNAVAILABLE, "the pod is gone");
+          }
+
+          @Override
+          public List<String> finalisedInvoiceIds(Instant from, Instant to) {
+            return List.of();
+          }
+
+          @Override
+          public String pinnedApiVersion() {
+            return harness.source().pinnedApiVersion();
+          }
+        };
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try {
+      Future<IssuanceUnitOfWork.Outcome> a =
+          start(pool, harness.unitOfWorkWithSourceAndRenderer(held, harness.renderer()), eventId);
+      await(inFetch);
+      assertThat(terminateRunLock(harness, "in_orpe_t7b")).isEqualTo(1);
+
+      assertThat(row(harness, eventId).state()).isEqualTo(InboundState.RECEIVED);
+      assertThat(harness.due()).extracting(InboundEvent::eventId).doesNotContain(eventId);
+      harness.moveClockForward(Duration.ofMinutes(1).plusSeconds(1));
+      assertThat(harness.due()).extracting(InboundEvent::eventId).contains(eventId);
+
+      release.countDown();
+      assertThat(a.get(WAIT, TimeUnit.SECONDS).code()).isEqualTo(ErrorCodes.SESSION_NOT_PINNED);
+      assertThat(harness.unitOfWork().process(eventId).state()).isEqualTo(InboundState.COMPLETED);
+    } finally {
+      release.countDown();
+      pool.shutdownNow();
+    }
+  }
+
+  /**
    * T8, path 9: a holder paused before P3 loses its sessions; a successor completes; the old run
    * wakes up, stops at the proof and writes nothing.
    */
