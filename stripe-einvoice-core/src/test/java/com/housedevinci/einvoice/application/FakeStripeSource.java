@@ -14,6 +14,8 @@ public final class FakeStripeSource implements StripeInvoiceSource {
   private final Map<String, SourceInvoice> invoices = new LinkedHashMap<>();
   private final AtomicInteger fetches = new AtomicInteger();
   private Throwable failure;
+  private final Map<String, RuntimeException> failures =
+      new java.util.concurrent.ConcurrentHashMap<>();
 
   public FakeStripeSource with(SourceInvoice invoice) {
     invoices.put(invoice.id(), invoice);
@@ -32,6 +34,17 @@ public final class FakeStripeSource implements StripeInvoiceSource {
 
   public void heal() {
     this.failure = null;
+    this.failures.clear();
+  }
+
+  /** One invoice cannot be read (a key refused for it, say); every other read succeeds. */
+  public void breakFor(String invoiceId, RuntimeException failure) {
+    failures.put(invoiceId, failure);
+  }
+
+  /** The invoice reads again. */
+  public void healFor(String invoiceId) {
+    failures.remove(invoiceId);
   }
 
   public int fetches() {
@@ -42,6 +55,10 @@ public final class FakeStripeSource implements StripeInvoiceSource {
   public SourceInvoice fetchInvoice(String invoiceId) {
     fetches.incrementAndGet();
     throwIfSet();
+    RuntimeException forThis = failures.get(invoiceId);
+    if (forThis != null) {
+      throw forThis;
+    }
     SourceInvoice invoice = invoices.get(invoiceId);
     if (invoice == null) {
       throw new EInvoiceException(

@@ -201,6 +201,43 @@ public final class IssuanceTestHarness {
     return unitOfWorkPinnedTo(pinnedApiVersion);
   }
 
+  /**
+   * A unit of work in another mode over the same database and seller: a second instance of the
+   * other mode, the case D-SRE-6 is about. The configured series exists only in live mode, so a run
+   * of this instance that reaches the allocator is refused there.
+   */
+  public IssuanceUnitOfWork unitOfWorkInMode(Mode mode) {
+    IssuanceUnitOfWork.Configuration live = configurationFor("DEFAULT", pinnedApiVersion);
+    return new IssuanceUnitOfWork(
+        inbound,
+        runLock,
+        permits,
+        source,
+        store,
+        store,
+        store,
+        store,
+        renderer,
+        validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
+        archive,
+        preflightSupport,
+        clock,
+        new IssuanceUnitOfWork.Configuration(
+            live.sellerId(),
+            live.stripeAccountId(),
+            mode,
+            live.series(),
+            live.fiscalYearReset(),
+            live.taxZone(),
+            live.pinnedApiVersion(),
+            live.rulePackVersion(),
+            live.retryBackoff(),
+            live.maxRetryBackoff(),
+            live.closedYearCutoff(),
+            live.readBackAfterWrite()));
+  }
+
   public IssuanceUnitOfWork unitOfWorkPinnedTo(String apiVersion) {
     return new IssuanceUnitOfWork(
         inbound,
