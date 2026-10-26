@@ -18,13 +18,31 @@ import java.util.Objects;
 final class HeldConnectionUnitOfWork extends AbstractJdbcUnitOfWork {
 
   private final Connection connection;
-  private final long issuanceId;
+  private final IssuanceRowLocks.SessionLock lock;
   private final String token;
+  private final java.util.function.Supplier<RuntimeException> lost;
 
   HeldConnectionUnitOfWork(Connection connection, long issuanceId, String token) {
+    this(
+        connection,
+        IssuanceRowLocks.SessionLock.row(issuanceId),
+        token,
+        () -> IssuanceRowLocks.lostLock(issuanceId));
+  }
+
+  /**
+   * @param lost the refusal of a transaction whose proof failed; it names the lock's subject, never
+   *     the token
+   */
+  HeldConnectionUnitOfWork(
+      Connection connection,
+      IssuanceRowLocks.SessionLock lock,
+      String token,
+      java.util.function.Supplier<RuntimeException> lost) {
     this.connection = Objects.requireNonNull(connection, "connection");
-    this.issuanceId = issuanceId;
+    this.lock = Objects.requireNonNull(lock, "lock");
     this.token = Objects.requireNonNull(token, "token");
+    this.lost = Objects.requireNonNull(lost, "lost");
   }
 
   @Override
@@ -49,8 +67,8 @@ final class HeldConnectionUnitOfWork extends AbstractJdbcUnitOfWork {
 
   @Override
   protected void beforeTransaction(Connection c) throws SQLException {
-    if (!IssuanceRowLocks.prove(c, issuanceId, token)) {
-      throw IssuanceRowLocks.lostLock(issuanceId);
+    if (!IssuanceRowLocks.prove(c, lock, token)) {
+      throw lost.get();
     }
   }
 

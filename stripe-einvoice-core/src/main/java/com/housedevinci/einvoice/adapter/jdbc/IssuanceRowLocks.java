@@ -25,6 +25,33 @@ final class IssuanceRowLocks {
   /** The one session setting that carries the current acquisition token (C2: one per session). */
   static final String TOKEN_SETTING = "einvoice.row_lock";
 
+  /**
+   * One session lock: its two-argument key, the session setting that carries its acquisition token,
+   * and the label the token value and the messages carry. The issuance row lock and the inbound run
+   * lock share the statements below and differ only here (design one-run-per-event, build step 2).
+   */
+  record SessionLock(int classId, int objectId, String setting, String label) {
+
+    SessionLock {
+      if (!SETTINGS.contains(setting)) {
+        throw new IllegalArgumentException("not a session lock setting of this module");
+      }
+    }
+
+    /** The issuance row lock: class "EINA", the low 32 bits of the row id. */
+    static SessionLock row(long issuanceId) {
+      return new SessionLock(
+          AdvisoryLocks.ROW_CLASS_ID, rowKey(issuanceId), TOKEN_SETTING, String.valueOf(issuanceId));
+    }
+  }
+
+  /** The inbound run lock's own token setting (D-ORPE-7c): never the row lock's. */
+  static final String RUN_TOKEN_SETTING = "einvoice.run_lock";
+
+  /** The two settings the statements may name; constant text only, never a caller's string. */
+  private static final java.util.Set<String> SETTINGS =
+      java.util.Set.of(TOKEN_SETTING, RUN_TOKEN_SETTING);
+
   private static final String HELD_BY_ANYONE =
       "EXISTS (SELECT 1 FROM pg_catalog.pg_locks l"
           + " WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 2"
@@ -39,12 +66,13 @@ final class IssuanceRowLocks {
    * (Revision 3, D-PR42-2). The subquery is not flattened (a volatile target), so the lock is tried
    * once.
    */
-  static final String TRY =
-      "SELECT t.got, CASE WHEN t.got THEN pg_catalog.set_config('"
-          + TOKEN_SETTING
-          + "', ?, false) END FROM (SELECT CASE WHEN "
-          + HELD_BY_ANYONE
-          + ") THEN false ELSE pg_catalog.pg_try_advisory_lock(?, ?) END AS got) t";
+  static String trySql(String setting) {
+    return "SELECT t.got, CASE WHEN t.got THEN pg_catalog.set_config('"
+        + setting
+        + "', ?, false) END FROM (SELECT CASE WHEN "
+        + HELD_BY_ANYONE
+        + ") THEN false ELSE pg_catalog.pg_try_advisory_lock(?, ?) END AS got) t";
+  }
 
   /**
    * P1: the session still carries this acquisition's token AND this backend holds the key. Never
@@ -52,23 +80,31 @@ final class IssuanceRowLocks {
    * DISCARD ALL wipes the token, a client that re-takes the key writes its own, and a new backend
    * with a reused pid has none.
    */
-  static final String PROOF =
-      "(pg_catalog.current_setting('"
-          + TOKEN_SETTING
-          + "', true) = ? AND "
-          + HELD_BY_ANYONE.replace(
-              "WHERE d.datname = pg_catalog.current_database())",
-              "WHERE d.datname = pg_catalog.current_database())"
-                  + " AND l.pid = pg_catalog.pg_backend_pid()")
-          + ")) IS TRUE";
+  static String proofSql(String setting) {
+    return "(pg_catalog.current_setting('"
+        + setting
+        + "', true) = ? AND "
+        + HELD_BY_ANYONE.replace(
+            "WHERE d.datname = pg_catalog.current_database())",
+            "WHERE d.datname = pg_catalog.current_database())"
+                + " AND l.pid = pg_catalog.pg_backend_pid()")
+        + ")) IS TRUE";
+  }
 
   /** P2: one statement that frees the key only when the proof holds, and clears the token. */
-  static final String UNLOCK =
-      "SELECT CASE WHEN "
-          + PROOF
-          + " THEN pg_catalog.pg_advisory_unlock(?, ?) AND pg_catalog.set_config('"
-          + TOKEN_SETTING
-          + "', '', false) = '' ELSE false END";
+  static String unlockSql(String setting) {
+    return "SELECT CASE WHEN "
+        + proofSql(setting)
+        + " THEN pg_catalog.pg_advisory_unlock(?, ?) AND pg_catalog.set_config('"
+        + setting
+        + "', '', false) = '' ELSE false END";
+  }
+
+  static final String TRY = trySql(TOKEN_SETTING);
+
+  static final String PROOF = proofSql(TOKEN_SETTING);
+
+  static final String UNLOCK = unlockSql(TOKEN_SETTING);
 
   static final String EVICT = "SELECT pg_catalog.pg_terminate_backend(pg_catalog.pg_backend_pid())";
 
@@ -81,19 +117,25 @@ final class IssuanceRowLocks {
     return (int) issuanceId;
   }
 
-  private static int bindKey(PreparedStatement ps, int from, long issuanceId) throws SQLException {
-    ps.setLong(from, AdvisoryLocks.ROW_CLASS_ID & 0xFFFFFFFFL);
-    ps.setLong(from + 1, issuanceId & 0xFFFFFFFFL);
+  private static int bindKey(PreparedStatement ps, int from, SessionLock lock)
+      throws SQLException {
+    ps.setLong(from, lock.classId() & 0xFFFFFFFFL);
+    ps.setLong(from + 1, lock.objectId() & 0xFFFFFFFFL);
     return from + 2;
   }
 
-  private static String value(long issuanceId, String token) {
-    return issuanceId + ":" + token;
+  private static String value(SessionLock lock, String token) {
+    return lock.label() + ":" + token;
   }
 
   /** Takes the lock as an own-connection holder: the TRY commits on its own (C1). */
   static Optional<String> tryLock(Connection c, long issuanceId) throws SQLException {
     return tryLock(c, issuanceId, false);
+  }
+
+  static Optional<String> tryLock(Connection c, long issuanceId, boolean joined)
+      throws SQLException {
+    return tryLock(c, SessionLock.row(issuanceId), joined);
   }
 
   /**
@@ -103,18 +145,18 @@ final class IssuanceRowLocks {
    *     is not committed here. Otherwise the TRY commits at once (C1): a later rollback must not
    *     undo the token, because it does not undo the lock.
    */
-  static Optional<String> tryLock(Connection c, long issuanceId, boolean joined)
+  static Optional<String> tryLock(Connection c, SessionLock lock, boolean joined)
       throws SQLException {
     byte[] raw = new byte[16];
     RANDOM.nextBytes(raw);
     String token = java.util.HexFormat.of().formatHex(raw);
     boolean got;
-    try (PreparedStatement ps = c.prepareStatement(TRY)) {
+    try (PreparedStatement ps = c.prepareStatement(trySql(lock.setting()))) {
       int i = 1;
-      ps.setString(i++, value(issuanceId, token));
-      i = bindKey(ps, i, issuanceId);
-      ps.setInt(i++, AdvisoryLocks.ROW_CLASS_ID);
-      ps.setInt(i, rowKey(issuanceId));
+      ps.setString(i++, value(lock, token));
+      i = bindKey(ps, i, lock);
+      ps.setInt(i++, lock.classId());
+      ps.setInt(i, lock.objectId());
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
         got = rs.getBoolean(1);
@@ -130,10 +172,14 @@ final class IssuanceRowLocks {
 
   /** P1, as the first statement of a held transaction. */
   static boolean prove(Connection c, long issuanceId, String token) throws SQLException {
-    try (PreparedStatement ps = c.prepareStatement("SELECT " + PROOF)) {
+    return prove(c, SessionLock.row(issuanceId), token);
+  }
+
+  static boolean prove(Connection c, SessionLock lock, String token) throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement("SELECT " + proofSql(lock.setting()))) {
       int i = 1;
-      ps.setString(i++, value(issuanceId, token));
-      bindKey(ps, i, issuanceId);
+      ps.setString(i++, value(lock, token));
+      bindKey(ps, i, lock);
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
         return rs.getBoolean(1);
@@ -156,12 +202,16 @@ final class IssuanceRowLocks {
    * @param joined true inside a caller's transaction, which this never commits
    */
   static boolean unlock(Connection c, long issuanceId, String token, boolean joined) {
-    try (PreparedStatement ps = c.prepareStatement(UNLOCK)) {
+    return unlock(c, SessionLock.row(issuanceId), token, joined);
+  }
+
+  static boolean unlock(Connection c, SessionLock lock, String token, boolean joined) {
+    try (PreparedStatement ps = c.prepareStatement(unlockSql(lock.setting()))) {
       int i = 1;
-      ps.setString(i++, value(issuanceId, token));
-      i = bindKey(ps, i, issuanceId);
-      ps.setInt(i++, AdvisoryLocks.ROW_CLASS_ID);
-      ps.setInt(i, rowKey(issuanceId));
+      ps.setString(i++, value(lock, token));
+      i = bindKey(ps, i, lock);
+      ps.setInt(i++, lock.classId());
+      ps.setInt(i, lock.objectId());
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
         boolean released = rs.getBoolean(1);
