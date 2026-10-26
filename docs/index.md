@@ -214,6 +214,10 @@ cause. So the remedy is this explicit, privileged call, for one event at a time.
 - It re-opens the row and then runs the ordinary pipeline. It cannot skip the preflight, and a
   re-run that refuses again costs nothing, exactly as the first run did.
 - Two simultaneous calls on one event produce one run and one number.
+- It takes one of the shared run permits first, and refuses at once with `DEI-102` when all of them
+  are in use: it runs on your thread, so it never waits. It then takes the invoice's run lock
+  **before** the re-open. While another run of the same invoice is live it answers
+  `REFUSED_RUN_IN_PROGRESS` (`DEI-217`) and records nothing; call again later.
 - `actor` and `reason` are mandatory, screened and **refused rather than shortened** if they are
   over their bound (64 and 500 characters). They are never concatenated: the record holds them as
   two columns.
@@ -389,7 +393,7 @@ Two signals, and the difference matters:
 | `einvoice.webhook.tolerance` | `300s` | bounded above at 10 minutes; larger is refused |
 | `einvoice.archive.type` / `.root` | `filesystem`, root required | supply your own `ArchiveStore` |
 | `einvoice.archive.allow-non-atomic-store` | `false` | `true` - WARNs at every startup, read-back only |
-| `einvoice.issuance.concurrency` / `.queue-capacity` | `2` / `1000` | - |
+| `einvoice.issuance.concurrency` / `.queue-capacity` | `2` / `1000` | - ; the pool must hold `3 x concurrency + 2` connections, refused at startup otherwise |
 | `einvoice.issuance.retry-ceiling` | `72h` | - |
 | `einvoice.issuance.alert-after` | `6h` | - |
 | `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision |
@@ -402,6 +406,21 @@ Nothing here disables signature verification, validation before archiving, the t
 write-once archiving.
 
 ## The database, continued
+
+### One run per invoice: what the server needs
+
+Each live run holds a session advisory lock on its invoice (`einvoice.run_lock`) on one connection
+for its whole length. Three server settings decide how fast a dead run's lock goes:
+
+- `tcp_keepalives_idle = 60`, `tcp_keepalives_interval = 10`, `tcp_keepalives_count = 6`. A node
+  that loses power cannot close its sessions; only the server's keepalive ends them. Example: a
+  node dies at 10:00 while it runs `in_1`. With operating-system defaults `in_1` is busy until about
+  12:11; with these settings the 10:03 sweep runs it.
+- PgBouncer in session mode: keep `server_reset_query = DISCARD ALL` (its default). Emptied, a lock
+  outlives its client on the server connection, and the invoice stays busy until `server_lifetime`.
+- A network that drops connections idle for a few minutes ends a long run's session; the run stops
+  with `DEI-104` at WARN and is retried after its backoff. The keepalive settings above keep the
+  connection from looking idle.
 
 Two more tables: `einvoice_inbound_event` (the durable intake record - purgeable, not append-only,
 and the one table the runtime role may delete from) and `einvoice_finding` (the compliance findings
