@@ -247,7 +247,8 @@ class IssuanceOperationsTest {
             "einvoice.webhook.path=/hooks/stripe",
             "einvoice.webhook.max-body-bytes=65536",
             "einvoice.webhook.tolerance=120s",
-            "einvoice.issuance.concurrency=3",
+            "einvoice.issuance.concurrency=1", // not the default 2; 3 needs 11 connections and the
+            // shared pool has 8
             "einvoice.issuance.queue-capacity=64",
             "einvoice.issuance.retry-backoff=30s",
             "einvoice.issuance.max-retry-backoff=20m",
@@ -279,7 +280,7 @@ class IssuanceOperationsTest {
               assertThat(properties.getWebhook().getMaxBodyBytes()).isEqualTo(65536);
               assertThat(properties.getWebhook().getTolerance()).isEqualTo(Duration.ofMinutes(2));
               assertThat(properties.getWebhook().isEnabled()).isTrue();
-              assertThat(properties.getIssuance().getConcurrency()).isEqualTo(3);
+              assertThat(properties.getIssuance().getConcurrency()).isEqualTo(1);
               assertThat(properties.getIssuance().getQueueCapacity()).isEqualTo(64);
               assertThat(properties.getIssuance().getRetryBackoff())
                   .isEqualTo(Duration.ofSeconds(30));
