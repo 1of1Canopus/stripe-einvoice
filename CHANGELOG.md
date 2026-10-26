@@ -104,6 +104,13 @@ All notable changes to this project are documented here. The format follows
   number. New port method `ReprocessLedger.reopenInPlaceAndRecord`. The re-open to `RECEIVED`
   refuses a numbered row in its own statement; `REFUSED_NUMBERED` now means a number appeared
   between the read and that statement.
+- **`REFUSED_NUMBERED` in full (D-PR50-4).** The answer means the invoice holds a number that the
+  reprocess may not reopen: an issued, burned or voided one, or a number that appeared between the
+  read and the re-open statement. It runs nothing, records nothing and takes no number.
+- **The answer for a closed number changed since 0.1.0 (D-PR50-4).** In 0.1.0 a reprocess of an
+  event whose invoice holds a voided number answered `REFUSED_NOT_ELIGIBLE`. It now answers
+  `REFUSED_NUMBERED`. A script that branches on the answer must handle the new value.
+
 - **The reprocess accepts `FAILED_ISSUANCE` with any code when the invoice holds no number
   (D-PR50-2).** A row the allocator refused before the claim, or a `MAPPED` row that crashed
   before it, can be mapped to `FAILED_ISSUANCE` by a later outage and pass the retry ceiling with

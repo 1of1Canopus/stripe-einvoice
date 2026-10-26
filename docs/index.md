@@ -211,6 +211,9 @@ cause. So the remedy is this explicit, privileged call, for one event at a time.
   re-open statement itself refuses a row whose invoice holds a number anywhere. Every other state, including a passed event and a
   second call after a successful reprocess, is answered `REFUSED_NOT_ELIGIBLE` with the recorded
   state and number, and nothing runs.
+- **A closed number is refused as `REFUSED_NUMBERED`.** A `FAILED_ISSUANCE` or `FAILED_MAPPING` row
+  whose invoice holds an issued, burned or voided number is answered `REFUSED_NUMBERED` (code
+  `DEI-111`), not `REFUSED_NOT_ELIGIBLE`. It runs nothing, records nothing and takes no number.
 - **A numbered row is resumed in place.** When the invoice already holds an open number (numbered,
   archiving or failed archive; asked by invoice id, under any seller and mode), a `FAILED_ISSUANCE` row with any code, or a `FAILED_MAPPING` row,
   is re-opened in place: it stays (or becomes) `FAILED_ISSUANCE` with its code kept, never
