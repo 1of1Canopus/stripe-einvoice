@@ -114,8 +114,13 @@ class PgBouncerSessionPinningTest {
       String eventId = harness.receive("invoice.finalized", "in_bouncer_tx");
       IssuanceUnitOfWork.Outcome outcome = harness.unitOfWork().process(eventId);
 
-      assertThat(outcome.state()).isEqualTo(InboundState.FAILED_ISSUANCE);
+      // T10 (one run per event, path 13): the run lock refuses the pooler at acquisition, before
+      // any write. The row stays as it was recorded.
+      assertThat(outcome.state()).isEqualTo(InboundState.RECEIVED);
       assertThat(outcome.code()).isEqualTo(ErrorCodes.SESSION_NOT_PINNED);
+      assertThat(harness.inbound().find(eventId).orElseThrow().attempts())
+          .as("nothing was written, not even the stamp")
+          .isZero();
       assertThat(harness.issuance("in_bouncer_tx")).as("no number was taken").isEmpty();
     }
   }

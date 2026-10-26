@@ -83,6 +83,25 @@ public interface InboundEventStore {
       Instant now,
       Duration retryIn);
 
+  /**
+   * Stamps the start of one run (D-PR45-1): {@code attempts + 1} and {@code next_attempt_at = now +
+   * retryIn}, with no state change, only if the row still holds {@code expected}.
+   *
+   * <p>One run is one attempt (D-ORPE-3). The stamp is the only place a run moves {@code attempts};
+   * the conclusions a run lock holder writes add nothing. The stamp matters only when the run dies:
+   * every conclusion overwrites {@code next_attempt_at}, and a dead run's row is not due again
+   * before the stamped time. So a renderer that kills the JVM on one invoice costs one backoff per
+   * crash, not one crash per sweep tick.
+   *
+   * <p>No default implementation: a stamp built from {@link #find} and {@link #transition} would
+   * move the state machine, and a store that cannot stamp must not pass silently.
+   *
+   * @return the stamped row, or empty when the row no longer holds {@code expected} and nothing was
+   *     written
+   */
+  Optional<InboundEvent> stampAttempt(
+      String eventId, InboundState expected, Instant now, Duration retryIn);
+
   /** The failing validation rule recorded with the last transition, when there was one. */
   Optional<String> lastRuleId(String eventId);
 

@@ -97,14 +97,32 @@ public final class IssuanceReprocess {
      * allocates one, so this means the number came from somewhere else, and re-running the pipeline
      * over a numbered invoice is exactly what this method must never do.
      */
-    REFUSED_NUMBERED
+    REFUSED_NUMBERED,
+
+    /**
+     * Another run of the same invoice holds its run lock (D-PR45-1, {@code DEI-217}). Nothing was
+     * re-opened, recorded or run. Call again once that run has ended.
+     */
+    REFUSED_RUN_IN_PROGRESS
   }
 
   /**
-   * @throws EInvoiceException {@code DEI-200} when no event is recorded under that id
+   * Runs on the caller's own thread, so it never waits for capacity (D-ORPE-4): it takes one of the
+   * permits every caller of {@link IssuanceUnitOfWork#process} shares, or refuses at once. Then it
+   * takes the invoice's run lock <b>before</b> the re-open, so a re-open never lands under a run
+   * that is still live, and runs the pipeline under that same lock.
+   *
+   * @throws EInvoiceException {@code DEI-200} when no event is recorded under that id; {@code
+   *     DEI-102} when every run permit is in use, before anything is read or recorded
    */
   public Result reprocess(ReprocessRequest request) {
     Objects.requireNonNull(request, "request");
+    try (RunPermits.Permit permit = unitOfWork.permits().tryAcquire()) {
+      return reprocessPermitted(request);
+    }
+  }
+
+  private Result reprocessPermitted(ReprocessRequest request) {
     String eventId = request.eventId();
     InboundEvent event =
         inbound
@@ -141,6 +159,42 @@ public final class IssuanceReprocess {
           ErrorCodes.ISSUANCE_ALREADY_CLAIMED,
           existing);
     }
+    Optional<Result> ran;
+    try {
+      ran = unitOfWork.runLocked(event, run -> reopenAndRun(run, request, event, configuration));
+    } catch (EInvoiceException e) {
+      if (!ErrorCodes.SESSION_NOT_PINNED.equals(e.code())) {
+        throw e;
+      }
+      // The run lock was lost, or could not be kept, before the re-open: nothing was recorded.
+      log.warn(
+          "einvoice: reprocess of event {} stopped: its run lock could not be kept ({})",
+          eventId,
+          e.code());
+      throw e;
+    }
+    if (ran.isEmpty()) {
+      // D-PR45-1: a run of this invoice is live. Nothing re-opened, nothing recorded.
+      return refused(
+          Disposition.REFUSED_RUN_IN_PROGRESS,
+          eventId,
+          event.state(),
+          ErrorCodes.INBOUND_RUN_IN_PROGRESS,
+          existing);
+    }
+    return ran.get();
+  }
+
+  /** Under the run lock: the re-open with its record, then the run (design row 4). */
+  private Result reopenAndRun(
+      IssuanceUnitOfWork run,
+      ReprocessRequest request,
+      InboundEvent event,
+      IssuanceUnitOfWork.Configuration configuration) {
+    String eventId = request.eventId();
+    // A check, then the re-open on another connection: the re-open is still a conditional update
+    // on the state, so a lock lost in between can only cost a run, never a second winner.
+    run.assertRunHeld();
     OptionalLong requestSeq =
         ledger.reopenAndRecord(
             request,
@@ -167,7 +221,7 @@ public final class IssuanceReprocess {
     long seq = requestSeq.getAsLong();
     IssuanceUnitOfWork.Outcome outcome;
     try {
-      outcome = unitOfWork.process(eventId);
+      outcome = run.processHeld(eventId);
     } catch (EInvoiceException e) {
       // R-04: a run that threw still concludes, with the code that escaped, so an unconcluded
       // request means one thing only - a process that died - which is what makes DEI-276 readable.

@@ -555,6 +555,11 @@ public final class JdbcIssuanceStore
   }
 
   private boolean sessionPinned() {
+    return sessionPinned(dataSource);
+  }
+
+  /** R5's cache, shared with the inbound run lock: one check per data source. */
+  static boolean sessionPinned(DataSource dataSource) {
     PINNING_CHECK.lock();
     try {
       return SESSION_PINNED.contains(dataSource);
@@ -568,6 +573,11 @@ public final class JdbcIssuanceStore
    * server session, before any issuance row lock is taken. Public so a host can run it at startup.
    */
   public void verifySessionPinning() {
+    verifySessionPinning(dataSource);
+  }
+
+  /** R5 for one data source, run at most once; the inbound run lock calls it too. */
+  static void verifySessionPinning(DataSource dataSource) {
     PINNING_CHECK.lock();
     try {
       if (!SESSION_PINNED.contains(dataSource)) {

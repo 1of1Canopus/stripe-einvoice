@@ -74,7 +74,19 @@ public final class IssuanceUnitOfWork {
    */
   public static final Set<String> SUBSCRIBED_TYPES = Set.of("invoice.finalized", "invoice.paid");
 
+  /**
+   * The plain store in the instance the host builds: it is read ({@code find}, {@code due}) and
+   * never written. In the per-run instance it is {@link InboundRunLock.HeldRun#inbound()}, so every
+   * inbound write of a run proves the run lock first (D-PR45-1).
+   */
   private final InboundEventStore inbound;
+
+  private final InboundRunLock runLock;
+  private final RunPermits permits;
+
+  /** The run lock's proof in the per-run instance; refuses in the instance the host builds. */
+  private final InboundRunLock.Proof runProof;
+
   private final StripeInvoiceSource source;
   private final NumberAllocator allocator;
   private final IssuanceReader reader;
@@ -173,9 +185,15 @@ public final class IssuanceUnitOfWork {
    *     as a WARN at construction, so at every startup: the guarantee EINVOICE-DATES then rests on
    *     that reader. A host that wires this class by hand writes the composition root, with the
    *     same trust as choosing the allocator.
+   * @param runLock at most one run per Stripe invoice (D-PR45-1). Pass the module's {@code
+   *     JdbcInboundRunLock} over the same unit of work as {@code inbound}
+   * @param permits the bound on live runs, shared with every other caller of {@link #process}
+   *     (D-ORPE-4): one instance per application, of {@code einvoice.issuance.concurrency}
    */
   public IssuanceUnitOfWork(
       InboundEventStore inbound,
+      InboundRunLock runLock,
+      RunPermits permits,
       StripeInvoiceSource source,
       NumberAllocator allocator,
       IssuanceReader reader,
@@ -189,6 +207,13 @@ public final class IssuanceUnitOfWork {
       Clock clock,
       Configuration configuration) {
     this.inbound = Objects.requireNonNull(inbound, "inbound");
+    this.runLock = Objects.requireNonNull(runLock, "runLock");
+    this.permits = Objects.requireNonNull(permits, "permits");
+    this.runProof =
+        () -> {
+          throw new EInvoiceException(
+              ErrorCodes.SESSION_NOT_PINNED, "this step runs only under an inbound run lock");
+        };
     this.source = Objects.requireNonNull(source, "source");
     this.allocator = Objects.requireNonNull(allocator, "allocator");
     this.reader = Objects.requireNonNull(reader, "reader");
@@ -211,6 +236,30 @@ public final class IssuanceUnitOfWork {
     }
   }
 
+  /**
+   * The instance one run uses (D-PR45-1): every port of {@code base}, with the inbound store and
+   * the proof of the run lock this run holds. Built per run; the construction checks do not run
+   * again.
+   */
+  private IssuanceUnitOfWork(IssuanceUnitOfWork base, InboundRunLock.HeldRun held) {
+    this.inbound = Objects.requireNonNull(held.inbound(), "held inbound");
+    this.runLock = base.runLock;
+    this.permits = base.permits;
+    this.runProof = Objects.requireNonNull(held.proof(), "held proof");
+    this.source = base.source;
+    this.allocator = base.allocator;
+    this.reader = base.reader;
+    this.writer = base.writer;
+    this.rowLock = base.rowLock;
+    this.renderer = base.renderer;
+    this.validator = base.validator;
+    this.dates = base.dates;
+    this.archive = base.archive;
+    this.preflightSupport = base.preflightSupport;
+    this.clock = base.clock;
+    this.configuration = base.configuration;
+  }
+
   /** Design review R1: the exact class name, and the same code source as this class. */
   static boolean isModuleReader(DocumentDates dates) {
     Class<?> type = dates.getClass();
@@ -225,25 +274,127 @@ public final class IssuanceUnitOfWork {
         && ours.getLocation().equals(theirs.getLocation());
   }
 
-  /** Drives one recorded event as far as it can go, and records where it stopped. */
+  /**
+   * Drives one recorded event as far as it can go, and records where it stopped.
+   *
+   * <p><b>One run per invoice</b> (D-PR45-1). The run takes a permit (waiting for one, holding no
+   * connection), then the invoice's run lock, never waiting for it. Another run of the same invoice
+   * holds it: this run writes nothing and answers the stored state with {@code DEI-217}; the
+   * sweeper picks the row again later. A lock lost mid-run (the server or the network ended the
+   * session) answers the stored state with {@code DEI-104}, logged at WARN; nothing more was
+   * written. A failure to take the lock (pool timeout, outage) is thrown with its own code.
+   */
   public Outcome process(String eventId) {
-    InboundEvent event =
-        inbound
-            .find(eventId)
-            .orElseThrow(
-                () ->
-                    new EInvoiceException(
-                        ErrorCodes.INBOUND_UNREADABLE,
-                        "no inbound event is recorded under that id"));
-    if (event.state().terminal()
-        && !event.state().retryableTerminal()
-        && !event.state().refused()) {
-      return outcome(event, Optional.empty());
+    try (RunPermits.Permit permit = permits.acquire()) {
+      return processPermitted(eventId);
     }
-    // D-PR9-F1: every inbound write before the number claim is a compare-and-set on the state this
-    // run last read or wrote. Another run can work the same event at the same time (a worker and
-    // the sweeper, a re-open and a retry). A write that finds the row moved writes nothing and
-    // returns what is stored, like the claim loser in P1: never DEI-210, never a row moved back.
+  }
+
+  /** {@link #process} once a permit is held: the worker's path and the reprocess's. */
+  Outcome processPermitted(String eventId) {
+    InboundEvent row = find(eventId);
+    if (concluded(row)) {
+      return outcome(row, Optional.empty());
+    }
+    try {
+      return runLocked(row, run -> run.processHeld(eventId)).orElseGet(() -> busy(row));
+    } catch (EInvoiceException e) {
+      if (ErrorCodes.SESSION_NOT_PINNED.equals(e.code())) {
+        return lockLost(row);
+      }
+      throw e;
+    }
+  }
+
+  /** The permits every caller of {@link #process} shares, for the reprocess's host-thread path. */
+  RunPermits permits() {
+    return permits;
+  }
+
+  /**
+   * Runs {@code work} on a per-run instance while this invoice's run lock is held; empty when
+   * another run holds it. For {@link IssuanceReprocess}, which re-opens the row under the same lock
+   * before it runs.
+   */
+  <T> Optional<T> runLocked(
+      InboundEvent storedRow, java.util.function.Function<IssuanceUnitOfWork, T> work) {
+    return runLock.whileHeld(storedRow, held -> work.apply(new IssuanceUnitOfWork(this, held)));
+  }
+
+  /** On a per-run instance: refuses with {@code DEI-104} when the run lock is lost. */
+  void assertRunHeld() {
+    runProof.assertHeld();
+  }
+
+  private InboundEvent find(String eventId) {
+    return inbound
+        .find(eventId)
+        .orElseThrow(
+            () ->
+                new EInvoiceException(
+                    ErrorCodes.INBOUND_UNREADABLE, "no inbound event is recorded under that id"));
+  }
+
+  private static boolean concluded(InboundEvent event) {
+    return event.state().terminal()
+        && !event.state().retryableTerminal()
+        && !event.state().refused();
+  }
+
+  /** {@code DEI-217}: another run of this invoice holds the lock. Nothing was written. */
+  private Outcome busy(InboundEvent row) {
+    log.debug(
+        "einvoice: event {} is not run now: another run of its invoice is in progress ({})",
+        row.eventId(),
+        ErrorCodes.INBOUND_RUN_IN_PROGRESS);
+    return new Outcome(row.eventId(), row.state(), ErrorCodes.INBOUND_RUN_IN_PROGRESS, null);
+  }
+
+  /**
+   * {@code DEI-104} (D-ORPE-2): the run lock could not be kept, or the connection path cannot keep
+   * one. Never the busy code. The stored state is the answer; this run wrote nothing more.
+   */
+  private Outcome lockLost(InboundEvent row) {
+    log.warn(
+        "einvoice: the run of event {} stopped: its run lock was lost or could not be kept on one"
+            + " database session ({}); nothing more was written and the row is retried after its"
+            + " backoff",
+        row.eventId(),
+        ErrorCodes.SESSION_NOT_PINNED);
+    InboundEvent stored;
+    try {
+      stored = inbound.find(row.eventId()).orElse(row);
+    } catch (RuntimeException e) {
+      stored = row;
+    }
+    return new Outcome(stored.eventId(), stored.state(), ErrorCodes.SESSION_NOT_PINNED, null);
+  }
+
+  /**
+   * One run under the run lock, on the per-run instance: decide on the row read under the lock,
+   * stamp the attempt, then the pipeline.
+   */
+  Outcome processHeld(String eventId) {
+    InboundEvent read = find(eventId);
+    if (concluded(read)) {
+      return outcome(read, Optional.empty());
+    }
+    // D-ORPE-3: the stamp is this run's only + 1, and its time is when a successor may start if
+    // this run dies. Every conclusion overwrites it.
+    Optional<InboundEvent> stamped =
+        inbound.stampAttempt(
+            eventId, read.state(), clock.instant(), backoffAfter(read.attempts() + 1));
+    if (stamped.isEmpty()) {
+      return concludedElsewhere(read);
+    }
+    return pipeline(stamped.get());
+  }
+
+  private Outcome pipeline(InboundEvent event) {
+    // D-PR9-F1, kept under the run lock: every inbound write before the number claim is a
+    // compare-and-set on the state this run last read or wrote. Under the lock no other run moves
+    // the row, so a compare that fails means a writer outside the lock: a bug, logged at WARN, and
+    // this run writes nothing more.
     InboundState read = event.state();
     Optional<Outcome> refusal = route(event, read);
     if (refusal.isPresent()) {
@@ -267,8 +418,7 @@ public final class IssuanceUnitOfWork {
     if (fetchedElsewhere.isPresent()) {
       return fetchedElsewhere.get();
     }
-    // From here every write expects FETCHED. When another run is already past it, each of them
-    // loses and is answered from what is stored, and the MAPPED step carries on behind that run.
+    // From here every write expects FETCHED.
     final InboundState fetched = InboundState.FETCHED;
 
     if (!invoice.finalised()) {
@@ -381,6 +531,9 @@ public final class IssuanceUnitOfWork {
     // other phase (D2-01): unwrapped, a refusal here left the row MAPPED with attempts 0 and no
     // code, so the sweeper re-picked it immediately, for ever, and the retry ceiling was never
     // reached.
+    // D-PR45-1: the first step that acts on the number. A run that lost its lock stops here. The
+    // allocator's one number per invoice keeps the number safe in the window after this check.
+    runProof.assertHeld();
     Issuance issuance;
     try {
       issuance =
@@ -636,6 +789,9 @@ public final class IssuanceUnitOfWork {
       ArchiveKey key,
       Optional<byte[]> toWrite,
       IssuanceRowLock.Held held) {
+    // D-PR45-1: the second step that acts on the number. Outside the try below, so a lost lock is
+    // never recorded as an archive failure; the PR 43 row lock guards the window after this check.
+    runProof.assertHeld();
     // P3: say what we are about to write, then write it.
     try {
       held.writer()
@@ -891,9 +1047,18 @@ public final class IssuanceUnitOfWork {
         configuration.sellerId(), configuration.series(), fiscalYear, configuration.mode());
   }
 
-  /** Exponential, bounded, and derived from the row's own attempt count rather than from memory. */
+  /**
+   * Exponential, bounded, and derived from the row's own attempt count rather than from memory.
+   * {@code event} is the row as this run stamped it (D-ORPE-3), so the first run waits the base,
+   * the second twice the base, and so on: the schedule a run had before the stamp existed.
+   */
   private Duration backoffFor(InboundEvent event) {
-    long factor = 1L << Math.min(10, Math.max(0, event.attempts()));
+    return backoffAfter(event.attempts());
+  }
+
+  /** The backoff after {@code runs} runs: base x 2^(runs - 1), capped. */
+  private Duration backoffAfter(int runs) {
+    long factor = 1L << Math.min(10, Math.max(0, runs - 1));
     Duration backoff = configuration.retryBackoff().multipliedBy(factor);
     return backoff.compareTo(configuration.maxRetryBackoff()) > 0
         ? configuration.maxRetryBackoff()
@@ -1238,24 +1403,19 @@ public final class IssuanceUnitOfWork {
   /**
    * The {@code FETCHED} and {@code MAPPED} steps, as compare-and-sets (D-PR9-F1).
    *
-   * <p>Empty when this run carries on. That is the case when the write landed, and also when
-   * another run that is still in flight has already reached this step or {@code MAPPED}: this run
-   * goes on behind it, writes nothing back, and the P1 claim decides the number as it always did
-   * for two runs. Any other state was written by a run that concluded, and its stored outcome is
-   * the answer. Example: B's {@code FETCHED} write expects {@code RECEIVED}; A has written {@code
-   * MAPPED}; B carries on and the row stays {@code MAPPED}.
+   * <p>Empty when the write landed and this run carries on. Under the run lock no other run moves
+   * the row (D-PR45-1), so the PR 45 "carry on behind a run in flight" branch is gone: a compare
+   * that fails means a writer outside the lock, and the stored outcome is the answer.
    */
   private Optional<Outcome> step(InboundEvent event, InboundState read, InboundState next) {
+    // The step keeps a next attempt one backoff away, like the stamp: a run that dies after this
+    // step is not due again at once (D-PR45-1). Every conclusion overwrites it.
     if (inbound
-        .transitionFrom(event.eventId(), read, next, "", "", clock.instant(), null)
+        .transitionFrom(event.eventId(), read, next, "", "", clock.instant(), backoffFor(event))
         .isPresent()) {
       return Optional.empty();
     }
-    InboundEvent stored = reread(event);
-    if (stored.state() == next || stored.state() == InboundState.MAPPED) {
-      return Optional.empty();
-    }
-    return Optional.of(storedOutcome(stored));
+    return Optional.of(storedOutcome(reread(event)));
   }
 
   private InboundEvent reread(InboundEvent event) {
@@ -1272,8 +1432,9 @@ public final class IssuanceUnitOfWork {
         reader
             .findBySource(configuration.sellerId(), configuration.mode(), stored.objectId())
             .map(Issuance::legalNumber);
-    log.info(
-        "einvoice: event {} was moved to {} by another run; this run stops and writes nothing",
+    log.warn(
+        "einvoice: event {} was moved to {} by a writer outside its run lock; this run stops and"
+            + " writes nothing",
         stored.eventId(),
         stored.state());
     return outcome(stored, number);

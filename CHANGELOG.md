@@ -8,6 +8,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **One run per invoice (D-PR45-1).** A run of the issuance pipeline holds a session advisory lock
+  keyed on the Stripe invoice for its whole length (new port `InboundRunLock`, adapter
+  `JdbcInboundRunLock`, class id `0x45494E52`, session setting `einvoice.run_lock`). A second run
+  of the same invoice writes nothing and answers the stored state with the new code
+  `DEI-217 INBOUND_RUN_IN_PROGRESS`; a lock lost mid-run is `DEI-104` at WARN. Every inbound write
+  of a run proves the lock in its own transaction, and the run proves it again before it takes a
+  number and before it announces an archive write. The retention purge skips a row whose run is
+  live. `IssuanceReprocess` takes the lock before it re-opens a row and gains the disposition
+  `REFUSED_RUN_IN_PROGRESS`. See "One run per invoice" in the README.
+- **A run never joins a caller's transaction (D-PR49-1).** `IssuanceReprocess` and
+  `IssuanceUnitOfWork.process` called inside a transaction are refused with the new code
+  `DEI-218 RUN_IN_HOST_TRANSACTION` before the run lock is tried, and record nothing. A failed
+  joined run would have left its run lock on the caller's pooled connection, so the invoice
+  answered `DEI-217` with no run live until the pool retired that connection.
+- **Run permits and the pool rule (D-ORPE-4).** `RunPermits`, one per application, of
+  `einvoice.issuance.concurrency`, shared by the worker (which waits) and `IssuanceReprocess`
+  (which refuses at once with `DEI-102`). The starter refuses at startup (`DEI-100`) a Hikari pool
+  smaller than `3 x concurrency + 2`, unwrapping a proxied pool first. The rule runs in every
+  started context with a unit of work, the starter's or one the host builds (D-PR49-2).
+- **Reserved error codes (D-ORPE-8).** `ReservedErrorCodes` lists the codes approved plans already
+  gave a meaning (`DEI-214` to `DEI-216`); a test fails the build when a code in `ErrorCodes` repeats
+  a value or takes a reserved code under another name.
+
 - **Invoice dates go up with their numbers (D-PS1-27).** The issue date (BT-2) of an invoice is
   now the day its number is given: the database clock (`pg_catalog.clock_timestamp()`), read after
   the series row lock, turned into a date once, in Java, in the seller's tax zone. The day of the
@@ -51,6 +74,19 @@ All notable changes to this project are documented here. The format follows
   than this version), `DEI-136` (schema not upgraded and `initialize-schema=false`).
 
 ### Changed
+
+- **BREAKING CHANGE: `InboundEventStore.stampAttempt` (D-PR45-1).** A new abstract method on the
+  port, with no default: a run stamps its row as it starts (`attempts + 1`, a next attempt one
+  backoff away, no state change, a compare on the state). One run is now one attempt: the
+  conclusions a run writes no longer add one, so a Stripe outage still retries at 1, 2, 4 minutes.
+  A run that dies is retried after its backoff, not at the next sweep tick.
+- **BREAKING CHANGE: `IssuanceUnitOfWork` takes an `InboundRunLock` and `RunPermits`**, after the
+  inbound store. A host that builds the unit of work by hand passes `new
+  JdbcInboundRunLock(unitOfWork, dataSource)` and one `new RunPermits(concurrency)` shared with
+  every caller.
+- **The PR 45 "carry on behind a run in flight" branch is removed.** Under the run lock no other run
+  moves the row; a compare that still fails means a writer outside the lock, logged at WARN, and
+  the run writes nothing more.
 
 - **BREAKING CHANGE: `InboundEventStore.transitionFrom` (D-PR9-F1).** A new abstract method on the port: a state
   move that lands only if the row still holds an expected state, and answers empty otherwise. A

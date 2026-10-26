@@ -28,6 +28,11 @@ public final class ErrorCodes {
    * a session lock, and under such a pooler it would silently be no lock at all (D-RTR-7, R5), so
    * the module refuses to issue rather than run unlocked. Use session pooling or a direct
    * connection. There is no weaker mode.
+   *
+   * <p>Also the code of a run that <b>lost</b> its inbound run lock (D-ORPE-2): the server or the
+   * network ended the holder's session mid-run. The run writes nothing more, is logged at WARN with
+   * the event id, and its connection is closed. Never {@link #INBOUND_RUN_IN_PROGRESS}, which means
+   * the lock was never taken.
    */
   public static final String SESSION_NOT_PINNED = "DEI-104";
 
@@ -219,6 +224,25 @@ public final class ErrorCodes {
 
   /** The re-fetched invoice is void and this module never issued a document for it. */
   public static final String UPSTREAM_VOID_NOT_ISSUED = "DEI-213";
+
+  /**
+   * Another run of the same Stripe invoice holds its run lock (D-PR45-1). This run wrote nothing
+   * and answers with the stored state; the sweeper picks the row again later. Only ever "the lock
+   * was never acquired": a lock lost mid-run is {@link #SESSION_NOT_PINNED}. Logged at DEBUG.
+   * {@code DEI-214} to {@code DEI-216} are reserved by approved plans ({@link ReservedErrorCodes}).
+   */
+  public static final String INBOUND_RUN_IN_PROGRESS = "DEI-217";
+
+  /**
+   * A run was started inside a caller's transaction (D-PR49-1), and a run never joins one. It
+   * fetches from Stripe, renders and archives, so it would hold that transaction open for minutes;
+   * its writes would show only at the caller's commit, after its run lock was released; and a
+   * failed write would abort the caller's transaction before the lock could be released, leaving
+   * the lock on a pooled connection. Refused before the lock is tried: nothing was locked, read or
+   * written, and the caller's transaction is untouched. Call {@code IssuanceReprocess} and {@code
+   * IssuanceUnitOfWork.process} outside a transaction.
+   */
+  public static final String RUN_IN_HOST_TRANSACTION = "DEI-218";
 
   /** Our recomputation of a total or of a tax bucket disagrees with Stripe's own (D-12). */
   public static final String TOTALS_MISMATCH = "DEI-220";

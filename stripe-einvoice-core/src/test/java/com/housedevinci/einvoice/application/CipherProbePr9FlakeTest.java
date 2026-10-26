@@ -84,7 +84,7 @@ class CipherProbePr9FlakeTest {
   @Test
   void probe_second_worker_on_a_reopened_row_completed_meanwhile_is_not_refused_with_dei_210()
       throws Exception {
-    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    IssuanceTestHarness harness = IssuanceTestHarness.create().withoutRunLock();
     harness.source().with(TestInvoices.finalised("in_cipher_pr9f1"));
     String eventId = harness.receive("invoice.finalized", "in_cipher_pr9f1");
     assertThat(harness.unitOfWorkWithRenderer(new RefusingRenderer()).process(eventId).state())

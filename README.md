@@ -183,6 +183,49 @@ same number at once: the second one gets `DEI-245` and retries later.
   the JDBC URL) so that this takes seconds, not hours. Until then the row only retries; it is never
   burned.
 
+### One run per invoice
+
+A run is one pass of the issuance pipeline over one recorded event. At most one run of one Stripe
+invoice is live at any time. Before it decides anything, a run takes a session advisory lock keyed
+on the invoice (the first four bytes of SHA-256 of the Stripe object id; the session setting
+`einvoice.run_lock` is reserved). The lock is tried, never waited for.
+
+- **Busy is `DEI-217`.** A second run of the same invoice (the sweeper re-picking a row the worker
+  is still running, or `invoice.paid` arriving while `invoice.finalized` runs) writes nothing and
+  answers the stored state with `DEI-217`, logged at DEBUG. The sweeper picks the row again later.
+  `IssuanceReprocess` answers `REFUSED_RUN_IN_PROGRESS` and records nothing.
+- **A run never joins your transaction: `DEI-218`.** Call `IssuanceReprocess` (and
+  `IssuanceUnitOfWork.process`) outside a transaction. Inside one, for example from a
+  `@Transactional` admin action, the call is refused with `DEI-218 RUN_IN_HOST_TRANSACTION` before
+  the run lock is tried: nothing is locked, read or recorded, and your transaction is untouched. A
+  run fetches from Stripe, renders and archives, so it would hold your transaction open for minutes,
+  and a failed write would leave its run lock on your pooled connection.
+- **A lost lock is `DEI-104`, at WARN.** If the server or the network ends the run's session
+  mid-run, the run's next write refuses, the run writes nothing more, and one WARN names the event.
+  The connection is closed, not pooled.
+- **One run is one attempt.** A run stamps the row as it starts: one attempt more, and a next
+  attempt one backoff away. A run that dies (an out-of-memory kill, a pod eviction) is retried after
+  that backoff, onto the same number, not at the next sweep tick.
+- **Capacity.** A live run holds up to three connections: the run lock, the row lock during the
+  archive write, and one short-lived one. Every caller of the pipeline shares
+  `einvoice.issuance.concurrency` run permits: worker threads wait for one, a host thread calling
+  `IssuanceReprocess` gets `DEI-102` at once when none is free. At startup the starter refuses
+  (`DEI-100`) a Hikari pool smaller than `3 x concurrency + 2` (one for the module's jobs, which
+  all run on one thread, and one for the host). The defaults (concurrency 2, pool 10) pass. A pool
+  that does not unwrap to HikariCP is not checked, and a WARN says so at every startup.
+- **A vanished host.** When a node loses power, nothing on that node closes its sessions. Only the
+  database server's own TCP keepalive ends them, and every invoice that node was running stays busy
+  until then: about 2 h 11 min with operating-system defaults. Set `tcp_keepalives_idle = 60`,
+  `tcp_keepalives_interval = 10` and `tcp_keepalives_count = 6` on the server: about two minutes.
+  The client's `tcpKeepAlive` does not help here; the client is gone.
+- **PgBouncer in session mode** needs `server_reset_query = DISCARD ALL` (its default). Emptied,
+  a lock outlives its client on the server connection and the invoice stays busy, fail-closed,
+  until `server_lifetime` closes that connection.
+- **Networks that drop idle connections** (a NAT or cloud load balancer that cuts a connection idle
+  for four to six minutes) end the session of a run that holds its lock idle for longer, for example
+  an invoice with many line pages. Each such run ends `DEI-104` at WARN. The server keepalive above
+  keeps the connection from looking idle.
+
 ### Inside your own transaction (joined mode)
 
 When the store joins your transaction (Spring's transaction manager, or a connection you hand

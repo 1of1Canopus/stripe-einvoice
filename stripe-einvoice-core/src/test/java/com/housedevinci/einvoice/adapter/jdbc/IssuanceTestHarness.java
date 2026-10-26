@@ -90,6 +90,43 @@ public final class IssuanceTestHarness {
             JdbcIssuanceStore.DEFAULT_ALLOCATION_TIMEOUT,
             issueClock);
     this.inbound = new JdbcInboundEventStore(JdbcUnitOfWork.ownConnection(dataSource));
+    this.runLock = new JdbcInboundRunLock(JdbcUnitOfWork.ownConnection(dataSource), dataSource);
+  }
+
+  private com.housedevinci.einvoice.application.InboundRunLock runLock;
+
+  /**
+   * Defence in depth only. The units of work built after this call run with no run lock: every run
+   * is granted, and its writes go to the plain store. Used by the tests written before the run lock
+   * (D-PR45-1) that drive two runs of one event at once on purpose, to keep proving the layers
+   * under the lock - the compare-and-set writes (D-PR9-F1), the allocator's one number per invoice
+   * and the PR 43 row lock - which the design keeps on purpose (D-ORPE-6c). Never a production
+   * path: the module wires {@code JdbcInboundRunLock} and nothing else.
+   */
+  public IssuanceTestHarness withoutRunLock() {
+    this.runLock =
+        new com.housedevinci.einvoice.application.InboundRunLock() {
+          @Override
+          public <T> Optional<T> whileHeld(
+              InboundEvent storedRow, java.util.function.Function<HeldRun, T> work) {
+            return Optional.of(work.apply(new HeldRun(inbound, () -> {})));
+          }
+        };
+    return this;
+  }
+
+  /** Enough permits for every race test of this suite; T18 builds its own bound. */
+  private final com.housedevinci.einvoice.application.RunPermits permits =
+      new com.housedevinci.einvoice.application.RunPermits(8);
+
+  /** The run lock every unit of work of this harness takes (D-PR45-1). */
+  public com.housedevinci.einvoice.application.InboundRunLock runLock() {
+    return runLock;
+  }
+
+  /** The permits every unit of work of this harness shares. */
+  public com.housedevinci.einvoice.application.RunPermits permits() {
+    return permits;
   }
 
   /**
@@ -128,6 +165,8 @@ public final class IssuanceTestHarness {
       com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
         store,
         store,
@@ -165,6 +204,8 @@ public final class IssuanceTestHarness {
   public IssuanceUnitOfWork unitOfWorkPinnedTo(String apiVersion) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
         store,
         store,
@@ -187,6 +228,8 @@ public final class IssuanceTestHarness {
       com.housedevinci.einvoice.application.NumberAllocator allocator) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
         allocator,
         store,
@@ -208,6 +251,8 @@ public final class IssuanceTestHarness {
   public IssuanceUnitOfWork unitOfWorkWithSeries(String series) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
         store,
         store,
@@ -230,6 +275,8 @@ public final class IssuanceTestHarness {
       com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
         store,
         store,
@@ -248,11 +295,40 @@ public final class IssuanceTestHarness {
    * A unit of work with a substitute Stripe source and renderer, for a probe that holds one worker
    * inside the fetch or the render while another runs the same event (D-PR9-F1).
    */
+  /**
+   * A unit of work whose inbound store, run lock and permits the test chooses, for the one run per
+   * event paths (D-PR45-1): a spy store, a colliding key, a small permit bound.
+   */
+  public IssuanceUnitOfWork unitOfWorkWithRun(
+      com.housedevinci.einvoice.application.InboundEventStore substituteInbound,
+      com.housedevinci.einvoice.application.InboundRunLock substituteLock,
+      com.housedevinci.einvoice.application.RunPermits substitutePermits,
+      com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
+    return new IssuanceUnitOfWork(
+        substituteInbound,
+        substituteLock,
+        substitutePermits,
+        source,
+        store,
+        store,
+        store,
+        store,
+        substituteRenderer,
+        validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
+        archive,
+        preflightSupport,
+        clock,
+        configurationFor("DEFAULT", pinnedApiVersion));
+  }
+
   public IssuanceUnitOfWork unitOfWorkWithSourceAndRenderer(
       com.housedevinci.einvoice.application.StripeInvoiceSource substituteSource,
       com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         substituteSource,
         store,
         store,
@@ -275,6 +351,8 @@ public final class IssuanceTestHarness {
       com.housedevinci.einvoice.application.ArchiveStore substituteArchive) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
         store,
         store,
@@ -300,6 +378,8 @@ public final class IssuanceTestHarness {
       com.housedevinci.einvoice.application.ArchiveStore substituteArchive) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
         store,
         store,

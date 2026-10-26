@@ -168,6 +168,8 @@ class IssuanceRowLockPathsTest {
     IssuanceUnitOfWork unitOfWork =
         new IssuanceUnitOfWork(
             harness.inbound(),
+            harness.runLock(),
+            harness.permits(),
             harness.source(),
             harness.store(),
             harness.store(),
@@ -193,7 +195,7 @@ class IssuanceRowLockPathsTest {
 
   @Test
   void a_terminated_holder_releases_the_lock_and_leaves_the_d_rtr_4_window() throws Exception {
-    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    IssuanceTestHarness harness = IssuanceTestHarness.create().withoutRunLock();
     harness.source().with(TestInvoices.finalised("in_lk_kill"));
     String finalized = harness.receive("invoice.finalized", "in_lk_kill");
     String paid = harness.receive("invoice.paid", "in_lk_kill");
@@ -248,7 +250,7 @@ class IssuanceRowLockPathsTest {
   void two_slow_writes_on_a_pool_of_two_both_issue() throws Exception {
     DataSource two = PostgresSupport.freshDatabase("pooltwo", 2);
     try {
-      IssuanceTestHarness harness = IssuanceTestHarness.createOn(two);
+      IssuanceTestHarness harness = IssuanceTestHarness.createOn(two).withoutRunLock();
       harness.source().with(TestInvoices.finalised("in_pool_1"));
       harness.source().with(TestInvoices.finalised("in_pool_2"));
       String e1 = harness.receive("invoice.finalized", "in_pool_1");

@@ -69,7 +69,7 @@ class ReopenedRowRaceLatchTest {
   @Test
   void a_second_run_of_the_same_event_during_the_put_is_in_flight_and_never_wins()
       throws Exception {
-    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    IssuanceTestHarness harness = IssuanceTestHarness.create().withoutRunLock();
     AtomicBoolean repaired = new AtomicBoolean(false);
     DocumentRenderer renderer = repairable(harness, repaired);
     String eventId = reopened(harness, renderer, repaired, "in_pr9_latch");
@@ -115,7 +115,7 @@ class ReopenedRowRaceLatchTest {
       throws Exception {
     // The late-write window: B's lock attempt was refused while A held it, and A then concluded
     // COMPLETED before B wrote its answer. B must not write over A's outcome.
-    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    IssuanceTestHarness harness = IssuanceTestHarness.create().withoutRunLock();
     AtomicBoolean repaired = new AtomicBoolean(false);
     DocumentRenderer renderer = repairable(harness, repaired);
     String eventId = reopened(harness, renderer, repaired, "in_pr9_late");

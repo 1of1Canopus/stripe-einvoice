@@ -62,7 +62,8 @@ public class IssuanceTestApp {
       add("in_1");
     }
 
-    public void add(String invoiceId) {
+    // synchronized: a test adds an invoice on its own thread while the worker reads on another.
+    public synchronized void add(String invoiceId) {
       invoices.put(invoiceId, invoice(invoiceId));
     }
 
@@ -71,7 +72,7 @@ public class IssuanceTestApp {
     }
 
     @Override
-    public SourceInvoice fetchInvoice(String invoiceId) {
+    public synchronized SourceInvoice fetchInvoice(String invoiceId) {
       fetches.incrementAndGet();
       SourceInvoice invoice = invoices.get(invoiceId);
       if (invoice == null) {
@@ -83,7 +84,7 @@ public class IssuanceTestApp {
     }
 
     @Override
-    public List<String> finalisedInvoiceIds(Instant from, Instant to) {
+    public synchronized List<String> finalisedInvoiceIds(Instant from, Instant to) {
       return List.copyOf(invoices.keySet());
     }
 

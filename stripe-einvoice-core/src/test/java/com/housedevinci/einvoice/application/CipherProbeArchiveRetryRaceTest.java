@@ -69,7 +69,7 @@ class CipherProbeArchiveRetryRaceTest {
 
   @Test
   void probe_a_concurrent_resume_does_not_burn_a_number_whose_put_is_in_flight() throws Exception {
-    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    IssuanceTestHarness harness = IssuanceTestHarness.create().withoutRunLock();
     harness.source().with(TestInvoices.finalised("in_rtr7"));
     String finalized = harness.receive("invoice.finalized", "in_rtr7");
     String paid = harness.receive("invoice.paid", "in_rtr7");
