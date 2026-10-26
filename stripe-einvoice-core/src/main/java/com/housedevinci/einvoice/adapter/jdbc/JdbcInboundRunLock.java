@@ -14,8 +14,6 @@ import java.util.Optional;
 import java.util.function.Function;
 import java.util.function.ToIntFunction;
 import javax.sql.DataSource;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * The inbound run lock in PostgreSQL (D-PR45-1): a session advisory lock per Stripe invoice, built
@@ -25,24 +23,18 @@ import org.slf4j.LoggerFactory;
  * stored row's object id. No mode and nothing from the instance's settings (D-ORPE-5). The token
  * lives in its own session setting, {@code einvoice.run_lock}, never the row lock's (D-ORPE-7c).
  *
- * <p>Two connection paths:
+ * <p>One connection path: <b>own connection</b> (the worker, the sweeper, a host call outside a
+ * transaction). R5's session check runs first, with no connection held, so a transaction pooler is
+ * refused with {@code DEI-104} before anything is written. Every held write is its own transaction
+ * on the holder's connection, proof first. A release that fails ends the session and aborts the
+ * connection, so a pooled connection never carries a lock.
  *
- * <ul>
- *   <li><b>Own connection</b> (the worker, the sweeper, a host call outside a transaction). R5's
- *       session check runs first, with no connection held, so a transaction pooler is refused with
- *       {@code DEI-104} before anything is written. Every held write is its own transaction on the
- *       holder's connection, proof first. A release that fails ends the session and aborts the
- *       connection, so a pooled connection never carries a lock.
- *   <li><b>Joined</b> (a host transaction on this thread). The TRY, every held write with its
- *       proof, and the release run in the caller's one transaction, which any pooler keeps on one
- *       server connection. The caller's connection is never closed; a release that fails is logged
- *       at ERROR and the lock stays until that session ends, exactly as the row lock does in joined
- *       mode.
- * </ul>
+ * <p><b>Never joined</b> (D-PR49-1, QUESTIONS 50). A run on a thread with a caller's transaction is
+ * refused with {@link ErrorCodes#RUN_IN_HOST_TRANSACTION} before the lock is tried. A joined run
+ * whose write failed would abort the caller's transaction before its release, so the lock would
+ * stay on the caller's pooled connection and the invoice would answer "busy" with no run live.
  */
 public final class JdbcInboundRunLock implements InboundRunLock {
-
-  private static final Logger log = LoggerFactory.getLogger(JdbcInboundRunLock.class);
 
   private final JdbcUnitOfWork unitOfWork;
   private final DataSource dataSource;
@@ -117,7 +109,14 @@ public final class JdbcInboundRunLock implements InboundRunLock {
     return unitOfWork.onOneConnection(
         (connection, bound, joined) -> {
           if (joined) {
-            return Optional.of(heldJoined(connection, bound, lock, eventId, work));
+            // D-PR49-1: refused before the TRY, so nothing is locked, read or written, and the
+            // caller's transaction sees no statement of ours.
+            throw new EInvoiceException(
+                ErrorCodes.RUN_IN_HOST_TRANSACTION,
+                "inbound event "
+                    + eventId
+                    + " was not run: a run never joins a caller's transaction; call it outside"
+                    + " one");
           }
           if (!JdbcIssuanceStore.sessionPinned(dataSource)) {
             return Optional.empty();
@@ -180,44 +179,6 @@ public final class JdbcInboundRunLock implements InboundRunLock {
     }
   }
 
-  private <T> Optional<T> heldJoined(
-      Connection connection,
-      JdbcUnitOfWork bound,
-      IssuanceRowLocks.SessionLock lock,
-      String eventId,
-      Function<HeldRun, T> work)
-      throws SQLException {
-    IssuanceRowLocks.refuseAutosaveAlways(connection);
-    Optional<String> token = IssuanceRowLocks.tryLock(connection, lock, true);
-    if (token.isEmpty()) {
-      return Optional.empty();
-    }
-    JdbcUnitOfWork proving = new ProvingJoinedUnitOfWork(bound, lock, token.get(), eventId);
-    Proof proof =
-        () -> {
-          boolean holds;
-          try {
-            holds = IssuanceRowLocks.prove(connection, lock, token.get());
-          } catch (SQLException | RuntimeException e) {
-            holds = false;
-          }
-          if (!holds) {
-            throw lost(eventId);
-          }
-        };
-    try {
-      return Optional.of(work.apply(new HeldRun(JdbcInboundEventStore.heldBy(proving), proof)));
-    } finally {
-      if (!IssuanceRowLocks.unlock(connection, lock, token.get(), true)) {
-        log.error(
-            "einvoice: the run lock of event {} could not be released inside the caller's"
-                + " transaction ({}); it stays until this database session ends",
-            eventId,
-            ErrorCodes.ROW_LOCK_RELEASE_FAILED);
-      }
-    }
-  }
-
   /**
    * D-ORPE-2: a failure out of the run whose session no longer holds the lock is a lost lock. A
    * killed session first fails the next statement on its connection as an outage ({@code DEI-102});
@@ -258,53 +219,5 @@ public final class JdbcInboundRunLock implements InboundRunLock {
             + eventId
             + " is no longer held by this run on its database session; this run writes nothing"
             + " more");
-  }
-
-  /**
-   * The caller's unit of work, with the run lock proved as the first statement of every unit: the
-   * proof and the write share the caller's one transaction, so they share one server connection.
-   */
-  private static final class ProvingJoinedUnitOfWork implements JdbcUnitOfWork {
-    private final JdbcUnitOfWork bound;
-    private final IssuanceRowLocks.SessionLock lock;
-    private final String token;
-    private final String eventId;
-
-    ProvingJoinedUnitOfWork(
-        JdbcUnitOfWork bound, IssuanceRowLocks.SessionLock lock, String token, String eventId) {
-      this.bound = bound;
-      this.lock = lock;
-      this.token = token;
-      this.eventId = eventId;
-    }
-
-    private <T> SqlWork<T> proved(SqlWork<T> work) {
-      return unit -> {
-        if (!IssuanceRowLocks.prove(unit.plumbing(), lock, token)) {
-          throw lost(eventId);
-        }
-        return work.run(unit);
-      };
-    }
-
-    @Override
-    public <T> T inTransaction(SqlWork<T> work) {
-      return bound.inTransaction(proved(work));
-    }
-
-    @Override
-    public <T> T inReadUnit(SqlWork<T> work) {
-      return bound.inReadUnit(proved(work));
-    }
-
-    @Override
-    public <T> T onOneConnection(SessionWork<T> work) {
-      return bound.onOneConnection(work);
-    }
-
-    @Override
-    public Participation participation() {
-      return bound.participation();
-    }
   }
 }

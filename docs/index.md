@@ -218,6 +218,9 @@ cause. So the remedy is this explicit, privileged call, for one event at a time.
   are in use: it runs on your thread, so it never waits. It then takes the invoice's run lock
   **before** the re-open. While another run of the same invoice is live it answers
   `REFUSED_RUN_IN_PROGRESS` (`DEI-217`) and records nothing; call again later.
+- Call it **outside a transaction**. Inside one (a `@Transactional` method, a `TransactionTemplate`,
+  a connection you hand over) it is refused with `DEI-218 RUN_IN_HOST_TRANSACTION` before the run
+  lock is tried, and records nothing. A run never joins a caller's transaction.
 - `actor` and `reason` are mandatory, screened and **refused rather than shortened** if they are
   over their bound (64 and 500 characters). They are never concatenated: the record holds them as
   two columns.

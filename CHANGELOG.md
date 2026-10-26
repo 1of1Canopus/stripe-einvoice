@@ -17,10 +17,16 @@ All notable changes to this project are documented here. The format follows
   number and before it announces an archive write. The retention purge skips a row whose run is
   live. `IssuanceReprocess` takes the lock before it re-opens a row and gains the disposition
   `REFUSED_RUN_IN_PROGRESS`. See "One run per invoice" in the README.
+- **A run never joins a caller's transaction (D-PR49-1).** `IssuanceReprocess` and
+  `IssuanceUnitOfWork.process` called inside a transaction are refused with the new code
+  `DEI-218 RUN_IN_HOST_TRANSACTION` before the run lock is tried, and record nothing. A failed
+  joined run would have left its run lock on the caller's pooled connection, so the invoice
+  answered `DEI-217` with no run live until the pool retired that connection.
 - **Run permits and the pool rule (D-ORPE-4).** `RunPermits`, one per application, of
   `einvoice.issuance.concurrency`, shared by the worker (which waits) and `IssuanceReprocess`
   (which refuses at once with `DEI-102`). The starter refuses at startup (`DEI-100`) a Hikari pool
-  smaller than `3 x concurrency + 2`, unwrapping a proxied pool first.
+  smaller than `3 x concurrency + 2`, unwrapping a proxied pool first. The rule runs in every
+  started context with a unit of work, the starter's or one the host builds (D-PR49-2).
 - **Reserved error codes (D-ORPE-8).** `ReservedErrorCodes` lists the codes approved plans already
   gave a meaning (`DEI-214` to `DEI-216`); a test fails the build when a code in `ErrorCodes` repeats
   a value or takes a reserved code under another name.

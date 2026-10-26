@@ -194,6 +194,12 @@ on the invoice (the first four bytes of SHA-256 of the Stripe object id; the ses
   is still running, or `invoice.paid` arriving while `invoice.finalized` runs) writes nothing and
   answers the stored state with `DEI-217`, logged at DEBUG. The sweeper picks the row again later.
   `IssuanceReprocess` answers `REFUSED_RUN_IN_PROGRESS` and records nothing.
+- **A run never joins your transaction: `DEI-218`.** Call `IssuanceReprocess` (and
+  `IssuanceUnitOfWork.process`) outside a transaction. Inside one, for example from a
+  `@Transactional` admin action, the call is refused with `DEI-218 RUN_IN_HOST_TRANSACTION` before
+  the run lock is tried: nothing is locked, read or recorded, and your transaction is untouched. A
+  run fetches from Stripe, renders and archives, so it would hold your transaction open for minutes,
+  and a failed write would leave its run lock on your pooled connection.
 - **A lost lock is `DEI-104`, at WARN.** If the server or the network ends the run's session
   mid-run, the run's next write refuses, the run writes nothing more, and one WARN names the event.
   The connection is closed, not pooled.

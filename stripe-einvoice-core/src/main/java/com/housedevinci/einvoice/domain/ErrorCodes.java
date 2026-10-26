@@ -233,6 +233,17 @@ public final class ErrorCodes {
    */
   public static final String INBOUND_RUN_IN_PROGRESS = "DEI-217";
 
+  /**
+   * A run was started inside a caller's transaction (D-PR49-1), and a run never joins one. It
+   * fetches from Stripe, renders and archives, so it would hold that transaction open for minutes;
+   * its writes would show only at the caller's commit, after its run lock was released; and a
+   * failed write would abort the caller's transaction before the lock could be released, leaving
+   * the lock on a pooled connection. Refused before the lock is tried: nothing was locked, read or
+   * written, and the caller's transaction is untouched. Call {@code IssuanceReprocess} and {@code
+   * IssuanceUnitOfWork.process} outside a transaction.
+   */
+  public static final String RUN_IN_HOST_TRANSACTION = "DEI-218";
+
   /** Our recomputation of a total or of a tax bucket disagrees with Stripe's own (D-12). */
   public static final String TOTALS_MISMATCH = "DEI-220";
 

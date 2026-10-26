@@ -55,6 +55,18 @@ class ErrorCodesUniquenessTest {
   void error_codes_are_unique_across_the_free_and_pro_tables() {
     assertThat(violations(freeCodes(), ReservedErrorCodes.RESERVED)).isEmpty();
     assertThat(freeCodes()).containsEntry("INBOUND_RUN_IN_PROGRESS", "DEI-217");
+    assertThat(freeCodes()).containsEntry("RUN_IN_HOST_TRANSACTION", "DEI-218");
+  }
+
+  /** D-PR49-1: the joined-run refusal's code cannot be taken by another name. */
+  @Test
+  void the_joined_run_refusal_code_is_reserved_under_its_own_name() {
+    Map<String, String> mistaken = new HashMap<>(freeCodes());
+    mistaken.put("SOME_LATER_CODE", "DEI-218");
+
+    assertThat(ReservedErrorCodes.RESERVED).containsEntry("DEI-218", "RUN_IN_HOST_TRANSACTION");
+    assertThat(violations(mistaken, ReservedErrorCodes.RESERVED))
+        .contains("DEI-218 is reserved for RUN_IN_HOST_TRANSACTION and taken by SOME_LATER_CODE");
   }
 
   /** D-ORPE-8: the original mistake, a free DEI-214 for the busy answer, is caught. */

@@ -19,7 +19,10 @@ public final class ReservedErrorCodes {
       Map.of(
           "DEI-214", "EVENT_AWAITING_KIND",
           "DEI-215", "OPERATOR_CLOSED",
-          "DEI-216", "RELEASE_REQUIRED");
+          "DEI-216", "RELEASE_REQUIRED",
+          // D-PR49-1, decided on QUESTIONS 50: reserved here too, so a branch cut before this
+          // constant existed cannot give DEI-218 a second meaning without T15 failing.
+          "DEI-218", "RUN_IN_HOST_TRANSACTION");
 
   private ReservedErrorCodes() {}
 }
