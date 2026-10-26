@@ -129,7 +129,7 @@ re-picked automatically, because neither is cured by an upgrade.
 | A sale with no document is noticed | A reconciliation sweep lists what Stripe finalised and re-enqueues anything with no issued document **and no recorded reason for it**, through the same idempotent path. A number that was burned or voided already has its reason, chained: it is reported under its own code and never re-enqueued. The sweep alerts and never repairs |
 | A redelivery returns the stored document | After checking the archived bytes against the recorded hash. A tampered archive is refused; a legitimate upstream edit is not |
 | Back-pressure costs latency, never an event | A bounded queue and a concurrency limit below your connection pool; past capacity the event stays `RECEIVED` and the sweeper takes it |
-| Buyer data has a retention | The raw signed bodies are nulled the moment an event can no longer run, and purged at `einvoice.inbound.retention`. One exception: the row of an invoice whose number is still open (neither issued nor voided) is kept until the number resolves, because the reprocess needs it to resume that number |
+| Buyer data has a retention | The raw signed bodies are nulled the moment an event can no longer run, and purged at `einvoice.inbound.retention`. One exception: the row of an invoice whose number is still open (numbered, archiving or failed archive) is kept until the number resolves, because the reprocess needs it to resume that number |
 
 ### Issuance states
 

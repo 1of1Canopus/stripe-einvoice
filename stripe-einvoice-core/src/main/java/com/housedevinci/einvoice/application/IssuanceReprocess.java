@@ -43,21 +43,17 @@ public final class IssuanceReprocess {
   public static final InboundState ELIGIBLE = InboundState.FAILED_MAPPING;
 
   /**
-   * The one other start (design 5.2): an allocation stopped by {@code DEI-132} because the clock
-   * was behind by more than a day. The operator fixes the clock, then re-runs the event; the re-run
-   * goes through the same refusal, so a clock that is still wrong is refused again. Never an
-   * "accept" release, and no other {@code FAILED_ISSUANCE} code qualifies.
-   */
-  public static final String ELIGIBLE_ISSUANCE_CODE = ErrorCodes.ISSUE_CLOCK_BEHIND_SERIES;
-
-  /**
-   * True for the two terminals a reprocess may start from when the invoice holds no number. These
-   * rows are re-opened to {@code RECEIVED}.
+   * True for the two terminals a reprocess may start from when the invoice holds no number: {@code
+   * FAILED_MAPPING}, and {@code FAILED_ISSUANCE} with any code (D-PR50-2). These rows are re-opened
+   * to {@code RECEIVED}, and the re-run goes through every refusal again, so a cause that is still
+   * there (a clock still behind, {@code DEI-132}) is refused again. Any code is safe because the
+   * re-open statement refuses, in itself, a row whose invoice holds a number anywhere. Example: the
+   * allocator refused {@code in_9} with {@code DEI-132}; at the retry Stripe was down, so the row
+   * became {@code FAILED_ISSUANCE DEI-211} and passed the 72-hour ceiling; once the clock is fixed
+   * the reprocess runs it.
    */
   public static boolean eligible(InboundEvent event) {
-    return event.state() == ELIGIBLE
-        || (event.state() == InboundState.FAILED_ISSUANCE
-            && ELIGIBLE_ISSUANCE_CODE.equals(event.lastCode()));
+    return event.state() == ELIGIBLE || event.state() == InboundState.FAILED_ISSUANCE;
   }
 
   /**
@@ -162,7 +158,7 @@ public final class IssuanceReprocess {
     // an issued one nothing to finish. Those rows are refused, as before.
     Set<IssuanceState> states = reader.issuanceStates(event.objectId());
     boolean numbered = !states.isEmpty();
-    boolean inPlace = eligibleNumbered(event) && states.stream().anyMatch(s -> classifyOpen(s));
+    boolean inPlace = eligibleNumbered(event) && states.stream().anyMatch(IssuanceState::open);
 
     if (!inPlace && numbered && eligible(event)) {
       // The number is issued, burned or voided: nothing to resume, and a re-open to RECEIVED
@@ -335,14 +331,6 @@ public final class IssuanceReprocess {
           event.eventId(),
           ledgerFailure);
     }
-  }
-
-  /** An open number: allocated, not yet issued, and not disposed. */
-  private static boolean classifyOpen(IssuanceState state) {
-    return switch (state) {
-      case NUMBERED, ARCHIVING, FAILED_ARCHIVE -> true;
-      case ISSUED, FAILED_VALIDATION, VOID_UNUSED -> false;
-    };
   }
 
   private static Result refused(

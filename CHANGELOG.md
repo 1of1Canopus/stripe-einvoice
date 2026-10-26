@@ -104,8 +104,13 @@ All notable changes to this project are documented here. The format follows
   number. New port method `ReprocessLedger.reopenInPlaceAndRecord`. The re-open to `RECEIVED`
   refuses a numbered row in its own statement; `REFUSED_NUMBERED` now means a number appeared
   between the read and that statement.
+- **The reprocess accepts `FAILED_ISSUANCE` with any code when the invoice holds no number
+  (D-PR50-2).** A row the allocator refused before the claim, or a `MAPPED` row that crashed
+  before it, can be mapped to `FAILED_ISSUANCE` by a later outage and pass the retry ceiling with
+  no number; it now has an operator path. The re-open to `RECEIVED` keeps its no-number guard.
+  `IssuanceReprocess.ELIGIBLE_ISSUANCE_CODE` (unreleased) is removed.
 - **The retention purge keeps a row whose number is open (D-SRE-7).** A row whose invoice holds a
-  number that is neither issued nor voided outlives `einvoice.inbound.retention`, so the reprocess
+  open number (numbered, archiving or failed archive) outlives `einvoice.inbound.retention`, so the reprocess
   can still resume that number; it leaves at the first purge after the number resolves.
 
 - **BREAKING CHANGE: `InboundEventStore.stampAttempt` (D-PR45-1).** A new abstract method on the

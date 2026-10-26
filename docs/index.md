@@ -206,12 +206,13 @@ cause. So the remedy is this explicit, privileged call, for one event at a time.
 - **Privileged, and with no HTTP endpoint and no actuator operation anywhere in this module**, for
   the same reason the void has none. Call it from your own admin action, behind your own
   authorization.
-- Eligible from `FAILED_MAPPING`, and from `FAILED_ISSUANCE` with `DEI-132`, when the invoice holds
-  no number: the row is re-opened to `RECEIVED`. Every other state, including a passed event and a
+- Eligible from `FAILED_MAPPING`, and from `FAILED_ISSUANCE` with any code, when the invoice holds
+  no number: the row is re-opened to `RECEIVED`, and the run goes through every refusal again. The
+  re-open statement itself refuses a row whose invoice holds a number anywhere. Every other state, including a passed event and a
   second call after a successful reprocess, is answered `REFUSED_NOT_ELIGIBLE` with the recorded
   state and number, and nothing runs.
-- **A numbered row is resumed in place.** When the invoice already holds a number (asked by invoice
-  id, under any seller and mode), a `FAILED_ISSUANCE` row with any code, or a `FAILED_MAPPING` row,
+- **A numbered row is resumed in place.** When the invoice already holds an open number (numbered,
+  archiving or failed archive; asked by invoice id, under any seller and mode), a `FAILED_ISSUANCE` row with any code, or a `FAILED_MAPPING` row,
   is re-opened in place: it stays (or becomes) `FAILED_ISSUANCE` with its code kept, never
   `RECEIVED`. The run then resumes **the same number**. It is not filtered by the retry ceiling,
   so a row past it is resumed too. Example: the archive was down for four days and the row holding
@@ -407,7 +408,7 @@ Two signals, and the difference matters:
 | `einvoice.issuance.concurrency` / `.queue-capacity` | `2` / `1000` | - ; the pool must hold `3 x concurrency + 2` connections, refused at startup otherwise |
 | `einvoice.issuance.retry-ceiling` | `72h` | - |
 | `einvoice.issuance.alert-after` | `6h` | - |
-| `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision. A row whose invoice holds an open number (neither issued nor voided) is kept past it until the number resolves |
+| `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision. A row whose invoice holds an open number (numbered, archiving or failed archive) is kept past it until the number resolves |
 | `einvoice.reconcile.interval` / `.window` / `.grace` | `15m` / `2d` / `15m` | `enabled=false` removes the only watcher there is |
 | `einvoice.reconcile.drift-sample` | `10` | `0` stops re-hashing archived documents |
 | `einvoice.numbering.closed-year-cutoff` | unset | setting it refuses invoices whose supply date falls in a year closed longer ago than this |

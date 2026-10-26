@@ -241,10 +241,11 @@ class VoidTerminalDispositionTest {
                 new ReprocessRequest(
                     burned.firstEventId(), "operator-1", "data was corrected upstream"));
 
-    // Two gates refuse this, and the outer one answers first: the event is not in the eligible
-    // set. The numbered gate behind it is asserted by its own test in the reprocess suite. What
-    // matters here is that no reprocess of a voided invoice runs the pipeline or takes a number.
-    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REFUSED_NOT_ELIGIBLE);
+    // Since D-PR50-2 a FAILED_ISSUANCE row passes the state gate with any code, so the numbered
+    // gate answers: a voided number has nothing to resume. What matters here is unchanged: no
+    // reprocess of a voided invoice runs the pipeline, records a request or takes a number.
+    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REFUSED_NUMBERED);
+    assertThat(burned.harness().reprocessRecords(burned.firstEventId())).isEmpty();
     assertThat(result.disposition()).isNotEqualTo(IssuanceReprocess.Disposition.REPROCESSED);
     assertThat(burned.harness().numberedRows()).isEqualTo(1);
     assertThat(burned.harness().issuance("in_void_reprocess").orElseThrow().state())

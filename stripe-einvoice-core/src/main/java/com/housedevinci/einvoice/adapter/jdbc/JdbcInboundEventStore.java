@@ -85,19 +85,21 @@ public final class JdbcInboundEventStore implements InboundEventStore {
           + " updated_at = ? WHERE event_id = ? AND state = ?";
 
   /**
-   * D-SRE-7: a row whose invoice holds a number that is neither issued nor voided outlives
-   * retention. The reprocess needs the row to resume the number; the stuck check keeps naming it.
-   * Any seller and mode, like every "does this row hold a number" question (D-SRE-6). Repeated in
-   * the {@code DELETE}, so a number allocated between the candidate read and the delete still keeps
-   * its row.
+   * D-SRE-7: a row whose invoice holds an open number (numbered, archiving or failed archive: the
+   * states whose {@code IssuanceState.open()} is true) outlives retention. A burned, voided or
+   * issued number has nothing to resume, so its row leaves at retention like any other (D-PR50-1).
+   * The reprocess needs the row to resume the number; the stuck check keeps naming it. Any seller
+   * and mode, like every "does this row hold a number" question (D-SRE-6). Repeated in the {@code
+   * DELETE}, so a number allocated between the candidate read and the delete still keeps its row.
    */
   static final String OPEN_NUMBER_KEEPS_ROW =
       " AND NOT EXISTS (SELECT 1 FROM einvoice_issuance i WHERE i.stripe_invoice_id = e.object_id"
-          + " AND i.state NOT IN ('"
-          + IssuanceState.ISSUED.name()
-          + "','"
-          + IssuanceState.VOID_UNUSED.name()
-          + "'))";
+          + " AND i.state IN ("
+          + java.util.Arrays.stream(IssuanceState.values())
+              .filter(IssuanceState::open)
+              .map(state -> "'" + state.name() + "'")
+              .collect(java.util.stream.Collectors.joining(","))
+          + "))";
 
   /**
    * D-SRE-3: the re-arm of rows stopped on a refused key, scoped to one mode and account, and only
@@ -150,13 +152,11 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   static final String REOPEN_FOR_REPROCESS =
       "UPDATE einvoice_inbound_event SET state = 'RECEIVED', last_code = ?, updated_at = ?,"
           + " attempts = 0, next_attempt_at = NULL"
-          + " WHERE event_id = ? AND (state = '"
+          + " WHERE event_id = ? AND state IN ('"
           + InboundState.FAILED_MAPPING.name()
-          + "' OR (state = '"
+          + "','"
           + InboundState.FAILED_ISSUANCE.name()
-          + "' AND last_code = '"
-          + com.housedevinci.einvoice.application.IssuanceReprocess.ELIGIBLE_ISSUANCE_CODE
-          + "'))"
+          + "')"
           // D-SRE-6: a row whose invoice holds a number, under any seller and mode, is never
           // re-opened to RECEIVED, the state that never holds one. Checked in the statement, so
           // the decision and the write cannot come apart.

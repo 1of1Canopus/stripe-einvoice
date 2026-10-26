@@ -233,4 +233,30 @@ class NumberedRowResumeTest {
     assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REFUSED_NOT_ELIGIBLE);
     assertThat(RetryEdgeFixture.row(harness, eventId).state()).isEqualTo(InboundState.FETCHED);
   }
+
+  /**
+   * D-PR50-2. A MAPPED row that crashed before the claim holds no number. An outage maps it to
+   * FAILED_ISSUANCE; past the retry ceiling only the reprocess can run it, and it does.
+   */
+  @Test
+  void an_unnumbered_mapped_row_mapped_by_an_outage_is_reprocessed_to_completed() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    harness.source().with(TestInvoices.finalised("in_pr50_unnumbered_mapped"));
+    String eventId = harness.receive("invoice.finalized", "in_pr50_unnumbered_mapped");
+    RetryEdgeFixture.moveTo(harness, eventId, InboundState.MAPPED);
+    harness
+        .source()
+        .breakWith(new EInvoiceException(ErrorCodes.STRIPE_UNAVAILABLE, "stripe is down"));
+    assertThat(harness.unitOfWork().process(eventId).state())
+        .isEqualTo(InboundState.FAILED_ISSUANCE);
+    harness.source().heal();
+    harness.moveClockForward(Duration.ofDays(4));
+    assertThat(harness.issuance("in_pr50_unnumbered_mapped")).isEmpty();
+
+    IssuanceReprocess.Result result = harness.reprocess().reprocess(request(eventId));
+
+    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REPROCESSED);
+    assertThat(result.state()).isEqualTo(InboundState.COMPLETED);
+    assertThat(result.legalNumber()).isNotNull();
+  }
 }

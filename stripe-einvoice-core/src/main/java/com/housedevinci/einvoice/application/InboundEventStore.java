@@ -121,8 +121,9 @@ public interface InboundEventStore {
 
   /**
    * Rows older than the retention ceiling, any state (I-07), except a row whose Stripe invoice
-   * holds a number that is neither issued nor voided (D-SRE-7): the reprocess needs that row to
-   * resume the number, so it stays until the number resolves and leaves at the next purge after.
+   * holds an open number, numbered, archiving or failed archive (D-SRE-7, D-PR50-1): the reprocess
+   * needs that row to resume the number, so it stays until the number resolves and leaves at the
+   * next purge after.
    */
   int purgeOlderThan(Instant cutoff, int limit);
 
