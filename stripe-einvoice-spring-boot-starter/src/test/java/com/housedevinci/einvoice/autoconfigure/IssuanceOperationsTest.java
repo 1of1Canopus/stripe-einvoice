@@ -53,6 +53,16 @@ class IssuanceOperationsTest {
         .withPropertyValues(properties);
   }
 
+  /**
+   * One Stripe invoice per test event. The shared test database keeps due rows from other test
+   * classes, and the sweeper submits every due row. Under one run per invoice, a test event for an
+   * invoice another row is running at that moment answers busy ({@code DEI-217}) and stays where it
+   * is until the next sweep, so a shared invoice id made these tests depend on test order.
+   */
+  private static String invoiceOf(String eventId) {
+    return "in_" + eventId.substring("evt_".length());
+  }
+
   @Test
   void the_sweeper_runs_its_three_jobs_and_records_when_each_last_completed() {
     runner()
@@ -65,7 +75,12 @@ class IssuanceOperationsTest {
               inbound.record(
                   InboundEvent.received(
                       new EventIdentity(
-                          eventId, "invoice.finalized", "2026-08-26.dahlia", true, "", "in_1"),
+                          eventId,
+                          "invoice.finalized",
+                          "2026-08-26.dahlia",
+                          true,
+                          "",
+                          invoiceOf(eventId)),
                       Mode.LIVE,
                       "primary",
                       body,
@@ -103,14 +118,16 @@ class IssuanceOperationsTest {
             context -> {
               InboundEventStore inbound = context.getBean(InboundEventStore.class);
               String eventId = "evt_" + UUID.randomUUID().toString().replace("-", "");
-              // Its own invoice: the purge keeps the row of an open number under any seller
-              // (D-SRE-7), and "in_1" holds open numbers of other tests in this database.
-              String objectId = "in_purge_" + eventId;
               byte[] body = ("{\"id\":\"" + eventId + "\"}").getBytes(StandardCharsets.UTF_8);
               inbound.record(
                   InboundEvent.received(
                       new EventIdentity(
-                          eventId, "invoice.finalized", "2026-08-26.dahlia", true, "", objectId),
+                          eventId,
+                          "invoice.finalized",
+                          "2026-08-26.dahlia",
+                          true,
+                          "",
+                          invoiceOf(eventId)),
                       Mode.LIVE,
                       "primary",
                       body,
@@ -341,7 +358,12 @@ class IssuanceOperationsTest {
               inbound.record(
                   InboundEvent.received(
                       new EventIdentity(
-                          eventId, "invoice.finalized", "2026-08-26.dahlia", true, "", "in_1"),
+                          eventId,
+                          "invoice.finalized",
+                          "2026-08-26.dahlia",
+                          true,
+                          "",
+                          invoiceOf(eventId)),
                       Mode.LIVE,
                       "primary",
                       body,
