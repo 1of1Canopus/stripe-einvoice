@@ -178,3 +178,112 @@ ruling accepted for F-4. Add the probe, and one boundary test at exactly the par
 
 The fixer adds `CipherProbePr46Test` to the core test tree first, shows the three probes RED, then
 fixes. Pass 2 confirms each probe green and attacks the merge of pull request 45 and the run lock.
+
+## 2026-10-27 - pass 2
+
+Head `98fbc16`, with `main` `7f08181` merged in at `de50879`. `main` is now `f581849` (pull
+request 51). Pass 2 of 2, the last one.
+
+### Verdict
+
+**MERGE** - no open finding. D-PR46-1, D-PR46-2 and D-Q29-3 are closed. No new finding.
+
+One step before the merge, and it is a sequencing step, not a fix: merge `main` (`f581849` or
+later) into the branch once more. Two reasons. The branch's one skipped test is `main`'s old
+disabled probe (`CipherProbePr50Test`, the stuck check), which pull request 51 switched on. And
+`main` must run its own guard probe and edge table with `EXPIRED` in them. The trial merge is
+textually clean (merge tree `c367033`). On the trial merge, with the pass 2 probes added, the full
+build is green and nothing is skipped (numbers below). The verifier confirms the same numbers on
+the real merge commit. No further security pass is needed for that merge.
+
+| Severity | Count | Ids |
+|---|---|---|
+| HIGH | 0 | - |
+| MEDIUM | 0 | - |
+| LOW | 0 open | D-PR46-1, D-PR46-2, D-Q29-3 closed |
+| INFO | 0 open | D-PR46-F1 accepted (QUESTIONS 59) |
+
+### Numbers
+
+| What | Result |
+|---|---|
+| `./mvnw -B verify`, `CIPHER_PROBE_MAVEN=1`, Docker up, on `98fbc16` | SUCCESS, core 1001 / starter 161 / sample 9, 0 failures, 0 errors, 1 skipped (`CipherProbePr50Test`, `main`'s disabled stuck-check probe) |
+| Same, on the trial merge of `f581849` plus the pass 2 probes | SUCCESS, core 1020 / starter 161 / sample 9, 0 failures, 0 errors, 0 skipped |
+| Mutation 1: the expiry without the run-key try | 3 RED: T22, both `CipherProbePr46Test` live-run probes. Restored |
+| Mutation 2: `eligibleNumbered` without `EXPIRED` | 4 RED: both QUESTIONS 48 tests and two pass 2 probes. Restored |
+| Pass 1 probe file, as written, on `de50879` | D-PR46-1 and D-Q29-3 green; D-PR46-2 RED (closed by `014bc54`) |
+| Pass 1 probe file, as written, on `98fbc16` | D-PR46-2 and D-Q29-3 green; D-PR46-1 outcome line RED by design (QUESTIONS 59) |
+| New probes, `CipherProbePr46Pass2Test` | 4 run, 4 green; they stay as regressions |
+
+### Re-verification of the pass 1 findings
+
+* **D-PR46-1 - closed.** The original probe is green on the merge of `main` (`de50879`), before
+  the run-lock fix. The run's compare-and-set answers from the stored `EXPIRED` row, and no
+  `DEI-210` escapes. On `98fbc16` the case can no longer happen: the expiry skips a live run
+  (design row 16), and a run whose lock is lost stops at its proof with `DEI-104` before any write
+  (probe (a) below). The escape assertion stays in the probe.
+* **D-PR46-2 - closed.** `JdbcInboundEventStore.expire` tries `pg_try_advisory_xact_lock` on the
+  run key, in the same transaction as `EXPIRE`, and skips a held row with nothing written and
+  nothing recorded. `probe_an_expiry_after_the_claim_expires_an_issuing_row` and T22 are green.
+  Mutation 1 turns them RED. The purge and the expiry share one helper, `tryRunKey`; it never
+  waits, so the sweeper thread cannot block behind a run and no lock order exists.
+* **D-Q29-3 - closed.** `probe_a_parked_row_that_meets_one_stripe_error_is_silent` green.
+
+### Rulings on the questions
+
+* **QUESTIONS 59 (a) - accepted.** The probe line that asserted "the expiry lands inside a live
+  run before the claim" stated the old behaviour, not the property. The property was "no
+  `DEI-210` escapes out of `process`". That line is unchanged and green. The new outcome lines (0
+  expired, row `COMPLETED`) are stricter and match design row 16. Mutation 1 turns the changed
+  probe RED, so it still has teeth. The original was checked green on `de50879` (above). Row
+  D-PR46-F1 closes as accepted.
+* **QUESTIONS 59 (b) - accepted.** `process` answers an `EXPIRED` row from storage and runs
+  nothing (`RunningLimitPathsTest`, line 159), so it is not a cell of the guard. The edge table
+  holds `EXPIRED` as concluded. Both tests enumerate `InboundState.values()`, so a new state still
+  fails them.
+* **QUESTIONS 60 - accepted.** The pass 1 condition on QUESTIONS 48 is met: `EXPIRED` with a
+  number has a resume path and tests. Pass 2 checked it under concurrency and against closed
+  numbers (below).
+
+### New attacks on the fix pass
+
+(a) **The holder of the run lock dies mid-run, and the expiry arrives** (lost lock, `DEI-104`).
+Example. A run claims `INV-2026-000001` and stops in the render. The server ends its session. 73
+hours later the sweep finds the `MAPPED` row. The lock is free, so the run is not live, and the row
+expires with `DEI-282`. The old run wakes up: `DEI-104`, it writes nothing, the row stays `EXPIRED`,
+the archive is empty. The operator's reprocess then resumes `INV-2026-000001` and writes
+`COMPLETED`. One number, the counter unchanged, one document. Held.
+Test: `an_expiry_after_the_holder_lost_its_lock_leaves_one_resumable_number`.
+
+(d) **QUESTIONS 48 under concurrency.** One invoice holds an open number. Two `EXPIRED` rows point
+at it: its own `MAPPED` row, and an `invoice.paid` row that expired from `RECEIVED` without running.
+Six operator calls at once (three per row) plus a worker submission of each row. Result: exactly
+one number, the counter unchanged, the issuance `ISSUED` with the same number, one document. The
+row that wins ends `COMPLETED`. The other row is then refused as numbered, with the issued number,
+and keeps its finding: the invoice is issued, so there is nothing to finish (D-SRE-2). The harm
+pass 1 feared from a false "stuck" report, a void of an issued number, is refused by the store.
+Held. Test: `concurrent_reprocesses_of_numbered_expired_rows_never_claim_a_second_number`.
+
+(d) **A burned or voided number.** A burned number (`FAILED_VALIDATION`), then the same number
+voided (`VOID_UNUSED`). Three `EXPIRED` rows of that invoice: its own and two other events. Every
+reprocess answers `REFUSED_NUMBERED`, re-opens nothing, records nothing, and allocates nothing.
+Held. This edge had no test on `98fbc16` (the old refusal test became the resume test); the probe
+adds it. Test: `an_expired_row_of_a_burned_or_voided_number_is_refused_and_allocates_nothing`.
+
+(e) **Every edge into and out of `EXPIRED`.** A row in each of the fourteen states, aged 91 days.
+Each row that carries a clock is offered to the expiry by a direct store call, with the row as
+read, and then the sweep runs. Only `RECEIVED`, `FETCHED`, `MAPPED` and
+`PARKED` move; the refused states, `FAILED_FETCH` and every terminal are untouched. A sweep after
+that expires nothing more. No store transition leaves `EXPIRED`: every target is refused. The exits
+are the reprocess only, and each has a test: unnumbered to `RECEIVED`
+(`RunningLimitPathsTest`), open number in place (`NumberedRowResumeTest`, `RunningLimitPathsTest`,
+probe (d)), closed number refused (probe (d)), a live run refused (`OneRunPerEventTest`, row 17).
+`mayHoldNumber(EXPIRED)` answers `true`, the safe side; a run never routes from `EXPIRED`.
+Held. Test: `only_the_four_running_states_expire_and_no_transition_leaves_expired`.
+
+* **Domain boundary.** The fix pass changed no `domain` class.
+
+### Leftovers for the verifier
+
+None from security. The verifier confirms the second merge of `main`: core 1020, starter 161,
+sample 9, 0 skipped, with `CipherProbePr50Test` and `CipherProbePr46Pass2Test` both run.
