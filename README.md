@@ -149,7 +149,8 @@ the chain, and an operator voids it. The unit of work takes it from `ARCHIVING` 
 no key yet). The row then keeps any hash it recorded the first time. **That hash names the first bytes, which passed and were never archived; the rule
 id names the refusal of the later bytes.** The run logs both hashes at WARN, never the content.
 With rule id `DEI-244`, the later bytes passed but differ from the recorded hash (or key); they were
-never stored.
+never stored. A later event for a burned number ends on `DEI-250` and carries the burn's rule id,
+so with `DEI-244` it says that nothing was refused.
 
 Example. `F-2026-0042` is numbered on 10 January. The archive write times out and nothing lands.
 The host upgrades; the retry renders BT-2 = 3 January; `EINVOICE-DATES` refuses. The event ends on

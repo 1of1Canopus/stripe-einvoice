@@ -198,6 +198,8 @@ All notable changes to this project are documented here. The format follows
   and enqueues nothing. Another extension with the same bytes is another key and burns too.
   `DEI-240` keeps its one meaning: the store holds other bytes at the key. Renderers must be
   byte-stable across a retry (README, `DocumentRenderer`).
+  A later event for any burned number now records the burn's rule id with its `DEI-250` (it had
+  none), so after a `DEI-244` burn it does not read as a validation refusal (D-PR53-1).
 - **The stuck check names every open number (D-PR50-B1).** `DEI-273` read only the newest page of
   the series years its two-day window touched, and only after the Stripe list call, which throws
   on a refused key or an outage. A number left open across a year end, or through an outage that

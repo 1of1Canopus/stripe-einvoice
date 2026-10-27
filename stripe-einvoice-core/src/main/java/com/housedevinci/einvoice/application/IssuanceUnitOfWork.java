@@ -1374,12 +1374,23 @@ public final class IssuanceUnitOfWork {
     return applyFrom(event, read, terminalPending(row));
   }
 
+  /**
+   * The conclusion of an event whose number is already void or burned. A burned number answers
+   * {@code DEI-250} with the rule id the burn recorded on the row (D-PR53-1), so the event says
+   * why: a validator rule, a render code, or {@code DEI-244} when the later bytes passed but were
+   * not the recorded document.
+   */
   private Pending terminalPending(Issuance row) {
-    String code =
-        classify(row.state()) == ExistingIssuance.VOIDED
-            ? ErrorCodes.NUMBER_VOIDED
-            : ErrorCodes.VALIDATION_REFUSED;
-    return Pending.of(InboundState.FAILED_ISSUANCE, code, null, row.legalNumber());
+    if (classify(row.state()) == ExistingIssuance.VOIDED) {
+      return Pending.of(
+          InboundState.FAILED_ISSUANCE, ErrorCodes.NUMBER_VOIDED, null, row.legalNumber());
+    }
+    return new Pending(
+        InboundState.FAILED_ISSUANCE,
+        ErrorCodes.VALIDATION_REFUSED,
+        row.voidRuleId(),
+        null,
+        row.legalNumber().value());
   }
 
   /**

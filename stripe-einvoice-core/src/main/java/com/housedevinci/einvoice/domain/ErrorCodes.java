@@ -326,7 +326,11 @@ public final class ErrorCodes {
    */
   public static final String HOST_AUTOSAVE_UNSUPPORTED = "DEI-249";
 
-  /** The exact bytes did not pass validation. The failing rule id is recorded. */
+  /**
+   * The exact bytes did not pass validation. The failing rule id is recorded. A later event for a
+   * number already burned answers this code too, with the rule id the burn recorded: with {@code
+   * DEI-244} nothing was refused, the later bytes passed but were not the recorded document.
+   */
   public static final String VALIDATION_REFUSED = "DEI-250";
 
   /** A validation could not run. Never PASSED by construction (checklist lines 18 and 57). */
