@@ -221,7 +221,7 @@ docs promise `REFUSED_NOT_ELIGIBLE`; the call returns `REFUSED_NUMBERED` with co
 Repro: `CipherProbePr50Pass2Test.guard_a_voided_number_reprocess_runs_nothing_records_nothing_takes_no_number`
 (green, asserts `REFUSED_NUMBERED`) against `docs/index.md` lines 209 to 213.
 
-Fix (Isis, docs only). `docs/index.md`, reprocess list: add one bullet: a `FAILED_ISSUANCE` or
+Fix (fix pass, docs only). `docs/index.md`, reprocess list: add one bullet: a `FAILED_ISSUANCE` or
 `FAILED_MAPPING` row whose invoice holds an issued, burned or voided number is answered
 `REFUSED_NUMBERED` with `DEI-111`; nothing runs, nothing is recorded, no
 number is taken. `CHANGELOG.md`: under the D-PR50-2 entry, state the change from 0.1.0
