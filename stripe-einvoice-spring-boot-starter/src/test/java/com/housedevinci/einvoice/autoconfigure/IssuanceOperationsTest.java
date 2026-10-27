@@ -13,6 +13,7 @@ import com.housedevinci.einvoice.domain.EventIdentity;
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
 import com.housedevinci.einvoice.domain.Mode;
+import com.zaxxer.hikari.HikariDataSource;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -20,9 +21,12 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.UUID;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
 /**
  * The three background jobs and the two signals, exercised rather than merely wired: what the
@@ -195,37 +199,69 @@ class IssuanceOperationsTest {
             });
   }
 
+  /**
+   * D-PR52-CI-1: the chain verifier reads the whole issuance log of its database, and other test
+   * classes chain events into the shared test database under other keys and forged rows. Whether
+   * those exist when this test runs depends on the order the classes run in, which a fresh clone
+   * changes, and then the chain reads BROKEN and the health is DOWN for a reason this test is not
+   * about. The health test therefore runs on a database of its own, so the chain it verifies is the
+   * one this context wrote.
+   */
   @Test
   void health_reports_up_once_the_watcher_has_run_and_down_when_it_goes_quiet() {
-    runner()
-        .run(
-            context -> {
-              IssuanceSweeper sweeper = context.getBean(IssuanceSweeper.class);
-              sweeper.sweepOnce();
-              sweeper.reconcileOnce();
-              sweeper.verifyChainOnce();
+    try (HikariDataSource own = TestPostgres.emptyDatabase("ops_health_" + System.nanoTime())) {
+      // The shared pool's size: the startup check sizes issuance against it.
+      own.setMaximumPoolSize(8);
+      OwnDatabasePorts.database = own;
+      healthUpThenDown(
+          runner()
+              .withUserConfiguration(OwnDatabasePorts.class)
+              .withAllowBeanDefinitionOverriding(true));
+    } finally {
+      OwnDatabasePorts.database = null;
+    }
+  }
 
-              EInvoiceHealthIndicator fresh =
-                  new EInvoiceHealthIndicator(
-                      java.util.Optional.of(sweeper),
-                      context.getBean(EInvoiceProperties.class),
-                      Clock.systemUTC());
-              org.springframework.boot.health.contributor.Health now = fresh.health();
-              // The details say which of sweep, reconciliation or chain made it DOWN.
-              assertThat(now.getStatus().getCode())
-                  .as("health %s", now.getDetails())
-                  .isEqualTo("UP");
-              assertThat(fresh.health().getDetails()).containsKeys("lastSweep", "chain");
+  /** The shared ports, over a database this test owns. */
+  @Configuration
+  static class OwnDatabasePorts extends IssuanceWiringTest.Ports {
 
-              // A day later, with nothing having run since: never "healthy", because the whole
-              // point of the watcher is to notice silence.
-              EInvoiceHealthIndicator stale =
-                  new EInvoiceHealthIndicator(
-                      java.util.Optional.of(sweeper),
-                      context.getBean(EInvoiceProperties.class),
-                      Clock.fixed(Instant.now().plus(Duration.ofDays(1)), ZoneOffset.UTC));
-              assertThat(stale.health().getStatus().getCode()).isEqualTo("DOWN");
-            });
+    static volatile DataSource database;
+
+    @Override
+    @Bean(destroyMethod = "")
+    DataSource dataSource() {
+      return java.util.Objects.requireNonNull(database, "the test sets its own database first");
+    }
+  }
+
+  private static void healthUpThenDown(ApplicationContextRunner runner) {
+    runner.run(
+        context -> {
+          IssuanceSweeper sweeper = context.getBean(IssuanceSweeper.class);
+          sweeper.sweepOnce();
+          sweeper.reconcileOnce();
+          sweeper.verifyChainOnce();
+
+          EInvoiceHealthIndicator fresh =
+              new EInvoiceHealthIndicator(
+                  java.util.Optional.of(sweeper),
+                  context.getBean(EInvoiceProperties.class),
+                  Clock.systemUTC());
+          org.springframework.boot.health.contributor.Health now = fresh.health();
+          // The details say which of sweep, reconciliation or chain made it DOWN.
+          assertThat(now.getStatus().getCode()).as("health %s", now.getDetails()).isEqualTo("UP");
+          assertThat(fresh.health().getDetails()).containsKeys("lastSweep", "chain");
+
+          // A day later, with nothing having run since: never "healthy", because the whole
+          // point of the watcher is to notice silence.
+          EInvoiceHealthIndicator stale =
+              new EInvoiceHealthIndicator(
+                  java.util.Optional.of(sweeper),
+                  context.getBean(EInvoiceProperties.class),
+                  Clock.fixed(Instant.now().plus(Duration.ofDays(1)), ZoneOffset.UTC));
+          assertThat(stale.health().getStatus().getCode()).isEqualTo("DOWN");
+        });
   }
 
   @Test
