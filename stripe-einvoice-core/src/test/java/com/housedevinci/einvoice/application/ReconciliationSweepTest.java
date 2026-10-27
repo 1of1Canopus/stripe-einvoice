@@ -12,6 +12,7 @@ import com.housedevinci.einvoice.domain.Issuance;
 import com.housedevinci.einvoice.domain.Mode;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -138,6 +139,125 @@ class ReconciliationSweepTest {
     assertThat(harness.openFindings())
         .extracting(ComplianceFinding::code)
         .contains(ErrorCodes.RECON_STUCK_ISSUANCE);
+  }
+
+  // D-PR50-B1: the stuck check reads open numbers by seller and mode, any series year, oldest
+  // first, and runs before the Stripe list call. Each test below was red on main at 7f08181.
+
+  /** A refused key throws at the list call; the stuck number is still named by that pass. */
+  @Test
+  void a_number_stuck_while_the_stripe_list_fails_is_named_by_the_same_pass() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    String stuck = "in_stuck_list_down_" + System.nanoTime();
+    RetryEdgeFixture.numberWithArchiveDown(harness, stuck);
+    harness.moveClockForward(Duration.ofHours(7));
+    harness
+        .source()
+        .breakWith(new EInvoiceException(ErrorCodes.STRIPE_ACCESS_REFUSED, "status 401"));
+
+    assertThatThrownBy(() -> harness.sweep(SETTINGS).sweep()).isInstanceOf(EInvoiceException.class);
+
+    assertThat(harness.openFindings())
+        .anySatisfy(
+            f -> {
+              assertThat(f.code()).isEqualTo(ErrorCodes.RECON_STUCK_ISSUANCE);
+              assertThat(f.subjectId()).isEqualTo(stuck);
+            });
+  }
+
+  /** The application is down across the year end: the first pass of the new year names it. */
+  @Test
+  void a_number_stuck_in_a_year_the_window_no_longer_touches_is_named() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    String stuck = "in_stuck_last_year_" + System.nanoTime();
+    RetryEdgeFixture.numberWithArchiveDown(harness, stuck);
+    harness.moveClockTo(Instant.parse("2027-03-10T09:00:00Z"));
+
+    ReconciliationSweep.Result result =
+        harness
+            .sweep(
+                new ReconciliationSweep.Settings(
+                    Duration.ofDays(2), Duration.ZERO, Duration.ofHours(6), 10, 500))
+            .sweep();
+
+    assertThat(result.stuckIssuances()).isEqualTo(1);
+    assertThat(harness.openFindings()).extracting(ComplianceFinding::subjectId).contains(stuck);
+  }
+
+  /** More newer numbers than one page came after it: it is still named, oldest first. */
+  @Test
+  void a_stuck_number_behind_a_page_of_newer_numbers_is_named() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    String stuck = "in_stuck_old_" + System.nanoTime();
+    RetryEdgeFixture.numberWithArchiveDown(harness, stuck);
+    for (int i = 0; i < 2; i++) {
+      String fine = "in_fine_newer_" + i + "_" + System.nanoTime();
+      harness.source().with(TestInvoices.finalised(fine));
+      harness.unitOfWork().process(harness.receive("invoice.finalized", fine));
+    }
+    harness.moveClockForward(Duration.ofHours(7));
+
+    ReconciliationSweep.Result result =
+        harness
+            .sweep(
+                new ReconciliationSweep.Settings(
+                    Duration.ofDays(30), Duration.ZERO, Duration.ofHours(6), 10, 1))
+            .sweep();
+
+    assertThat(result.stuckIssuances()).isEqualTo(1);
+    assertThat(harness.openFindings())
+        .filteredOn(f -> f.code().equals(ErrorCodes.RECON_STUCK_ISSUANCE))
+        .extracting(ComplianceFinding::subjectId)
+        .containsExactly(stuck);
+  }
+
+  /**
+   * One stuck number is one finding and one count, never two (the series loop no longer counts).
+   */
+  @Test
+  void a_stuck_number_inside_the_window_is_counted_once() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    String stuck = "in_stuck_once_" + System.nanoTime();
+    RetryEdgeFixture.numberWithArchiveDown(harness, stuck);
+    harness.moveClockForward(Duration.ofHours(7));
+
+    ReconciliationSweep.Result result = harness.sweep(SETTINGS).sweep();
+
+    assertThat(result.stuckIssuances()).isEqualTo(1);
+    assertThat(harness.openFindings())
+        .filteredOn(f -> f.code().equals(ErrorCodes.RECON_STUCK_ISSUANCE))
+        .extracting(ComplianceFinding::subjectId)
+        .containsExactly(stuck);
+  }
+
+  /** The read behind the stuck check: open states, older than the cutoff, oldest first, scoped. */
+  @Test
+  void open_numbers_are_read_by_seller_and_mode_oldest_first_and_bounded() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    IssuanceTestHarness other = IssuanceTestHarness.create();
+    String first = "in_open_first_" + System.nanoTime();
+    RetryEdgeFixture.numberWithArchiveDown(harness, first);
+    harness.moveClockForward(Duration.ofMinutes(5));
+    String second = "in_open_second_" + System.nanoTime();
+    RetryEdgeFixture.numberWithArchiveDown(harness, second);
+    harness.moveClockForward(Duration.ofMinutes(5));
+    String issued = "in_issued_" + System.nanoTime();
+    harness.source().with(TestInvoices.finalised(issued));
+    harness.unitOfWork().process(harness.receive("invoice.finalized", issued));
+    harness.moveClockForward(Duration.ofMinutes(5));
+    String young = "in_open_young_" + System.nanoTime();
+    RetryEdgeFixture.numberWithArchiveDown(harness, young);
+    String foreign = "in_open_foreign_" + System.nanoTime();
+    RetryEdgeFixture.numberWithArchiveDown(other, foreign);
+    Instant cutoff = harness.issuance(young).orElseThrow().allocatedAt();
+
+    assertThat(harness.reader().openOlderThan(harness.sellerId(), Mode.LIVE, cutoff, 10))
+        .extracting(Issuance::stripeInvoiceId)
+        .containsExactly(first, second);
+    assertThat(harness.reader().openOlderThan(harness.sellerId(), Mode.LIVE, cutoff, 1))
+        .extracting(Issuance::stripeInvoiceId)
+        .containsExactly(first);
+    assertThat(harness.reader().openOlderThan(harness.sellerId(), Mode.TEST, cutoff, 10)).isEmpty();
   }
 
   @Test

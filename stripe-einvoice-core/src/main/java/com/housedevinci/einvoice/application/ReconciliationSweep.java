@@ -42,7 +42,8 @@ import org.slf4j.LoggerFactory;
  *       of the newest rows is also re-hashed, which is what detects a store that quietly overwrote;
  *       the exhaustive re-hash on a slower cadence is Pro.
  *   <li><b>The archive to us.</b> Objects that no row predicted.
- *   <li><b>Stuck.</b> Numbers allocated and still open past {@code alert-after}.
+ *   <li><b>Stuck.</b> Numbers allocated and still open past {@code alert-after}, in any series
+ *       year, read before the Stripe call so a refused key or an outage cannot skip them.
  * </ol>
  *
  * <p>It <b>alerts and never repairs</b>: no auto-delete, no auto-void, no overwrite. Every one of
@@ -148,6 +149,31 @@ public final class ReconciliationSweep {
       record(ErrorCodes.STRIPE_ACCESS_REFUSED, eventId, now);
     }
 
+    // D-PR50-B1: the stuck check reads open numbers by seller and mode, in every series year and
+    // oldest first, and runs here, before the Stripe list call. Scoped to the window's series years
+    // and after the list call, it never named a number left open across a year end or through a
+    // refused key or an outage: the list call throws, and by the time it answers again the window
+    // has left the number's year. Example: a number allocated on 30 December stays open; the key
+    // is refused until 3 January; this pass still names it on 30 December evening.
+    int stuck = 0;
+    List<Issuance> openNumbers =
+        reader.openOlderThan(
+            configuration.sellerId(),
+            configuration.mode(),
+            now.minus(settings.alertAfter()),
+            settings.pageSize());
+    for (Issuance open : openNumbers) {
+      stuck++;
+      record(ErrorCodes.RECON_STUCK_ISSUANCE, open.stripeInvoiceId(), now);
+    }
+    if (openNumbers.size() >= settings.pageSize()) {
+      // Oldest first, so the numbers past the page are the newer ones; the count says how bad.
+      log.warn(
+          "einvoice: the stuck check named the {} oldest open numbers, its page limit;"
+              + " more may be open",
+          openNumbers.size());
+    }
+
     int checked = 0;
     int missing = 0;
     int voided = 0;
@@ -182,7 +208,6 @@ public final class ReconciliationSweep {
 
     int archiveMissing = 0;
     int drift = 0;
-    int stuck = 0;
     Set<String> known = new HashSet<>();
     int checkedForDrift = 0;
     for (SeriesKey key : seriesKeys(from, to, now)) {
@@ -199,10 +224,6 @@ public final class ReconciliationSweep {
             }
             record(problem.get(), issuance.stripeInvoiceId(), now);
           }
-        } else if (issuance.state().open()
-            && issuance.allocatedAt().isBefore(now.minus(settings.alertAfter()))) {
-          stuck++;
-          record(ErrorCodes.RECON_STUCK_ISSUANCE, issuance.stripeInvoiceId(), now);
         }
       }
     }

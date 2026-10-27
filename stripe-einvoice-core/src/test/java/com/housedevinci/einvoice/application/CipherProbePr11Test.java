@@ -334,6 +334,12 @@ class CipherProbePr11Test {
     }
 
     @Override
+    public java.util.List<Issuance> openOlderThan(
+        String sellerId, Mode mode, java.time.Instant before, int limit) {
+      return delegate.openOlderThan(sellerId, mode, before, limit);
+    }
+
+    @Override
     public java.util.Set<com.housedevinci.einvoice.domain.IssuanceState> issuanceStates(
         String stripeInvoiceId) {
       return delegate.issuanceStates(stripeInvoiceId);
