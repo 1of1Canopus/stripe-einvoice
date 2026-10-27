@@ -124,6 +124,23 @@ class ReconciliationSweepTest {
   }
 
   @Test
+  void a_neighbour_seller_whose_id_starts_with_ours_is_not_an_orphan_of_ours() {
+    // D-PR51-5: one archive, two sellers, "acme" and "acme2". The listing under "live/acme" without
+    // a trailing slash also matches every key of "acme2".
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    String neighbour =
+        "live/" + harness.sellerId() + "2/2026/INV-2026-000001-" + "d".repeat(64) + ".xml";
+    harness.archive().putDirectly(neighbour, "<Invoice/>".getBytes(StandardCharsets.UTF_8));
+
+    ReconciliationSweep.Result result = harness.sweep(SETTINGS).sweep();
+
+    assertThat(result.orphanObjects()).isZero();
+    assertThat(harness.openFindings())
+        .extracting(ComplianceFinding::code)
+        .doesNotContain(ErrorCodes.RECON_ORPHAN_OBJECT);
+  }
+
+  @Test
   void a_number_open_past_the_alert_after_is_found() {
     IssuanceTestHarness harness = IssuanceTestHarness.create();
     harness.source().with(TestInvoices.finalised("in_stuck"));
