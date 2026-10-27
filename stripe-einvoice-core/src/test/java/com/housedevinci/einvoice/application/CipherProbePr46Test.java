@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 import com.housedevinci.einvoice.adapter.jdbc.IssuanceTestHarness;
+import com.housedevinci.einvoice.domain.ArchiveKey;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.InboundEvent;
@@ -12,6 +13,8 @@ import com.housedevinci.einvoice.domain.RunningLimit;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -117,6 +120,65 @@ class CipherProbePr46Test {
     assertThat(expiredInsideTheRun.get()).isEqualTo(1);
     assertThat(h.inbound().find(eventId).orElseThrow().state()).isEqualTo(InboundState.EXPIRED);
     assertThat(h.numberedRows()).isZero();
+  }
+
+  // D-PR46-3. The expiry lands after the claim. The run holds a number and waits on the archive
+  // for longer than the running limit (a host archive with no timeout). The sweep expires the
+  // MAPPED row under the run; the run then issues the invoice and its COMPLETED write throws.
+  // End state: a legal document ISSUED, its inbound row EXPIRED with "stuck" DEI-282, and a
+  // reprocess that refuses it because it is numbered.
+  @Test
+  void probe_an_expiry_after_the_claim_expires_an_issuing_row() {
+    IssuanceTestHarness h = harness();
+    h.source().with(TestInvoices.finalised("in_p46_claim"));
+    String eventId = h.receive("invoice.finalized", "in_p46_claim");
+    ArchiveStore real = h.archive();
+    AtomicBoolean hung = new AtomicBoolean();
+    AtomicInteger expiredInsideTheRun = new AtomicInteger(-1);
+    ArchiveStore slow =
+        new ArchiveStore() {
+          @Override
+          public boolean supportsAtomicCreate() {
+            return real.supportsAtomicCreate();
+          }
+
+          @Override
+          public WriteResult putIfAbsent(ArchiveKey key, byte[] bytes) {
+            if (hung.compareAndSet(false, true)) {
+              h.moveClockForward(Duration.ofHours(73));
+              expiredInsideTheRun.set(sweep(h).expire(h.now()));
+            }
+            return real.putIfAbsent(key, bytes);
+          }
+
+          @Override
+          public Optional<byte[]> get(ArchiveKey key) {
+            return real.get(key);
+          }
+
+          @Override
+          public boolean exists(ArchiveKey key) {
+            return real.exists(key);
+          }
+
+          @Override
+          public List<String> list(String prefix, int limit) {
+            return real.list(prefix, limit);
+          }
+
+          @Override
+          public String describe() {
+            return real.describe();
+          }
+        };
+
+    assertThatCode(() -> h.unitOfWorkWithArchive(slow).process(eventId))
+        .doesNotThrowAnyException();
+    assertThat(expiredInsideTheRun.get())
+        .as("a row whose run holds a number is never expired under that run")
+        .isZero();
+    assertThat(h.inbound().find(eventId).orElseThrow().state())
+        .isEqualTo(InboundState.COMPLETED);
   }
 
   // Attack that held: an operator reprocesses the same EXPIRED row twice. The second request
