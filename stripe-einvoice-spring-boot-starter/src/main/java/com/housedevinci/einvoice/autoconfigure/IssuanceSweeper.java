@@ -4,7 +4,9 @@ import com.housedevinci.einvoice.application.InboundEventStore;
 import com.housedevinci.einvoice.application.IssuanceChainVerifier;
 import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
 import com.housedevinci.einvoice.application.ReconciliationSweep;
+import com.housedevinci.einvoice.application.StrandedInboundSweep;
 import com.housedevinci.einvoice.domain.InboundEvent;
+import com.housedevinci.einvoice.domain.RunningLimit;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -42,6 +44,7 @@ public final class IssuanceSweeper
   private final IssuanceWorker worker;
   private final ReconciliationSweep reconciliation;
   private final IssuanceChainVerifier verifier;
+  private final StrandedInboundSweep stranded;
   private final Clock clock;
   private final EInvoiceProperties properties;
   private final ScheduledExecutorService scheduler =
@@ -56,6 +59,12 @@ public final class IssuanceSweeper
   private final AtomicReference<Instant> lastReconciliation = new AtomicReference<>();
   private final AtomicReference<ReconciliationSweep.Result> lastResult = new AtomicReference<>();
   private final AtomicReference<VerifiedChain> lastChainCheck = new AtomicReference<>();
+  private final AtomicReference<Integer> lastExpired = new AtomicReference<>();
+
+  /** Above these the limits WARN at every start: they are allowed, and they are weaker. */
+  static final Duration RUNNING_CEILING_WARN_ABOVE = Duration.ofDays(7);
+
+  static final Duration PARKED_CEILING_WARN_ABOVE = Duration.ofDays(365);
 
   /** A chain verification with the time it finished, so a stale one is not read as a fresh one. */
   public record VerifiedChain(IssuanceChainVerifier.Report report, Instant completedAt) {}
@@ -66,6 +75,7 @@ public final class IssuanceSweeper
       IssuanceWorker worker,
       ReconciliationSweep reconciliation,
       IssuanceChainVerifier verifier,
+      StrandedInboundSweep stranded,
       Clock clock,
       EInvoiceProperties properties) {
     this.unitOfWork = unitOfWork;
@@ -73,12 +83,14 @@ public final class IssuanceSweeper
     this.worker = worker;
     this.reconciliation = reconciliation;
     this.verifier = verifier;
+    this.stranded = stranded;
     this.clock = clock;
     this.properties = properties;
   }
 
   @Override
   public void afterPropertiesSet() {
+    warnAboutWeakLimits(stranded.runningLimit());
     Duration sweep = properties.getIssuance().getSweepInterval();
     scheduler.scheduleWithFixedDelay(
         this::sweepOnce, sweep.toMillis(), sweep.toMillis(), TimeUnit.MILLISECONDS);
@@ -104,10 +116,15 @@ public final class IssuanceSweeper
    */
   public int sweepOnce() {
     try {
+      // QUESTIONS 29: first expire what has been running too long, then read what is due, with the
+      // same instant. A running row is then in exactly one of the two.
+      Instant now = clock.instant();
+      lastExpired.set(stranded.expire(now));
       List<InboundEvent> due =
           inbound.due(
-              clock.instant(),
+              now,
               properties.getIssuance().getRetryCeiling(),
+              stranded.runningLimit(),
               properties.getIssuance().getQueueCapacity(),
               unitOfWork.configuration().pinnedApiVersion());
       for (InboundEvent event : due) {
@@ -180,6 +197,29 @@ public final class IssuanceSweeper
     } catch (RuntimeException e) {
       log.warn("einvoice: the chain verification failed and will run again next interval", e);
       return Optional.empty();
+    }
+  }
+
+  /** How many rows the last sweep moved to {@code EXPIRED}; absent before the first sweep. */
+  public Optional<Integer> lastExpiredCount() {
+    return Optional.ofNullable(lastExpired.get());
+  }
+
+  private static void warnAboutWeakLimits(RunningLimit limit) {
+    if (limit.running().compareTo(RUNNING_CEILING_WARN_ABOVE) > 0) {
+      log.warn(
+          "einvoice: einvoice.issuance.running-ceiling is {}, above {}. A row stuck in a running"
+              + " state is then re-run for that long before anyone is told. Keep the default (PT72H)"
+              + " unless an outage of that length is normal here.",
+          limit.running(),
+          RUNNING_CEILING_WARN_ABOVE);
+    }
+    if (limit.parked().compareTo(PARKED_CEILING_WARN_ABOVE) > 0) {
+      log.warn(
+          "einvoice: einvoice.issuance.parked-ceiling is {}, above {}. A draft that is never"
+              + " finalised is then re-checked for that long before anyone is told.",
+          limit.parked(),
+          PARKED_CEILING_WARN_ABOVE);
     }
   }
 

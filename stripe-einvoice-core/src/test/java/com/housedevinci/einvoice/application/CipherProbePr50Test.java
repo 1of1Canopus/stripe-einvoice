@@ -172,7 +172,8 @@ class CipherProbePr50Test {
         if (start == InboundState.COMPLETED
             || start == InboundState.DROPPED
             || start == InboundState.FAILED_MAPPING
-            || start == InboundState.FAILED_TOTALS) {
+            || start == InboundState.FAILED_TOTALS
+            || start == InboundState.EXPIRED) {
           continue; // process answers the stored outcome; not a cell (design section 2)
         }
         for (RetryEdgeFixture.Conclusion conclusion : RetryEdgeFixture.Conclusion.values()) {

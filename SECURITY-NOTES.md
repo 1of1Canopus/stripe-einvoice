@@ -397,6 +397,31 @@ module is where that is set out.
   is raised once per application start, and every outcome carries the verdict. The renderer this
   module ships always implements it.
 
+## The running-row time limit
+
+A running inbound row is re-run on every backoff. Without a bound, a row that can never finish (a
+draft nobody finalises, a renderer that crashes on one invoice) is re-run until the retention purge
+deletes it, and nothing reports it. Since QUESTIONS 29 such a row becomes `EXPIRED` after
+`running-ceiling` (72 hours) or `parked-ceiling` (90 days), with a finding on its event id.
+
+- **The clock is `due_since`, not arrival.** It restarts when the row makes progress, so a draft
+  finalised on day 80 is not expired on its way to a document. A re-check of a draft is not progress;
+  otherwise a draft would never expire.
+- **The upgrade does not expire the backlog.** Existing rows get the upgrade instant as their clock.
+  A row written by 0.1.0 during a rolling upgrade, with no clock yet, is read as within its limit.
+- **Exactly one of due and expired.** The expiry runs in the issuance sweep, before the due query,
+  with the same instant and the same two cutoffs. It does not run in the reconciliation sweep, which
+  can be switched off.
+- **The expiry is conditional.** It writes only if the row still holds the state and the clock it
+  was read with. A row that moved in between is skipped with no finding; one row that cannot be
+  written does not stop the rest of the page.
+- **Residual: a numbered row can expire.** A `MAPPED` row can hold a legal number when it expires.
+  The reprocess refuses it, as it refuses any numbered invoice. The number stays open and is
+  reported by `DEI-273` until an operator resumes or voids it.
+- **Residual: no run lock yet.** The expiry does not take the per-invoice run lock planned for the
+  same release. A run that is alive but has made no progress for the whole limit (72 hours) can be
+  expired under it; its next write then finds the row moved.
+
 ## Reporting
 
 `security@housedevinci.com`. See `SECURITY.md`.

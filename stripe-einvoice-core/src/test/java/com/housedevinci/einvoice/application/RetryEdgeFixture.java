@@ -113,6 +113,7 @@ final class RetryEdgeFixture {
       case FAILED_TOTALS ->
           path.to(InboundState.FETCHED, "", null)
               .to(InboundState.FAILED_TOTALS, ErrorCodes.TOTALS_MISMATCH, null);
+      case EXPIRED -> path.to(InboundState.EXPIRED, ErrorCodes.INBOUND_CEILING_REACHED, null);
     }
     assertThat(harness.inbound().find(eventId).orElseThrow().state()).isEqualTo(start);
   }

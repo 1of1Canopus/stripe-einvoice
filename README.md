@@ -130,6 +130,7 @@ re-picked automatically, because neither is cured by an upgrade.
 | A redelivery returns the stored document | After checking the archived bytes against the recorded hash. A tampered archive is refused; a legitimate upstream edit is not |
 | Back-pressure costs latency, never an event | A bounded queue and a concurrency limit below your connection pool; past capacity the event stays `RECEIVED` and the sweeper takes it |
 | Buyer data has a retention | The raw signed bodies are nulled the moment an event can no longer run, and purged at `einvoice.inbound.retention`. One exception: the row of an invoice whose number is still open (numbered, archiving or failed archive) is kept until the number resolves, because the reprocess needs it to resume that number |
+| No event is due for ever | A row that stays `RECEIVED`, `FETCHED` or `MAPPED` for `einvoice.issuance.running-ceiling` (default 72 hours) without progress, or `PARKED` for `parked-ceiling` (default 90 days), becomes `EXPIRED` (`DEI-266`) with the finding `DEI-282` on its event id, once. It is no longer re-run. A zero, a negative, or a limit shorter than the retry backoff is refused at startup; a longer one WARNs at every start |
 
 ### Issuance states
 
@@ -217,6 +218,11 @@ on the invoice (the first four bytes of SHA-256 of the Stripe object id; the ses
   Stripe outage, a pin change, a mode or account mismatch or an unsubscribed type is recorded
   `FAILED_ISSUANCE` with that refusal's own code, keeping the number. It is retried with a backoff
   (no retry for `DEI-205` and `DEI-219`), and the reprocess resumes it once the cause is fixed.
+- **A live run is never expired.** The time limit on running rows (`running-ceiling`,
+  `parked-ceiling`) tries the invoice's run lock before it expires a row, and skips the row while a
+  run holds it. Example: a run holds `INV-2026-000001` and waits 73 hours on a slow archive; every
+  sweep in that time skips its `MAPPED` row; the run then issues the invoice and writes `COMPLETED`.
+  A row whose run ended without progress is expired at the next sweep.
 - **A lost lock is `DEI-104`, at WARN.** If the server or the network ends the run's session
   mid-run, the run's next write refuses, the run writes nothing more, and one WARN names the event.
   The connection is closed, not pooled.
@@ -388,6 +394,7 @@ authorization.
 | Stripe moved its API version | The refused events are on `einvoice_inbound_event` with their bodies. Update the pin to match, restart, and the sweeper's due query re-picks exactly the rows whose recorded version now equals it, and replays them through the same path |
 | A document failed validation | The number stays allocated with the failing rule id recorded on the row and in the hash chain, so the gap it leaves is explained by the tamper-evident record. An operator voids it through `IssuanceVoidService` with a reason, and the series report explains the hole |
 | A number was voided | **The void is final, and it is final inside this module.** That Stripe invoice will never carry a document here: one invoice maps to one number for all time, so every later event for it is recorded with `DEI-122` and nothing is retried. To document the sale, correct the data upstream and raise a **new** Stripe invoice, which takes the next number through the ordinary path - and if the sale is already paid, that needs a credit note, which this edition does not produce |
+| A finding `DEI-282` says an event expired | The event stopped being due after its time limit. Example: a Stripe draft was never finalised, so its `invoice.paid` event sat `PARKED` for 90 days. Look at the row's state before it expired (in the log line) and fix the cause, for example finalise or delete the draft in Stripe. Then call `IssuanceReprocess` for the event id: it re-fetches the invoice from Stripe, starts the clock again, and records who asked. An event whose invoice already holds a number is refused there; its number is reported by `DEI-273` and is resumed or voided like any other stuck number |
 | A seller profile was incomplete and invoices were refused | Correct the profile, then call the privileged `IssuanceReprocess` for each refused event. It runs the ordinary pipeline, preflight included, never touches an invoice that already has a number, and records who asked and why |
 
 ### Run the sample

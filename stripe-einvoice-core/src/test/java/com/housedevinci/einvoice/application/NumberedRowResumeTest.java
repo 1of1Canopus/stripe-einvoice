@@ -102,6 +102,28 @@ class NumberedRowResumeTest {
   }
 
   /**
+   * QUESTIONS 48. A {@code MAPPED} row past its time limit is {@code EXPIRED} with its number still
+   * open. The reprocess re-opens it in place, never to {@code RECEIVED}, and resumes that number.
+   */
+  @Test
+  void a_numbered_expired_row_is_reopened_in_place_and_resumes_its_number() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    String eventId = RetryEdgeFixture.numberWithArchiveDown(harness, "in_sre_resume_expired");
+    String number = RetryEdgeFixture.number(harness, "in_sre_resume_expired");
+    harness.inbound().transition(eventId, InboundState.MAPPED, "", harness.now(), null);
+    harness
+        .inbound()
+        .transition(
+            eventId, InboundState.EXPIRED, ErrorCodes.INBOUND_CEILING_REACHED, harness.now(), null);
+
+    IssuanceReprocess.Result result = harness.reprocess().reprocess(request(eventId));
+
+    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REPROCESSED);
+    assertThat(result.state()).isEqualTo(InboundState.COMPLETED);
+    assertThat(result.legalNumber()).isEqualTo(number);
+  }
+
+  /**
    * D-SRE-5b. A numbered row resumed after its fiscal year closed ends {@code FAILED_MAPPING} with
    * an open number: the stuck check names it, and the reprocess is still its way back.
    */

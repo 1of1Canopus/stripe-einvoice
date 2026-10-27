@@ -72,7 +72,8 @@ public final class JdbcReprocessLedger implements ReprocessLedger {
               c.prepareStatement(JdbcInboundEventStore.REOPEN_FOR_REPROCESS)) {
             reopen.setString(1, code == null ? "" : code);
             reopen.setObject(2, ts(at));
-            reopen.setString(3, request.eventId());
+            reopen.setObject(3, ts(at));
+            reopen.setString(4, request.eventId());
             if (reopen.executeUpdate() != 1) {
               return OptionalLong.empty();
             }
