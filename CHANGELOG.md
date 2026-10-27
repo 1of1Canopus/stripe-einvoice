@@ -20,8 +20,9 @@ All notable changes to this project are documented here. The format follows
   The limit measures time since the row last made progress, kept in the new column
   `einvoice_inbound_event.due_since`. A re-check of a draft (`PARKED -> FETCHED -> PARKED`) is not
   progress. The schema upgrade gives existing rows the upgrade instant, so a backlog is never
-  expired on the first sweep. `IssuanceReprocess` accepts `EXPIRED` and starts the clock again;
-  its refusal of a numbered invoice is unchanged.
+  expired on the first sweep. `IssuanceReprocess` accepts `EXPIRED` and starts the clock again.
+  An `EXPIRED` row whose invoice holds an open number is re-opened in place and resumes that number,
+  like a numbered `FAILED_ISSUANCE` row (QUESTIONS 48).
 - **A refused Stripe key stops the event (D-PR45-B1, design "sweeper retry edges" section 5).**
   HTTP 401 and 403 from the Stripe API are the new code `DEI-219 STRIPE_ACCESS_REFUSED`; every
   other status stays `DEI-211`. The event stops with no retry. Each reconciliation pass records one

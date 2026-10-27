@@ -243,6 +243,8 @@ public final class JdbcInboundEventStore implements InboundEventStore {
           + " AND updated_at = ? AND state IN ('"
           + InboundState.FAILED_MAPPING.name()
           + "','"
+          + InboundState.EXPIRED.name()
+          + "','"
           + InboundState.FAILED_ISSUANCE.name()
           + "') AND EXISTS (SELECT 1 FROM einvoice_issuance i"
           + " WHERE i.stripe_invoice_id = einvoice_inbound_event.object_id)";

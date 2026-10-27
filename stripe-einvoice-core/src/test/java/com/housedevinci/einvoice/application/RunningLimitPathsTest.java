@@ -349,9 +349,9 @@ class RunningLimitPathsTest {
   }
 
   @Test
-  void a_numbered_row_that_expired_is_refused_by_reprocess_and_stays_reported_as_stuck() {
-    // A MAPPED row can hold a number when it expires. The reprocess refusal is unchanged: a
-    // numbered invoice is never run again through it. The number stays open and DEI-273 names it.
+  void a_numbered_row_that_expired_is_reopened_in_place_and_resumes_its_number() {
+    // A MAPPED row can hold a number when it expires. QUESTIONS 48: the reprocess re-opens it in
+    // place, never to RECEIVED, and resumes that same number once the archive is back.
     IssuanceTestHarness h = harness();
     h.source().with(TestInvoices.finalised("in_q29_numbered"));
     String eventId = h.receive("invoice.finalized", "in_q29_numbered");
@@ -370,10 +370,13 @@ class RunningLimitPathsTest {
             + "'");
     h.moveClockForward(Duration.ofDays(4));
     assertThat(sweep(h).expire(h.now())).isEqualTo(1);
+    String number = RetryEdgeFixture.number(h, "in_q29_numbered");
+    h.archive().heal();
 
     IssuanceReprocess.Result result =
         h.reprocess().reprocess(new ReprocessRequest(eventId, "ops-q29", "archive is back"));
-    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REFUSED_NUMBERED);
-    assertThat(result.legalNumber()).isNotBlank();
+    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REPROCESSED);
+    assertThat(result.state()).isEqualTo(InboundState.COMPLETED);
+    assertThat(result.legalNumber()).isEqualTo(number);
   }
 }
