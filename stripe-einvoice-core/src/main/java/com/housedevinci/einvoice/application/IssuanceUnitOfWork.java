@@ -43,7 +43,8 @@ import org.slf4j.LoggerFactory;
  *       <td>resumed by {@code (seller, mode, stripe invoice id)}: the same number, never a new
  *       one</td></tr>
  *   <tr><td>P2 render and validate</td><td>-</td><td>-</td>
- *       <td>the re-render is byte-identical; there is nothing to undo</td></tr>
+ *       <td>the re-render must be byte-identical; when it is not, the number burns with {@code
+ *       DEI-244}; there is nothing to undo</td></tr>
  *   <tr><td>P3 write</td><td>{@code ARCHIVING} with the hash and key, before the PUT</td>
  *       <td>the object</td>
  *       <td>the retry's write-once PUT sees identical bytes and succeeds; an orphan object is one
@@ -734,7 +735,49 @@ public final class IssuanceUnitOfWork {
     ArchiveKey key =
         ArchiveKey.of(
             issuance.seriesKey(), issuance.legalNumber(), documentSha256, document.extension());
+    if (issuance.documentHash().isPresent()
+        && (!issuance.documentSha256().equals(documentSha256)
+            || !issuance.archiveKey().equals(key.value()))) {
+      return renderNotReproducible(invoice, issuance, documentSha256, key, held);
+    }
     return archiveAndIssue(invoice, documentSha256, key, Optional.of(archived), held);
+  }
+
+  /**
+   * A resumed run rendered bytes that passed every gate, but they are not the document the row
+   * recorded before its first archive write (D-RTR-5): another hash, or another extension and so
+   * another key. The hash and key are write-once, so the new bytes can never be archived under this
+   * number, and the recorded ones were never stored. The number burns with {@code DEI-244}, the
+   * recorded hash and key stay on the row and in the chained event, and the new hash goes to the
+   * WARN line only. Before any store call, so {@code markArchiving} keeps {@code DEI-240} for every
+   * other caller. A void that landed while the run rendered wins, as on every burn.
+   */
+  private Pending renderNotReproducible(
+      SourceInvoice invoice,
+      Issuance issuance,
+      String documentSha256,
+      ArchiveKey key,
+      IssuanceRowLock.Held held) {
+    String code = ErrorCodes.RENDER_NOT_REPRODUCIBLE;
+    Optional<WriteRefusal> refused =
+        concludeIssuance(held, invoice.id(), IssuanceState.FAILED_VALIDATION, code);
+    if (refused.isPresent()) {
+      return pendingOn(refused.get(), issuance.legalNumber(), held);
+    }
+    // Hashes, keys and the number only, never content.
+    log.warn(
+        "einvoice: number {} is burned with {}: a resumed run rendered bytes that passed but are"
+            + " not the recorded document, and nothing was archived. Recorded hash {} at key {};"
+            + " the new bytes hash to {} at key {}. Make the renderer byte-stable, or drain open"
+            + " numbers before a renderer, profile or mapping change",
+        issuance.legalNumber().value(),
+        code,
+        issuance.documentSha256(),
+        issuance.archiveKey(),
+        documentSha256,
+        key.value());
+    return new Pending(
+        InboundState.FAILED_ISSUANCE, code, code, null, issuance.legalNumber().value());
   }
 
   /**
@@ -1335,12 +1378,23 @@ public final class IssuanceUnitOfWork {
     return applyFrom(event, read, terminalPending(row));
   }
 
+  /**
+   * The conclusion of an event whose number is already void or burned. A burned number answers
+   * {@code DEI-250} with the rule id the burn recorded on the row (D-PR53-1), so the event says
+   * why: a validator rule, a render code, or {@code DEI-244} when the later bytes passed but were
+   * not the recorded document.
+   */
   private Pending terminalPending(Issuance row) {
-    String code =
-        classify(row.state()) == ExistingIssuance.VOIDED
-            ? ErrorCodes.NUMBER_VOIDED
-            : ErrorCodes.VALIDATION_REFUSED;
-    return Pending.of(InboundState.FAILED_ISSUANCE, code, null, row.legalNumber());
+    if (classify(row.state()) == ExistingIssuance.VOIDED) {
+      return Pending.of(
+          InboundState.FAILED_ISSUANCE, ErrorCodes.NUMBER_VOIDED, null, row.legalNumber());
+    }
+    return new Pending(
+        InboundState.FAILED_ISSUANCE,
+        ErrorCodes.VALIDATION_REFUSED,
+        row.voidRuleId(),
+        null,
+        row.legalNumber().value());
   }
 
   /**

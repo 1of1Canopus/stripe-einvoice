@@ -104,6 +104,37 @@ class IssuanceChainVerifierTest {
   }
 
   @Test
+  void the_verifier_reads_a_render_mismatch_burn_as_intact() {
+    // D-RTR-5, R14: a resumed run rendered other bytes that passed. The row is burned with rule id
+    // DEI-244 and keeps the first attempt's hash and key; the chained event copies the row. The
+    // later hash is in the WARN line only, never in the chain.
+    Fixture fixture = onItsOwnDatabase("burnmismatch", CHAIN);
+    String seller = fixture.seller();
+    JdbcIssuanceStore store = fixture.store();
+    com.housedevinci.einvoice.domain.Issuance row =
+        store.allocate(request(key(seller), "in_burn_mismatch"));
+    String sha = "b".repeat(64);
+    store.markArchiving(
+        seller,
+        Mode.LIVE,
+        "in_burn_mismatch",
+        sha,
+        com.housedevinci.einvoice.domain.ArchiveKey.of(
+            row.seriesKey(), row.legalNumber(), sha, "xml"));
+    store.markFailed(
+        seller,
+        Mode.LIVE,
+        "in_burn_mismatch",
+        com.housedevinci.einvoice.domain.IssuanceState.FAILED_VALIDATION,
+        com.housedevinci.einvoice.domain.ErrorCodes.RENDER_NOT_REPRODUCIBLE);
+
+    IssuanceChainVerifier.Report report = verifier(store).verify();
+
+    assertThat(report.status()).isEqualTo(IssuanceChainVerifier.Status.INTACT);
+    assertThat(report.unchainedDispositions()).isZero();
+  }
+
+  @Test
   void an_unkeyed_log_is_never_reported_as_intact() {
     // A separate word for a separate property: an unkeyed log can be recomputed by anyone who can
     // write a row, so a clean unkeyed result must not read like a clean keyed one.

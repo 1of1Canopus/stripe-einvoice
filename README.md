@@ -124,7 +124,7 @@ re-picked automatically, because neither is cured by an upgrade.
 | A refusal consumes no number | Every refusal that depends on data happens before the allocator is called |
 | One number never names two documents | The archive key carries the SHA-256 of the exact bytes and the store is write-once; the same input renders the same bytes under any time zone and any locale |
 | A crash leaves something a retry can finish | Four phases, each with a recorded state: claim, render, write (the row predicts the object before the PUT), issue (state and chained disposition in one transaction). A disposition a retry cannot finish - a burned number, a voided one - is recorded with its code instead of being retried |
-| A resumed run never burns a number whose document exists | A row that recorded its hash reads its own archive key before it renders again. Same bytes: the number is issued, with no render. Other bytes: a content conflict (`DEI-240`). The read fails: retried later. No object: the run renders, validates and checks dates again, and a refusal burns the number with its rule id |
+| A resumed run never burns a number whose document exists | A row that recorded its hash reads its own archive key before it renders again. Same bytes: the number is issued, with no render. Other bytes: a content conflict (`DEI-240`). The read fails: retried later. No object: the run renders, validates and checks dates again, and a refusal burns the number with its rule id. New bytes that pass but differ from the recorded hash or key: the number burns with `DEI-244`, nothing is archived |
 | A store that quietly overwrites is refused | At startup, with a real conditional write against a scratch key - not on the strength of a capability flag |
 | A sale with no document is noticed | A reconciliation sweep lists what Stripe finalised and re-enqueues anything with no issued document **and no recorded reason for it**, through the same idempotent path. A number that was burned or voided already has its reason, chained: it is reported under its own code and never re-enqueued. The sweep alerts and never repairs |
 | A redelivery returns the stored document | After checking the archived bytes against the recorded hash. A tampered archive is refused; a legitimate upstream edit is not |
@@ -149,6 +149,9 @@ the chain, and an operator voids it. The unit of work takes it from `ARCHIVING` 
 `FAILED_ARCHIVE` only when a resumed run found no object at the row's archive key (or the row had
 no key yet). The row then keeps any hash it recorded the first time. **That hash names the first bytes, which passed and were never archived; the rule
 id names the refusal of the later bytes.** The run logs both hashes at WARN, never the content.
+With rule id `DEI-244`, the later bytes passed but differ from the recorded hash (or key); they were
+never stored. A later event for a burned number ends on `DEI-250` and carries the burn's rule id,
+so with `DEI-244` it says that nothing was refused.
 
 Example. `F-2026-0042` is numbered on 10 January. The archive write times out and nothing lands.
 The host upgrades; the retry renders BT-2 = 3 January; `EINVOICE-DATES` refuses. The event ends on
@@ -292,6 +295,14 @@ allocation. Example: an invoice numbered on 10 January whose renderer writes 3 J
 whatever your validator answers. The check reads UBL `Invoice` and `CreditNote` only; any other
 syntax is refused until the module ships a reader for it. A custom format is a paid service, and
 the date check applies to it. The ports are public, so you are not blocked waiting for one.
+
+**Your renderer must be byte-stable across a retry.** Only the hash of the first attempt is
+recorded. When a retry finds no object at that key and renders bytes that pass but differ, the
+number is burned with `DEI-244` and nothing is archived: the hash and key are write-once, so the
+new bytes can never take that number. Causes: a renderer upgrade, a seller profile change (the
+seller's street name corrected in configuration between two attempts), a mapping change, a new rule
+pack that changes the output, or a timestamp or random id in the bytes. Drain open numbers
+(`NUMBERED`, `ARCHIVING`, `FAILED_ARCHIVE`) before such a change.
 
 With neither ours nor yours, this whole half of the module does not start: allocating a number with
 no way to produce a validated document would consume a legal series and archive nothing. **How

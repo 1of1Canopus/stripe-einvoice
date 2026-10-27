@@ -42,6 +42,10 @@ public enum IssuanceState {
    * object, renders again and is refused, the recorded hash names the <em>first</em> bytes, which
    * passed and were never archived, and the rule id names the refusal of the <em>later</em> bytes.
    * The run logs both hashes at WARN. A resumed run that finds the object never burns: it issues.
+   *
+   * <p>With rule id {@code DEI-244} (D-RTR-5), the later bytes passed but differ from the recorded
+   * hash (or key); they were never stored. Nothing was refused: the number burns because its
+   * recorded document can no longer be produced, and another one may not take its key.
    */
   FAILED_VALIDATION,
 

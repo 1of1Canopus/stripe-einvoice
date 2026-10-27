@@ -286,6 +286,16 @@ public final class ErrorCodes {
   public static final String ARCHIVE_FAILED = "DEI-243";
 
   /**
+   * A resumed run rendered bytes that passed validation but differ from the document the row
+   * recorded before its first archive write (D-RTR-5): another hash, or another extension and so
+   * another key. The recorded document was never stored, and the new one may not be, because the
+   * hash and key are write-once. The number is burned ({@code FAILED_VALIDATION}, rule id this
+   * code), terminal. Usually a renderer upgrade, a seller profile or mapping change, or a new rule
+   * pack between two attempts. Distinct from {@code DEI-240}: there the store holds other bytes.
+   */
+  public static final String RENDER_NOT_REPRODUCIBLE = "DEI-244";
+
+  /**
    * Another worker holds this issuance row's archive lock: it is between its ARCHIVING marker and
    * its outcome, so its write may still land (D-RTR-7). Retryable: this run read nothing, rendered
    * nothing and wrote nothing, and the next attempt decides from what the other worker left.
@@ -316,7 +326,11 @@ public final class ErrorCodes {
    */
   public static final String HOST_AUTOSAVE_UNSUPPORTED = "DEI-249";
 
-  /** The exact bytes did not pass validation. The failing rule id is recorded. */
+  /**
+   * The exact bytes did not pass validation. The failing rule id is recorded. A later event for a
+   * number already burned answers this code too, with the rule id the burn recorded: with {@code
+   * DEI-244} nothing was refused, the later bytes passed but were not the recorded document.
+   */
   public static final String VALIDATION_REFUSED = "DEI-250";
 
   /** A validation could not run. Never PASSED by construction (checklist lines 18 and 57). */
