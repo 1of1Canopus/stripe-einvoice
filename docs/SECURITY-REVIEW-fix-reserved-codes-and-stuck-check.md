@@ -83,3 +83,80 @@ or on its own docs commit. No history rewrite.
 - Tenancy: the read filters on seller and mode; the builder's test shows another seller and the other
   mode are not returned.
 - `ReservedErrorCodes` stays JDK-only (`java.util`); ArchitectureTest green. The map is immutable.
+
+## Pass 2 (2026-10-27)
+
+Head `96af207`. Limited pass: the fix for D-PR51-1 and D-PR51-2, and the new surface it adds.
+
+**Verdict: NOT MERGE.** D-PR51-1 and D-PR51-2 are verified. The fix adds two new findings:
+D-PR51-3 (LOW) and D-PR51-4 (INFO). Under the no-allowance rule both are fixed before merge.
+
+### Numbers
+
+| Check | Result |
+|---|---|
+| `CIPHER_PROBE_MAVEN=1 ./mvnw -B verify`, Docker up | core 958, starter 157, sample 9; 0 failed, 0 skipped; coverage gates met |
+| Pass 1 probes (`CipherProbePr51eTest`) | 3 of 3 green |
+| Mutation "stop at the first failed check" (rethrow at once in `Failures.call`) | `probe_a_refused_stripe_key_skips_the_archive_checks_of_the_same_pass` red; restored |
+| Pass 2 probes (`CipherProbePr51fTest`, internal) | 2 variants green, 2 probes red on `96af207` |
+
+### D-PR51-1 (LOW): verified
+
+The probe is green, the guard stays green, and the mutation turns the probe red. Two adversarial
+variants, both green:
+
+- `variant_archive_down_and_key_refused_every_other_check_still_runs`. Stripe refuses the key and
+  every archive read fails, in the same pass. The key-refused, stuck, series-read and
+  unfinished-reprocess checks all still run. The pass throws the Stripe failure (`DEI-219`) with the
+  archive failure (`DEI-241`) attached as suppressed.
+- `variant_series_read_failure_reports_no_orphan`. The series read fails while the archive holds a
+  real document. No orphan finding (`DEI-272`) is written. The unfinished-reprocess check still
+  runs. The pass fails.
+
+### D-PR51-2 (INFO): verified
+
+The CHANGELOG entry says "Implementers must add it." and the fix commit carries a
+`BREAKING CHANGE:` footer naming `openOlderThan`. The probe is green.
+
+### D-PR51-3 (LOW): one shared exception instance stops the rest of the pass
+
+`Failures.call` keeps the first failure and calls `first.addSuppressed(e)` for each later one. If
+two checks throw the same exception instance, that call is `first.addSuppressed(first)`. The JDK
+answers with `IllegalArgumentException: Self-suppression not permitted`, thrown from inside the
+catch block. It escapes the pass. The checks after it do not run, and the pass ends with an
+exception that carries no `DEI` code.
+
+Example: a host archive adapter behind a circuit breaker (a switch that stops calls to a failing
+service) throws one preallocated "archive unavailable" exception. The archive is down. The
+"us to archive" check throws it, then the "archive to us" check throws the same object. The
+unfinished-reprocess check (`DEI-276`) never runs, which is the gap D-PR51-1 closed.
+
+Repro: `probe_one_shared_exception_instance_aborts_the_rest_of_the_pass`. Red on `96af207`:
+`IllegalArgumentException` at `ReconciliationSweep$Failures.call`, and the unfinished check is not
+called.
+
+Fix (builder of this PR, `ReconciliationSweep.Failures.call`): attach a later failure only when it
+is not the same instance as the first and is not already among its suppressed. Do not change the
+order of checks. The probe must turn green; `CipherProbePr51eTest` and `ReconciliationSweepTest`
+stay green.
+
+### D-PR51-4 (INFO): a failed series read names only one of the two skipped checks
+
+When the series read fails, both archive checks are skipped. The WARN says only
+"reconciliation check 'archive to us' not run". Nothing names "us to archive". An operator who asks
+why `DEI-271` and `DEI-275` stopped finds no line for it.
+
+Repro: `probe_a_failed_series_read_names_only_one_of_the_two_skipped_checks`. Red on `96af207`.
+
+Fix (builder of this PR, `ReconciliationSweep.sweep`, the `else` branch after the series read): the
+WARN names both checks, "us to archive" and "archive to us".
+
+### Checked and not a finding
+
+- A partial series read cannot feed the orphan check. `seriesRows` builds its list and returns it
+  only when every series key was read. One failing key fails the whole read, so the orphan check
+  never runs with half the known keys.
+- The failure log carries the check name and the `DEI` code or the class name, never the message.
+  A host adapter's message cannot reach the log through this path.
+- The pass still throws, so the sweeper WARN and `DEI-274` keep their meaning. The first failure is
+  the one thrown; a test can read the others as suppressed.
