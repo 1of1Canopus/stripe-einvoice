@@ -406,7 +406,11 @@ public final class ErrorCodes {
   /** An archived document no longer hashes to what its row recorded. */
   public static final String RECON_ARCHIVE_DRIFT = "DEI-275";
 
-  /** An archive object that no {@code ISSUED} row predicted. Alerted, never deleted. */
+  /**
+   * An archive object that no row predicted, whatever the row's state. Alerted, never deleted. An
+   * object at the key of a burned or voided row was predicted and is {@link
+   * #RECON_OBJECT_FOR_DISPOSED_NUMBER} instead, reported once (D-RTR-4).
+   */
   public static final String RECON_ORPHAN_OBJECT = "DEI-272";
 
   /** A number allocated and open past {@code einvoice.issuance.alert-after}. */
@@ -432,6 +436,17 @@ public final class ErrorCodes {
    * The operator's next step is the void; re-enqueueing it only repeats the refusal.
    */
   public static final String RECON_BURNED_NO_DOCUMENT = "DEI-279";
+
+  /**
+   * An archive object exists at the key of a burned or voided number (D-RTR-4). The ledger says the
+   * number has no document; the archive holds bytes for it. Example: the PUT for {@code
+   * F-2026-0042} timed out on the client, the resumed run found nothing and burned the number, and
+   * the first PUT completed on the store afterwards. The finding's subject is the Stripe invoice
+   * id; the WARN line names the legal number, the key and whether the bytes hash to the row's
+   * recorded hash (other bytes are {@link #RECON_ARCHIVE_DRIFT} too). Alerted, never deleted: keep
+   * the object as evidence and record it in the series report.
+   */
+  public static final String RECON_OBJECT_FOR_DISPOSED_NUMBER = "DEI-281";
 
   /**
    * An inbound row stayed in a running state past {@code einvoice.issuance.running-ceiling} (or

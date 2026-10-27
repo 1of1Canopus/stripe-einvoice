@@ -90,6 +90,24 @@ class ArchitectureTest {
         .check(CLASSES);
   }
 
+  /**
+   * D-RTR-4, path O11: the chain verifier reads the database only. An object at the key of a burned
+   * or voided number is the sweep's fifth check, not the verifier's, so the verifier never gains a
+   * network dependency. Example: an auditor runs the verifier with the archive down, and it still
+   * answers.
+   */
+  @Test
+  void the_chain_verifier_does_not_depend_on_the_archive() {
+    noClasses()
+        .that()
+        .haveFullyQualifiedName("com.housedevinci.einvoice.application.IssuanceChainVerifier")
+        .should()
+        .dependOnClassesThat()
+        .haveFullyQualifiedName("com.housedevinci.einvoice.application.ArchiveStore")
+        .because("the verifier reads the database only (D-RTR-4, O11)")
+        .check(CLASSES);
+  }
+
   /** Design review R8: the rule is JDK and domain only, so it is the same rule everywhere. */
   @Test
   void the_date_rule_depends_on_the_jdk_and_the_domain_only() {

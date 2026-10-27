@@ -57,4 +57,16 @@ public interface IssuanceReader {
    * still named by the first pass of January. "Open" is {@link IssuanceState#open()}.
    */
   List<Issuance> openOlderThan(String sellerId, Mode mode, Instant before, int limit);
+
+  /**
+   * Burned or voided rows of this seller and mode that recorded an archive key, newest number
+   * first, in every series and every fiscal year (D-PR52-1).
+   *
+   * <p>The disposed-number check of the reconciliation reads this, not {@link #inSeries}: the risk
+   * starts when a number is burned or voided, which can be long after it was numbered. Example: a
+   * 2026 number stays open over the new year and is voided on 10 January 2027 while its PUT is on
+   * the store; the 2027 pass still looks it up. "Disposed" here is {@code FAILED_VALIDATION} or
+   * {@code VOID_UNUSED}: the number will never carry a document.
+   */
+  List<Issuance> disposedWithKey(String sellerId, Mode mode, int limit);
 }

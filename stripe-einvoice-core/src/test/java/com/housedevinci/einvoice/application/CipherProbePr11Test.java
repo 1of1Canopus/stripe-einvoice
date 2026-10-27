@@ -340,6 +340,11 @@ class CipherProbePr11Test {
     }
 
     @Override
+    public java.util.List<Issuance> disposedWithKey(String sellerId, Mode mode, int limit) {
+      return delegate.disposedWithKey(sellerId, mode, limit);
+    }
+
+    @Override
     public java.util.Set<com.housedevinci.einvoice.domain.IssuanceState> issuanceStates(
         String stripeInvoiceId) {
       return delegate.issuanceStates(stripeInvoiceId);

@@ -158,6 +158,13 @@ The host upgrades; the retry renders BT-2 = 3 January; `EINVOICE-DATES` refuses.
 `DEI-250` with that rule id, the row is `FAILED_VALIDATION`, nothing is archived, and the sweep
 reports `DEI-279` until an operator voids the number.
 
+If the first PUT completes on the store after the burn (or after a void), the sweep reports
+`DEI-281` on the invoice: the ledger says the number has no document, and the archive holds one.
+Nothing is deleted. The operator keeps the object as evidence and notes it next to the number in
+the series report. The finding repeats on every pass while the row is among the newest
+`page-size` burned or voided numbers that recorded a key (500 by default), in any year. Issued
+numbers do not push it out: only 500 burned or voided numbers with a key, numbered after it, do.
+
 ### Database connections: one session per connection
 
 Each issuance row is held under a session-level PostgreSQL advisory lock from the moment its

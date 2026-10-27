@@ -299,9 +299,9 @@ class ArchiveRetryRefusalPathsTest {
   // ResumedRenderMismatchPathsTest.a_resumed_render_with_another_hash_burns_the_number.
 
   @Test
-  void an_object_landing_after_the_burn_is_not_reported_yet() {
-    // D-RTR-4 (its own PR before the tag): the PUT timed out, the read found nothing, the object
-    // lands after the burn. Today no sweep direction reports it; this pin names the row.
+  void an_object_landing_after_the_burn_is_reported() {
+    // D-RTR-4: the PUT timed out, the read found nothing, the object lands after the burn. The
+    // sweep's fifth check reports it; the full path table is DisposedNumberArchivePathsTest.
     Row row = prepare(FAILED_ARCHIVE_NO_OBJECT, "in_q2");
     row.retryBackdated();
     row.harness()
@@ -313,6 +313,8 @@ class ArchiveRetryRefusalPathsTest {
 
     assertThat(result.burnedNoDocument()).isEqualTo(1);
     assertThat(result.orphanObjects()).isZero();
+    assertThat(result.disposedWithObject()).isEqualTo(1);
+    assertThat(result.archiveDrift()).isEqualTo(1); // "late" is not the recorded bytes
   }
 
   // ------------------------------------------------------------------ S7
