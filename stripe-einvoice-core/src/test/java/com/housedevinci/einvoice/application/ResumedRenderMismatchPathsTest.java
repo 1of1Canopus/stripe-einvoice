@@ -71,8 +71,7 @@ class ResumedRenderMismatchPathsTest {
   }
 
   static IssuanceUnitOfWork.Outcome retryUpgraded(Row row) {
-    return row.retry(
-        upgraded(row.harness()), TestValidators.passing(), ArchiveRetryFixture.READER);
+    return row.retry(upgraded(row.harness()), TestValidators.passing(), ArchiveRetryFixture.READER);
   }
 
   /** Burned with DEI-244: H1 and its key kept on the row and the event, nothing archived. */
@@ -238,8 +237,7 @@ class ResumedRenderMismatchPathsTest {
     Row row = prepare(FAILED_ARCHIVE_NO_OBJECT, "in_rm_r5");
 
     IssuanceUnitOfWork.Outcome outcome =
-        row.retry(
-            row.harness().renderer(), TestValidators.passing(), ArchiveRetryFixture.READER);
+        row.retry(row.harness().renderer(), TestValidators.passing(), ArchiveRetryFixture.READER);
 
     assertThat(outcome.state()).isEqualTo(InboundState.COMPLETED);
     assertThat(row.now().state()).isEqualTo(IssuanceState.ISSUED);
