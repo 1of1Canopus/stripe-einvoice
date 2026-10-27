@@ -97,7 +97,9 @@ public final class ReconciliationSweep {
       int unfinishedReprocesses,
       int voidedNoDocument,
       int burnedNoDocument,
-      int accessRefused) {
+      int accessRefused,
+      int disposedWithObject,
+      int disposedUnverified) {
 
     public int total() {
       return missingIssuance
@@ -108,7 +110,9 @@ public final class ReconciliationSweep {
           + unfinishedReprocesses
           + voidedNoDocument
           + burnedNoDocument
-          + accessRefused;
+          + accessRefused
+          + disposedWithObject
+          + disposedUnverified;
     }
   }
 
@@ -180,7 +184,9 @@ public final class ReconciliationSweep {
             counts.unfinished,
             counts.voided,
             counts.burned,
-            counts.keyRefused);
+            counts.keyRefused,
+            0,
+            0);
     log.info(
         "einvoice: reconciliation checked {} finalised invoices and raised {} findings"
             + " (missing {}, archive missing {}, drift {}, orphan {}, stuck {},"

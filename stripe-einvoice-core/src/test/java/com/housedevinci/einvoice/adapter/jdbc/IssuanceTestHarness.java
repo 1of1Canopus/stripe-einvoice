@@ -532,6 +532,39 @@ public final class IssuanceTestHarness {
         unitOfWork().configuration());
   }
 
+  /** The sweep over another archive port: a counting or failing wrapper around this harness's. */
+  public com.housedevinci.einvoice.application.ReconciliationSweep sweepWith(
+      com.housedevinci.einvoice.application.ReconciliationSweep.Settings settings,
+      com.housedevinci.einvoice.application.ArchiveStore archiveStore) {
+    return new com.housedevinci.einvoice.application.ReconciliationSweep(
+        source,
+        store,
+        inbound,
+        archiveStore,
+        findings,
+        reprocessLedger,
+        clock,
+        settings,
+        unitOfWork().configuration());
+  }
+
+  /** The sweep over another reader and archive port: recording or failing wrappers. */
+  public com.housedevinci.einvoice.application.ReconciliationSweep sweepWith(
+      com.housedevinci.einvoice.application.ReconciliationSweep.Settings settings,
+      IssuanceReader issuanceReader,
+      com.housedevinci.einvoice.application.ArchiveStore archiveStore) {
+    return new com.housedevinci.einvoice.application.ReconciliationSweep(
+        source,
+        issuanceReader,
+        inbound,
+        archiveStore,
+        findings,
+        reprocessLedger,
+        clock,
+        settings,
+        unitOfWork().configuration());
+  }
+
   /** Rows in the findings table for one subject, acknowledged or not. */
   public long findingRows(String subjectId) {
     return PostgresSupport.scalar(

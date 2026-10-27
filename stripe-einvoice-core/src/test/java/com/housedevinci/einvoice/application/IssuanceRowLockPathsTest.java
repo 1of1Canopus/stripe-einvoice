@@ -232,11 +232,21 @@ class IssuanceRowLockPathsTest {
       IssuanceUnitOfWork.Outcome outcomeA = a.get(30, TimeUnit.SECONDS);
 
       assertThat(b.code()).isEqualTo(ErrorCodes.VALIDATION_REFUSED);
-      // The accepted D-RTR-4 window: A's object lands after the burn, and A writes nothing wrong.
+      // The D-RTR-4 window: A's object lands after the burn, and A writes nothing wrong.
       assertThat(harness.issuance("in_lk_kill").orElseThrow().state())
           .isEqualTo(IssuanceState.FAILED_VALIDATION);
       assertThat(harness.archive().size()).isEqualTo(1);
       assertThat(outcomeA.state()).isEqualTo(InboundState.FAILED_ISSUANCE);
+      // The sweep's disposed-number check names the object; it stays in the archive.
+      harness.moveClockForward(Duration.ofHours(1));
+      assertThat(harness.sweep(SETTINGS).sweep().disposedWithObject()).isEqualTo(1);
+      assertThat(harness.openFindings())
+          .anySatisfy(
+              f -> {
+                assertThat(f.code()).isEqualTo(ErrorCodes.RECON_OBJECT_FOR_DISPOSED_NUMBER);
+                assertThat(f.subjectId()).isEqualTo("in_lk_kill");
+              });
+      assertThat(harness.archive().size()).isEqualTo(1);
       assertThat(RowLockHolder.holderPid(PostgresSupport.dataSource(), id)).isEqualTo(-1);
     } finally {
       release.countDown();
