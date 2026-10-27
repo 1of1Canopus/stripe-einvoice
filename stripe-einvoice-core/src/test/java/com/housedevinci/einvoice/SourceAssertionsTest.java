@@ -74,6 +74,10 @@ class SourceAssertionsTest {
     assertThat(statements).isNotEmpty();
     for (String statement : statements) {
       String sql = statement.toLowerCase(Locale.ROOT);
+      if (statement.equals(UNSCOPED_STATE_READ)) {
+        // Named and pinned in the next test: the one deliberate exception (D-SRE-6).
+        continue;
+      }
       boolean touchesScopedTable =
           sql.contains("einvoice_series") || sql.contains("einvoice_issuance ");
       if (touchesScopedTable) {
@@ -98,7 +102,17 @@ class SourceAssertionsTest {
     assertThat(store).contains("FROM einvoice_issuance_event WHERE seq > ? ORDER BY seq LIMIT ?");
     assertThat(store).contains("FROM einvoice_issuance_anchor");
     assertThat(store).doesNotContain("FROM einvoice_issuance_event WHERE seller_id = ?");
+    // D-SRE-6, the one unscoped read of the issuance table: states only, by invoice id. A scoped
+    // read asked by an instance of the other mode would see a live number as absent; unscoped, a
+    // wrong mode can only make a row look numbered. It returns no number and no row data.
+    assertThat(sqlConstantsOf(store).stream().filter(UNSCOPED_STATE_READ::equals)).hasSize(1);
+    assertThat(sqlConstantsOf(store).stream().filter(s -> !s.contains("seller_id")))
+        .filteredOn(s -> s.toLowerCase(Locale.ROOT).contains("einvoice_issuance "))
+        .containsExactly(UNSCOPED_STATE_READ);
   }
+
+  private static final String UNSCOPED_STATE_READ =
+      "SELECT state FROM einvoice_issuance WHERE stripe_invoice_id = ?";
 
   @Test
   void nothing_in_this_module_is_synchronized_on_a_jdbc_path() {

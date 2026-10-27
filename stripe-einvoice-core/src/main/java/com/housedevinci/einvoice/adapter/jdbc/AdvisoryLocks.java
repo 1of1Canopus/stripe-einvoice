@@ -31,11 +31,20 @@ import java.sql.SQLException;
  *   <tr><td>gdpr-shredding</td><td>(tenant, subject)</td><td>2-arg</td><td>class 0x5355424A</td></tr>
  *   <tr><td>stripe-einvoice</td><td>schema init</td><td>2-arg</td><td>class 0x45494E49</td></tr>
  *   <tr><td>stripe-einvoice</td><td>issuance chain append</td><td>2-arg</td><td>class 0x45494E43</td></tr>
+ *   <tr><td>stripe-einvoice</td><td>issuance row archive write</td><td>2-arg, session</td><td>class 0x45494E41, low 32 bits of the row id</td></tr>
+ *   <tr><td>stripe-einvoice</td><td>one run per invoice</td><td>2-arg, session; xact for the purge</td><td>class 0x45494E52, first 4 bytes of SHA-256 of the object id</td></tr>
  * </table>
  *
- * <p>Both of this module's locks are <b>transaction-scoped</b>. A lock released before commit would
+ * <p>The schema and chain locks are <b>transaction-scoped</b>. A lock released before commit would
  * be no lock at all for a chain append, because the row it protects is not visible to anyone else
  * until the commit it was meant to order.
+ *
+ * <p>The issuance row lock is the one <b>session-scoped</b> lock (D-RTR-7). It spans an archive
+ * write, which is not a database call, so no transaction may stay open around it. It is only ever
+ * <em>tried</em>, never waited for, so it cannot join a wait cycle with the series row lock or the
+ * chain lock; it is released by hand after the outcome commits, and a connection whose release
+ * fails is closed, never returned to a pool. Two rows whose ids are 2^32 apart share a key: that
+ * costs a spurious retry, never a burn.
  */
 public final class AdvisoryLocks {
 
@@ -44,6 +53,18 @@ public final class AdvisoryLocks {
 
   /** The issuance chain append, so prev_hash is a real predecessor. "EINC". */
   public static final int CHAIN_CLASS_ID = 0x45494E43;
+
+  /** One issuance row between its ARCHIVING marker and its outcome. "EINA". Session-scoped. */
+  public static final int ROW_CLASS_ID = 0x45494E41;
+
+  /**
+   * One run per Stripe invoice (D-PR45-1). "EINR". Session-scoped, tried and never waited for, held
+   * for the whole run. The retention purge takes the same key transaction-scoped, so it never
+   * deletes a row a run holds. The second key is the first four bytes of SHA-256 of the stored
+   * row's object id, computed in Java ({@code hashtext} is not promised stable across PostgreSQL
+   * versions). A collision of two invoices only makes one of them wait a sweep.
+   */
+  public static final int RUN_CLASS_ID = 0x45494E52;
 
   /** The object each class id is keyed on inside its namespace. */
   public static final String SCHEMA_KEY = "einvoice_schema";

@@ -99,6 +99,8 @@ class CipherProbePr36Pass2StarterTest {
     @org.springframework.context.annotation.Bean
     com.housedevinci.einvoice.application.IssuanceUnitOfWork hostUnitOfWork(
         com.housedevinci.einvoice.application.InboundEventStore inbound,
+        com.housedevinci.einvoice.application.InboundRunLock runLock,
+        com.housedevinci.einvoice.application.RunPermits permits,
         com.housedevinci.einvoice.application.StripeInvoiceSource source,
         com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore store,
         com.housedevinci.einvoice.application.DocumentRenderer renderer,
@@ -121,7 +123,10 @@ class CipherProbePr36Pass2StarterTest {
                   false);
       return new com.housedevinci.einvoice.application.IssuanceUnitOfWork(
           inbound,
+          runLock,
+          permits,
           source,
+          store,
           store,
           store,
           store,

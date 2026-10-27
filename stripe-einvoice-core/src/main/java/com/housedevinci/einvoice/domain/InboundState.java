@@ -95,6 +95,10 @@ public enum InboundState {
               REFUSED_MODE,
               REFUSED_ACCOUNT,
               FAILED_FETCH);
+      // The four refusal and fetch-failure edges are taken only by a run that read the issuance
+      // table and found no number for the invoice (D-SRE-4): a crash between the FETCHED and the
+      // MAPPED writes leaves an unnumbered FETCHED row. A numbered row never takes them; its
+      // conclusion is mapped to FAILED_ISSUANCE (D-PR45-B1).
       case FETCHED ->
           Set.of(
               MAPPED,
@@ -104,10 +108,34 @@ public enum InboundState {
               FAILED_MAPPING,
               FAILED_TOTALS,
               FAILED_ISSUANCE,
+              REFUSED_VERSION_SKEW,
+              REFUSED_MODE,
+              REFUSED_ACCOUNT,
+              FAILED_FETCH,
               EXPIRED);
       case MAPPED -> Set.of(COMPLETED, FAILED_ISSUANCE, FETCHED, EXPIRED);
-      case PARKED -> Set.of(FETCHED, PARKED, DROPPED, FAILED_FETCH, EXPIRED);
-      case FAILED_FETCH -> Set.of(FETCHED, PARKED, DROPPED, FAILED_FETCH);
+      // D-PR45-B1: neither state ever holds a number, so a refusal on a re-run is the truth about
+      // the event, as it is for a fresh one. PARKED is running, so it may expire (QUESTIONS 29);
+      // FAILED_FETCH is a conclusion and is judged by the due query, never expired.
+      case PARKED ->
+          Set.of(
+              FETCHED,
+              PARKED,
+              DROPPED,
+              FAILED_FETCH,
+              REFUSED_VERSION_SKEW,
+              REFUSED_MODE,
+              REFUSED_ACCOUNT,
+              EXPIRED);
+      case FAILED_FETCH ->
+          Set.of(
+              FETCHED,
+              PARKED,
+              DROPPED,
+              FAILED_FETCH,
+              REFUSED_VERSION_SKEW,
+              REFUSED_MODE,
+              REFUSED_ACCOUNT);
       case FAILED_ISSUANCE -> Set.of(FETCHED, MAPPED, COMPLETED, FAILED_ISSUANCE);
       case COMPLETED, DROPPED, FAILED_MAPPING, FAILED_TOTALS, EXPIRED -> Set.of();
     };

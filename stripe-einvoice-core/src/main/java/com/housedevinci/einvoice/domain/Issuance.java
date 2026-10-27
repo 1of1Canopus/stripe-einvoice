@@ -143,7 +143,14 @@ public record Issuance(
         .orElseGet(() -> java.time.LocalDate.ofInstant(issuedAt, taxZone));
   }
 
-  /** The archived document's content hash, absent while the number has no document. */
+  /**
+   * The content hash the row recorded before its archive write, absent until then. Write-once.
+   *
+   * <p>On {@code ARCHIVING} and {@code ISSUED} it names the archived bytes. On a {@code
+   * FAILED_VALIDATION} row burned after a resumed run (QUESTIONS 38) it names the <em>first</em>
+   * bytes, which passed and were not in the archive when the resumed run read the key; the rule id
+   * names the refusal of the later bytes, and the run logged both hashes at WARN.
+   */
   public Optional<String> documentHash() {
     return documentSha256.isEmpty() ? Optional.empty() : Optional.of(documentSha256);
   }

@@ -56,7 +56,17 @@ public interface ArchiveStore {
    */
   WriteResult putIfAbsent(ArchiveKey key, byte[] bytes);
 
-  /** The stored bytes, for the integrity check and for an auditor read. */
+  /**
+   * The stored bytes, for the integrity check, for an auditor read, and for a resumed run that must
+   * learn whether its own key already holds its document before it renders again.
+   *
+   * <p>Empty means the key holds no object. A failure to read throws, and the module treats a throw
+   * as "not known yet" and retries; it never treats it as "absent", because a burn on an unread key
+   * could record a number as unused while its document sits in the archive.
+   *
+   * @throws com.housedevinci.einvoice.domain.EInvoiceException {@code DEI-241} when the store is
+   *     unreachable
+   */
   Optional<byte[]> get(ArchiveKey key);
 
   /**

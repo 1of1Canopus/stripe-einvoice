@@ -148,6 +148,19 @@ module is where that is set out.
 
 ## Residual risks on the issuance path
 
+- **The issuance row lock under a transaction pooler.** Each row is held under a session-level
+  advisory lock from its ARCHIVING marker to its outcome, and every transaction under the lock
+  first proves that this session still holds the key with this acquisition's random token. A
+  `DISCARD ALL`, another client re-taking the key, or a new backend with a reused pid all fail the
+  proof, and the run stops with `DEI-104` before it reads, writes or burns. The proof can be passed
+  falsely only by two foreign acts on our backend: something frees our lock without a reset
+  (`pg_advisory_unlock_all()`), then something that is not this module takes the same key without
+  writing a token. No released version of this module takes this key class, so only foreign code
+  running as our database role can do this; that is inside the trust boundary the lock assumes.
+  The `DEI-104` and `DEI-247` messages name the row id, never the token. Not closed: an archive
+  write is not a database call, so a lock freed during the write lets another worker burn the row
+  before the object lands (the next transaction of the first worker then refuses); the
+  reconciliation check for objects at burned keys reports it.
 - **Invoice dates ran backwards inside a series in 0.1.x.** Up to 0.1.x an invoice was dated by
   Stripe's finalisation time and numbered when its work reached the allocator, so a late webhook,
   a retry, a park, a reprocess or the reconciliation sweep could give an older date to a later

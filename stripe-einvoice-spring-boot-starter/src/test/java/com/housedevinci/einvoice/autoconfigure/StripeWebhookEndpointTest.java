@@ -64,11 +64,25 @@ class StripeWebhookEndpointTest {
 
   @Autowired InboundEventStore inbound;
 
+  @Autowired IssuanceTestApp.RecordingStripeSource stripeSource;
+
+  /**
+   * One Stripe invoice per event, known to the test source. The shared test database keeps due rows
+   * for other invoices, and the sweeper runs them. Under one run per invoice an event for an
+   * invoice another row is running at that moment answers busy ({@code DEI-217}) and waits for the
+   * next sweep, so a shared invoice id made these tests depend on test order.
+   */
+  private static String invoiceOf(String eventId) {
+    return "in_" + eventId.substring("evt_".length());
+  }
+
   private RestClient client() {
     return RestClient.builder().baseUrl("http://127.0.0.1:" + port).build();
   }
 
-  private static String body(String eventId, String type, String apiVersion, boolean livemode) {
+  private String body(String eventId, String type, String apiVersion, boolean livemode) {
+    String invoiceId = invoiceOf(eventId);
+    stripeSource.add(invoiceId);
     return "{\"id\":\""
         + eventId
         + "\",\"type\":\""
@@ -77,7 +91,9 @@ class StripeWebhookEndpointTest {
         + apiVersion
         + "\",\"livemode\":"
         + livemode
-        + ",\"data\":{\"object\":{\"id\":\"in_1\"}}}";
+        + ",\"data\":{\"object\":{\"id\":\""
+        + invoiceId
+        + "\"}}}";
   }
 
   private static String signature(String secret, byte[] body) {

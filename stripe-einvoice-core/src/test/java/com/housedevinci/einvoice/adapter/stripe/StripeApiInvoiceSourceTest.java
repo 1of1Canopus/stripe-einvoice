@@ -158,6 +158,54 @@ class StripeApiInvoiceSourceTest {
     }
   }
 
+  /**
+   * A revoked or under-scoped key (design section 5): 401 and 403 do not improve with time, so they
+   * carry their own code and the run stops. A rate limit and a server error stay retryable.
+   */
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.CsvSource({
+    "401, DEI-219",
+    "403, DEI-219",
+    "429, DEI-211",
+    "500, DEI-211",
+    "404, DEI-211"
+  })
+  void a_refused_key_has_its_own_code_and_every_other_failure_stays_retryable(
+      int status, String code) {
+    try (StripeStub stub = new StripeStub()) {
+      stub.answer(
+          "/v1/invoices/in_1",
+          "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"refused\"}}");
+      stub.failWith(status);
+
+      assertThatThrownBy(
+              () ->
+                  new StripeApiInvoiceSource(client(stub), StripeApiInvoiceSource.SDK_API_VERSION)
+                      .fetchInvoice("in_1"))
+          .isInstanceOf(EInvoiceException.class)
+          .extracting("code")
+          .isEqualTo(code);
+    }
+  }
+
+  @Test
+  void a_refused_key_on_the_reconciliation_list_has_its_own_code() {
+    try (StripeStub stub = new StripeStub()) {
+      stub.answer("/v1/invoices", "{\"error\":{\"type\":\"invalid_request_error\"}}");
+      stub.failWith(401);
+
+      assertThatThrownBy(
+              () ->
+                  new StripeApiInvoiceSource(client(stub), StripeApiInvoiceSource.SDK_API_VERSION)
+                      .finalisedInvoiceIds(
+                          java.time.Instant.parse("2026-01-01T00:00:00Z"),
+                          java.time.Instant.parse("2026-01-02T00:00:00Z")))
+          .isInstanceOf(EInvoiceException.class)
+          .extracting("code")
+          .isEqualTo("DEI-219");
+    }
+  }
+
   @Test
   void the_reconciliation_list_reads_only_invoices_finalised_inside_the_window() {
     try (StripeStub stub = new StripeStub()) {

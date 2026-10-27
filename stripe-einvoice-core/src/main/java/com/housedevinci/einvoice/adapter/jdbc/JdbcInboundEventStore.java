@@ -9,6 +9,7 @@ import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
+import com.housedevinci.einvoice.domain.IssuanceState;
 import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.RunningLimit;
 import com.housedevinci.einvoice.domain.Timestamps;
@@ -122,6 +123,78 @@ public final class JdbcInboundEventStore implements InboundEventStore {
           + " SET last_seen = EXCLUDED.last_seen, acknowledged_at = NULL";
 
   /**
+   * A conclusion written by a run that holds the run lock (D-ORPE-3): no {@code + 1}. One run is
+   * one attempt, and the run's only {@code + 1} is its stamp. Writes outside a run keep {@link
+   * #TRANSITION_FROM}.
+   */
+  static final String HELD_TRANSITION_FROM =
+      TRANSITION_FROM.replace(" attempts = attempts + 1,", "");
+
+  /**
+   * The stamp of a run that took the run lock (D-PR45-1): one attempt more, and the time a
+   * successor may start if this run dies. No state change; a compare on the state the run decided
+   * on.
+   */
+  static final String STAMP_ATTEMPT =
+      "UPDATE einvoice_inbound_event SET attempts = attempts + 1, next_attempt_at = ?,"
+          + " updated_at = ? WHERE event_id = ? AND state = ?";
+
+  /**
+   * D-SRE-7: a row whose invoice holds an open number (numbered, archiving or failed archive: the
+   * states whose {@code IssuanceState.open()} is true) outlives retention. A burned, voided or
+   * issued number has nothing to resume, so its row leaves at retention like any other (D-PR50-1).
+   * The reprocess needs the row to resume the number; the stuck check keeps naming it. Any seller
+   * and mode, like every "does this row hold a number" question (D-SRE-6). Repeated in the {@code
+   * DELETE}, so a number allocated between the candidate read and the delete still keeps its row.
+   */
+  static final String OPEN_NUMBER_KEEPS_ROW =
+      " AND NOT EXISTS (SELECT 1 FROM einvoice_issuance i WHERE i.stripe_invoice_id = e.object_id"
+          + " AND i.state IN ("
+          + java.util.Arrays.stream(IssuanceState.values())
+              .filter(IssuanceState::open)
+              .map(state -> "'" + state.name() + "'")
+              .collect(java.util.stream.Collectors.joining(","))
+          + "))";
+
+  /**
+   * D-SRE-3: the re-arm of rows stopped on a refused key, scoped to one mode and account, and only
+   * where no next attempt is set (a live run's stamp is never moved).
+   */
+  static final String REARM_ACCESS_REFUSED =
+      "UPDATE einvoice_inbound_event SET next_attempt_at = ?, updated_at = ?"
+          + " WHERE last_code = '"
+          + ErrorCodes.STRIPE_ACCESS_REFUSED
+          + "' AND state IN ('"
+          + InboundState.FAILED_FETCH.name()
+          + "','"
+          + InboundState.FAILED_ISSUANCE.name()
+          + "') AND next_attempt_at IS NULL AND livemode = ? AND stripe_account_id = ?";
+
+  /** D-SRE-5a: the rows the reconciliation pass names, one finding each. */
+  static final String ACCESS_REFUSED_ROWS =
+      "SELECT event_id FROM einvoice_inbound_event WHERE seller_id = ? AND mode = ?"
+          + " AND last_code = '"
+          + ErrorCodes.STRIPE_ACCESS_REFUSED
+          + "' AND state IN ('"
+          + InboundState.FAILED_FETCH.name()
+          + "','"
+          + InboundState.FAILED_ISSUANCE.name()
+          + "') AND next_attempt_at IS NULL ORDER BY received_at LIMIT ?";
+
+  /** The retention purge's candidates; each is deleted under the run key (design row 10). */
+  static final String PURGE_CANDIDATES =
+      "SELECT e.event_id, e.object_id FROM einvoice_inbound_event e WHERE e.received_at < ?"
+          + OPEN_NUMBER_KEEPS_ROW
+          + " ORDER BY e.received_at LIMIT ?";
+
+  /** Tried, never waited for: a row whose run is live is skipped this hour. */
+  static final String PURGE_TRY_RUN_KEY = "SELECT pg_catalog.pg_try_advisory_xact_lock(?, ?)";
+
+  static final String PURGE_ONE =
+      "DELETE FROM einvoice_inbound_event e WHERE e.event_id = ? AND e.received_at < ?"
+          + OPEN_NUMBER_KEEPS_ROW;
+
+  /**
    * The privileged re-open (QUESTIONS 26), run by {@code JdbcReprocessLedger} in the same
    * transaction as the record of who asked (D9-03) - which is why the statement lives here, beside
    * the table it writes, and is executed there, beside the row that attributes it.
@@ -138,15 +211,38 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   static final String REOPEN_FOR_REPROCESS =
       "UPDATE einvoice_inbound_event SET state = 'RECEIVED', last_code = ?, updated_at = ?,"
           + " due_since = ?, attempts = 0, next_attempt_at = NULL"
-          + " WHERE event_id = ? AND (state IN ('"
+          + " WHERE event_id = ? AND state IN ('"
           + InboundState.FAILED_MAPPING.name()
-          + "', '"
+          + "','"
           + InboundState.EXPIRED.name()
-          + "') OR (state = '"
+          + "','"
           + InboundState.FAILED_ISSUANCE.name()
-          + "' AND last_code = '"
-          + com.housedevinci.einvoice.application.IssuanceReprocess.ELIGIBLE_ISSUANCE_CODE
-          + "'))";
+          + "')"
+          // D-SRE-6: a row whose invoice holds a number, under any seller and mode, is never
+          // re-opened to RECEIVED, the state that never holds one. Checked in the statement, so
+          // the decision and the write cannot come apart.
+          + " AND NOT EXISTS (SELECT 1 FROM einvoice_issuance i"
+          + " WHERE i.stripe_invoice_id = einvoice_inbound_event.object_id)";
+
+  /**
+   * The in-place re-open of a numbered row (D-SRE-2, D-SRE-8), beside {@link #REOPEN_FOR_REPROCESS}
+   * and executed by {@code JdbcReprocessLedger} in the same transaction as the record of who asked.
+   * It is a re-open, not an {@code allowedNext} edge: no edge leaves a numbered state towards a
+   * state that cannot hold a number. The row goes to (or stays) {@code FAILED_ISSUANCE} with its
+   * code kept. Conditional on everything the caller read (state, code, attempts, last update) and
+   * on a number existing for the invoice, so two simultaneous operator calls give one winner.
+   */
+  static final String REOPEN_IN_PLACE =
+      "UPDATE einvoice_inbound_event SET state = '"
+          + InboundState.FAILED_ISSUANCE.name()
+          + "', updated_at = ?, attempts = 0, next_attempt_at = NULL"
+          + " WHERE event_id = ? AND state = ? AND last_code = ? AND attempts = ?"
+          + " AND updated_at = ? AND state IN ('"
+          + InboundState.FAILED_MAPPING.name()
+          + "','"
+          + InboundState.FAILED_ISSUANCE.name()
+          + "') AND EXISTS (SELECT 1 FROM einvoice_issuance i"
+          + " WHERE i.stripe_invoice_id = einvoice_inbound_event.object_id)";
 
   static final String BIND_SELLER =
       "UPDATE einvoice_inbound_event SET seller_id = ?, updated_at = ? WHERE event_id = ?";
@@ -188,8 +284,43 @@ public final class JdbcInboundEventStore implements InboundEventStore {
 
   private final JdbcUnitOfWork unitOfWork;
 
+  /** False for the store a run lock holder writes through: its conclusions add no attempt. */
+  private final boolean countsAttempts;
+
   public JdbcInboundEventStore(JdbcUnitOfWork unitOfWork) {
+    this(unitOfWork, true);
+  }
+
+  private JdbcInboundEventStore(JdbcUnitOfWork unitOfWork, boolean countsAttempts) {
     this.unitOfWork = Objects.requireNonNull(unitOfWork, "unitOfWork");
+    this.countsAttempts = countsAttempts;
+  }
+
+  /** The store a run lock holder writes through: every unit proves the lock (D-PR45-1). */
+  static JdbcInboundEventStore heldBy(JdbcUnitOfWork held) {
+    return new JdbcInboundEventStore(held, false);
+  }
+
+  @Override
+  public Optional<InboundEvent> stampAttempt(
+      String eventId, InboundState expected, Instant now, Duration retryIn) {
+    Objects.requireNonNull(expected, "expected");
+    Objects.requireNonNull(retryIn, "retryIn");
+    return unitOfWork.inTransaction(
+        unit -> {
+          Connection c = unit.connection();
+          Instant when = Timestamps.toStorage(now);
+          try (PreparedStatement ps = c.prepareStatement(STAMP_ATTEMPT)) {
+            ps.setObject(1, ts(Timestamps.toStorage(now.plus(retryIn))));
+            ps.setObject(2, ts(when));
+            ps.setString(3, eventId);
+            ps.setString(4, expected.name());
+            if (ps.executeUpdate() != 1) {
+              return Optional.<InboundEvent>empty();
+            }
+          }
+          return find(c, eventId, false);
+        });
   }
 
   @Override
@@ -366,7 +497,8 @@ public final class JdbcInboundEventStore implements InboundEventStore {
     // must not be able to move it backwards.
     InboundState resolved = current.state().transitionTo(next);
     Instant when = Timestamps.toStorage(now);
-    try (PreparedStatement ps = c.prepareStatement(TRANSITION_FROM)) {
+    try (PreparedStatement ps =
+        c.prepareStatement(countsAttempts ? TRANSITION_FROM : HELD_TRANSITION_FROM)) {
       int i = 1;
       ps.setString(i++, resolved.name());
       ps.setString(i++, code == null ? "" : code);
@@ -521,18 +653,88 @@ public final class JdbcInboundEventStore implements InboundEventStore {
     return List.copyOf(rows);
   }
 
+  /**
+   * Deletes up to {@code limit} rows past the retention ceiling, each in its own transaction under
+   * its run key (design one-run-per-event, row 10). A row whose run is live is skipped this hour:
+   * deleting it would let the run write into a row that no longer exists, and its next sweep
+   * re-create nothing. The key is tried, never waited for.
+   */
   @Override
   public int purgeOlderThan(Instant cutoff, int limit) {
+    List<String[]> candidates =
+        unitOfWork.inReadUnit(
+            unit -> {
+              List<String[]> rows = new ArrayList<>();
+              try (PreparedStatement ps = unit.connection().prepareStatement(PURGE_CANDIDATES)) {
+                ps.setObject(1, ts(cutoff));
+                ps.setInt(2, Math.max(1, limit));
+                try (ResultSet rs = ps.executeQuery()) {
+                  while (rs.next()) {
+                    rows.add(new String[] {rs.getString(1), rs.getString(2)});
+                  }
+                }
+              }
+              return rows;
+            });
+    int purged = 0;
+    for (String[] row : candidates) {
+      purged += purgeOne(row[0], row[1], cutoff);
+    }
+    return purged;
+  }
+
+  @Override
+  public int rearmAccessRefused(boolean livemode, String stripeAccountId, Instant now) {
+    Objects.requireNonNull(stripeAccountId, "stripeAccountId");
     return unitOfWork.inTransaction(
         unit -> {
-          try (PreparedStatement ps =
-              unit.connection()
-                  .prepareStatement(
-                      "DELETE FROM einvoice_inbound_event WHERE event_id IN ("
-                          + " SELECT event_id FROM einvoice_inbound_event"
-                          + " WHERE received_at < ? ORDER BY received_at LIMIT ?)")) {
-            ps.setObject(1, ts(cutoff));
-            ps.setInt(2, Math.max(1, limit));
+          Instant at = Timestamps.toStorage(now);
+          try (PreparedStatement ps = unit.connection().prepareStatement(REARM_ACCESS_REFUSED)) {
+            ps.setObject(1, ts(at));
+            ps.setObject(2, ts(at));
+            ps.setBoolean(3, livemode);
+            ps.setString(4, stripeAccountId);
+            return ps.executeUpdate();
+          }
+        });
+  }
+
+  @Override
+  public List<String> accessRefused(String sellerId, Mode mode, int limit) {
+    return unitOfWork.inReadUnit(
+        unit -> {
+          List<String> ids = new ArrayList<>();
+          try (PreparedStatement ps = unit.connection().prepareStatement(ACCESS_REFUSED_ROWS)) {
+            ps.setString(1, sellerId);
+            ps.setString(2, mode.wire());
+            ps.setInt(3, Math.max(1, limit));
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                ids.add(rs.getString(1));
+              }
+            }
+          }
+          return ids;
+        });
+  }
+
+  private int purgeOne(String eventId, String objectId, Instant cutoff) {
+    return unitOfWork.inTransaction(
+        unit -> {
+          Connection c = unit.connection();
+          try (PreparedStatement lock = c.prepareStatement(PURGE_TRY_RUN_KEY)) {
+            lock.setInt(1, AdvisoryLocks.RUN_CLASS_ID);
+            lock.setInt(2, JdbcInboundRunLock.runKey(objectId));
+            try (ResultSet rs = lock.executeQuery()) {
+              rs.next();
+              if (!rs.getBoolean(1)) {
+                return 0;
+              }
+            }
+          }
+          try (PreparedStatement ps = c.prepareStatement(PURGE_ONE)) {
+            ps.setString(1, eventId);
+            ps.setObject(2, ts(cutoff));
             return ps.executeUpdate();
           }
         });

@@ -1,11 +1,13 @@
 package com.housedevinci.einvoice.application;
 
 import com.housedevinci.einvoice.domain.Issuance;
+import com.housedevinci.einvoice.domain.IssuanceState;
 import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.SeriesKey;
 import com.housedevinci.einvoice.domain.SeriesReport;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Reads the issuance ledger. Every method takes the seller and the mode, and every statement behind
@@ -16,6 +18,22 @@ import java.util.Optional;
 public interface IssuanceReader {
 
   Optional<Issuance> findBySource(String sellerId, Mode mode, String stripeInvoiceId);
+
+  /**
+   * The states of every issuance row for this Stripe invoice, under <b>any</b> seller and mode;
+   * empty when the invoice holds no number anywhere.
+   *
+   * <p>The one read here without a seller and a mode in its predicate, on purpose (D-SRE-6). It
+   * answers a single question, "may this inbound row hold a number, and is that number still
+   * open?", and returns states only, no row data and no number. A scoped read asked by an instance
+   * of the other mode would say "no number" for a live numbered row, and the row would be moved to
+   * a state that never holds one. Unscoped, a wrong mode can only make a row look numbered, which
+   * keeps it under {@code FAILED_ISSUANCE} where the stuck check sees it: fail closed. Every
+   * decision that a row holds a number goes through this method: the {@code FETCHED} read of a run,
+   * the reprocess eligibility, and the choice between the in-place re-open and the re-open to
+   * {@code RECEIVED}.
+   */
+  Set<IssuanceState> issuanceStates(String stripeInvoiceId);
 
   /** Every number allocated in the series, with its disposition and the open count. */
   SeriesReport seriesReport(SeriesKey seriesKey);

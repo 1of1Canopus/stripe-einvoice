@@ -57,6 +57,12 @@ class DelegatingInboundEventStore implements InboundEventStore {
   }
 
   @Override
+  public Optional<InboundEvent> stampAttempt(
+      String eventId, InboundState expected, Instant now, Duration retryIn) {
+    return delegate.stampAttempt(eventId, expected, now, retryIn);
+  }
+
+  @Override
   public Optional<String> lastRuleId(String eventId) {
     return delegate.lastRuleId(eventId);
   }
@@ -85,6 +91,17 @@ class DelegatingInboundEventStore implements InboundEventStore {
   @Override
   public int purgeOlderThan(Instant cutoff, int limit) {
     return delegate.purgeOlderThan(cutoff, limit);
+  }
+
+  @Override
+  public int rearmAccessRefused(boolean livemode, String stripeAccountId, Instant now) {
+    return delegate.rearmAccessRefused(livemode, stripeAccountId, now);
+  }
+
+  @Override
+  public List<String> accessRefused(
+      String sellerId, com.housedevinci.einvoice.domain.Mode mode, int limit) {
+    return delegate.accessRefused(sellerId, mode, limit);
   }
 
   @Override

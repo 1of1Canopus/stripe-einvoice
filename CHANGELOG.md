@@ -22,6 +22,40 @@ All notable changes to this project are documented here. The format follows
   progress. The schema upgrade gives existing rows the upgrade instant, so a backlog is never
   expired on the first sweep. `IssuanceReprocess` accepts `EXPIRED` and starts the clock again;
   its refusal of a numbered invoice is unchanged.
+- **A refused Stripe key stops the event (D-PR45-B1, design "sweeper retry edges" section 5).**
+  HTTP 401 and 403 from the Stripe API are the new code `DEI-219 STRIPE_ACCESS_REFUSED`; every
+  other status stays `DEI-211`. The event stops with no retry. Each reconciliation pass records one
+  finding per stopped event (`DEI-219`, subject the event id), before its own Stripe call. The
+  first successful Stripe call after a refusal, and every startup (on the sweeper's thread once the
+  application is ready), makes the stopped events due again: only rows of this instance's mode and
+  Stripe account, and only rows with no next attempt. New port methods
+  `InboundEventStore.rearmAccessRefused` and `InboundEventStore.accessRefused`, new
+  `IssuanceUnitOfWork.rearmAccessRefused()` and `IssuanceUnitOfWork.stripeSource()`; the
+  reconciliation sweep bean reads through the unit of work's source. `ReconciliationSweep.Result`
+  gains `accessRefused`.
+
+- **One run per invoice (D-PR45-1).** A run of the issuance pipeline holds a session advisory lock
+  keyed on the Stripe invoice for its whole length (new port `InboundRunLock`, adapter
+  `JdbcInboundRunLock`, class id `0x45494E52`, session setting `einvoice.run_lock`). A second run
+  of the same invoice writes nothing and answers the stored state with the new code
+  `DEI-217 INBOUND_RUN_IN_PROGRESS`; a lock lost mid-run is `DEI-104` at WARN. Every inbound write
+  of a run proves the lock in its own transaction, and the run proves it again before it takes a
+  number and before it announces an archive write. The retention purge skips a row whose run is
+  live. `IssuanceReprocess` takes the lock before it re-opens a row and gains the disposition
+  `REFUSED_RUN_IN_PROGRESS`. See "One run per invoice" in the README.
+- **A run never joins a caller's transaction (D-PR49-1).** `IssuanceReprocess` and
+  `IssuanceUnitOfWork.process` called inside a transaction are refused with the new code
+  `DEI-218 RUN_IN_HOST_TRANSACTION` before the run lock is tried, and record nothing. A failed
+  joined run would have left its run lock on the caller's pooled connection, so the invoice
+  answered `DEI-217` with no run live until the pool retired that connection.
+- **Run permits and the pool rule (D-ORPE-4).** `RunPermits`, one per application, of
+  `einvoice.issuance.concurrency`, shared by the worker (which waits) and `IssuanceReprocess`
+  (which refuses at once with `DEI-102`). The starter refuses at startup (`DEI-100`) a Hikari pool
+  smaller than `3 x concurrency + 2`, unwrapping a proxied pool first. The rule runs in every
+  started context with a unit of work, the starter's or one the host builds (D-PR49-2).
+- **Reserved error codes (D-ORPE-8).** `ReservedErrorCodes` lists the codes approved plans already
+  gave a meaning (`DEI-214` to `DEI-216`); a test fails the build when a code in `ErrorCodes` repeats
+  a value or takes a reserved code under another name.
 
 - **Invoice dates go up with their numbers (D-PS1-27).** The issue date (BT-2) of an invoice is
   now the day its number is given: the database clock (`pg_catalog.clock_timestamp()`), read after
@@ -77,6 +111,51 @@ All notable changes to this project are documented here. The format follows
   keeps its own compare on state and clock, because `transitionFrom` compares the state only. A
   `FAILED_FETCH` row that was ever parked is now judged by its park clock against the parked limit,
   so one Stripe error no longer leaves it neither due nor stranded.
+- **The sweeper's retry edges (D-PR45-B1).** A re-run that reached a refusal or a fetch failure
+  from a state with no edge to it threw `DEI-210` and recorded nothing, every sweep tick. Ten new
+  edges: `PARKED` and `FAILED_FETCH` to the three refusals; `FETCHED` to the three refusals and
+  `FAILED_FETCH`, taken only when the issuance table holds no number for the invoice. A row that
+  may hold a number (`MAPPED`, `FAILED_ISSUANCE`, a numbered `FETCHED`) never writes a
+  pre-`FETCHED` state: the conclusion is written `FAILED_ISSUANCE` with its own code, with a
+  backoff (none for `DEI-205` and `DEI-219`). No new edge leaves a numbered state.
+- **New port method `IssuanceReader.anyIssuanceFor(stripeInvoiceId)` (D-SRE-6).** The one reader
+  method with no seller and mode: "does this row hold a number?" is asked by invoice id only, so an
+  instance of the other mode cannot see a live number as absent. Implementers must add it.
+- **The reprocess resumes a numbered row (D-SRE-2, D-SRE-8).** `IssuanceReprocess` now accepts a
+  `FAILED_ISSUANCE` row with any code, and a `FAILED_MAPPING` row, whose invoice holds a number. It
+  re-opens it in place (`FAILED_ISSUANCE`, code kept, never `RECEIVED`) with one conditional
+  statement on the row as read and the ledger entry in the same transaction, then resumes the same
+  number. New port method `ReprocessLedger.reopenInPlaceAndRecord`. The re-open to `RECEIVED`
+  refuses a numbered row in its own statement; `REFUSED_NUMBERED` now means a number appeared
+  between the read and that statement.
+- **`REFUSED_NUMBERED` in full (D-PR50-4).** The answer means the invoice holds a number that the
+  reprocess may not reopen: an issued, burned or voided one, or a number that appeared between the
+  read and the re-open statement. It runs nothing, records nothing and takes no number.
+- **The answer for a closed number changed since 0.1.0 (D-PR50-4).** In 0.1.0 a reprocess of an
+  event whose invoice holds a voided number answered `REFUSED_NOT_ELIGIBLE`. It now answers
+  `REFUSED_NUMBERED`. A script that branches on the answer must handle the new value.
+
+- **The reprocess accepts `FAILED_ISSUANCE` with any code when the invoice holds no number
+  (D-PR50-2).** A row the allocator refused before the claim, or a `MAPPED` row that crashed
+  before it, can be mapped to `FAILED_ISSUANCE` by a later outage and pass the retry ceiling with
+  no number; it now has an operator path. The re-open to `RECEIVED` keeps its no-number guard.
+  `IssuanceReprocess.ELIGIBLE_ISSUANCE_CODE` (unreleased) is removed.
+- **The retention purge keeps a row whose number is open (D-SRE-7).** A row whose invoice holds a
+  open number (numbered, archiving or failed archive) outlives `einvoice.inbound.retention`, so the reprocess
+  can still resume that number; it leaves at the first purge after the number resolves.
+
+- **BREAKING CHANGE: `InboundEventStore.stampAttempt` (D-PR45-1).** A new abstract method on the
+  port, with no default: a run stamps its row as it starts (`attempts + 1`, a next attempt one
+  backoff away, no state change, a compare on the state). One run is now one attempt: the
+  conclusions a run writes no longer add one, so a Stripe outage still retries at 1, 2, 4 minutes.
+  A run that dies is retried after its backoff, not at the next sweep tick.
+- **BREAKING CHANGE: `IssuanceUnitOfWork` takes an `InboundRunLock` and `RunPermits`**, after the
+  inbound store. A host that builds the unit of work by hand passes `new
+  JdbcInboundRunLock(unitOfWork, dataSource)` and one `new RunPermits(concurrency)` shared with
+  every caller.
+- **The PR 45 "carry on behind a run in flight" branch is removed.** Under the run lock no other run
+  moves the row; a compare that still fails means a writer outside the lock, logged at WARN, and
+  the run writes nothing more.
 
 - **BREAKING CHANGE: `InboundEventStore.transitionFrom` (D-PR9-F1).** A new abstract method on the port: a state
   move that lands only if the row still holds an expected state, and answers empty otherwise. A
@@ -127,6 +206,56 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A refusal on a resumed run is recorded (QUESTIONS 38, D-DD-B1).** A run that resumed a row in
+  `ARCHIVING` or `FAILED_ARCHIVE` and was then refused by the validator, the date check or the
+  renderer ended on `DEI-113` (illegal transition), with the number still open and re-enqueued by
+  the sweep. Two new edges, `ARCHIVING -> FAILED_VALIDATION` and `FAILED_ARCHIVE ->
+  FAILED_VALIDATION`, in the enum and in the database trigger, burn the number with its rule id
+  and a chained event. Example: `F-2026-0042`'s archive write times out on 10 January; after an
+  upgrade the retry renders BT-2 = 3 January; the event now ends on `DEI-250` with
+  `EINVOICE-DATES`, the row is `FAILED_VALIDATION`, and the sweep reports `DEI-279` instead of
+  re-enqueueing it.
+- **A resumed row reads its own archive key before it renders.** Same bytes as recorded: the number
+  is issued with no render, because the document already exists. Other bytes: `DEI-240`. A read
+  failure: retried, never a burn. No object: the run renders and checks again. A burn of a row that
+  had recorded a hash keeps that hash and logs both hashes at WARN.
+- **Two workers can no longer burn a number whose archive write is in flight (D-RTR-7).** During a
+  rolling deploy, worker A wrote its ARCHIVING marker and was uploading; worker B resumed the row,
+  found no object yet, rendered other bytes, was refused and burned the number; A's document then
+  landed. The row is now held under a session-level advisory lock from just before the marker until
+  the outcome is recorded. A second worker gets `DEI-245` and retries; it reads, renders and writes
+  nothing. **Breaking for hand-wired hosts:** `IssuanceUnitOfWork` takes an `IssuanceRowLock` after
+  the writer (pass the same `JdbcIssuanceStore`), and `JdbcUnitOfWork` gains `onOneConnection`.
+- **`DEI-104`: a pooler in transaction mode is refused** before a number is taken, because it
+  would silently turn the session lock into no lock. Session pooling and direct connections work.
+- A redelivery whose archive read fails is retried (`DEI-241`), never reported as tampered.
+- **Joined mode keeps the run's own outcome and never commits a half-written invoice (D-PR43-1,
+  D-PR43-6).** Inside a caller's transaction each locked step runs under a JDBC savepoint, so a
+  failed step no longer aborts the transaction before the lock is released, and the run keeps its
+  real error code instead of `DEI-104`. When a step fails after the transaction wrote through the
+  store, the module aborts the transaction on purpose (a `DO` block raising SQLState `DE248`,
+  confirmed by a statement that must fail with `25P02`), so the caller's commit commits nothing;
+  Spring callers also get `UnexpectedRollbackException`. The same now applies to a typed refusal
+  after a write outside the lock. The caller's connection is never aborted or closed. Two new
+  public error codes: `DEI-248` (the caller's transaction was already aborted before this call)
+  and `DEI-249` (pgjdbc `autosave=always`, or an unreadable driver, refused in joined mode; own
+  connections set `autosave` NEVER themselves).
+- **The row lock proves it is still ours, on every locked transaction (D-PR42-2).** Under a
+  transaction pooler, a backend reset or another client could free or take our lock while the
+  backend id stayed the same, and our release could then free another client's lock. Taking the
+  lock now writes a random token into the session; every locked transaction first checks the token
+  and the lock together and stops with `DEI-104` before it writes; the release frees only when that
+  check holds. Statement pooling is refused by its SQLState (`08P01`). The session setting
+  `einvoice.row_lock` is reserved.
+- **Security review of the row lock, pass 1 (D-PR42-1, 3, 4, 5).** The starter runs the session
+  check once at startup, outside any transaction, and a joined holder needs none, so a host
+  transaction on a pool of two is never starved. The lock's pre-check reads only this database's
+  locks: row 42 of a staging database on the same cluster no longer waits for production row 42. A
+  failed lock release has its own code, `DEI-247`. The README mount-point note names the harm and
+  gives `RequiresMountsFor=` and `mountpoint -q` checks.
+- **A burn writes the rule id and nothing else.** The trigger refuses a move to
+  `FAILED_VALIDATION` that also changes the document hash, the archive key or the void reason; the
+  void reason changes only with a move to `VOID_UNUSED`.
 - **A lost inbound compare-and-set under REPEATABLE READ or SERIALIZABLE answers quietly (D-PR45-2).**
   When the store owns the connection, a `40001` on the state move is retried once in a fresh
   transaction, so the loser of a worker and sweeper race steps aside instead of logging `DEI-102`.

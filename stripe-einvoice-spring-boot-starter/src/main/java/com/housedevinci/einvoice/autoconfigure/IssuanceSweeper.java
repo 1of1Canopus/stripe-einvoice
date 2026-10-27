@@ -20,6 +20,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.ApplicationListener;
 
 /**
  * The three background jobs of the free core: re-pick what is due, reconcile, and purge.
@@ -32,7 +34,8 @@ import org.springframework.beans.factory.InitializingBean;
  * <p>The scheduler only ever <em>submits</em> to the worker, so the bound on concurrent issuance is
  * the worker's and there is one of them.
  */
-public final class IssuanceSweeper implements InitializingBean, DisposableBean {
+public final class IssuanceSweeper
+    implements InitializingBean, DisposableBean, ApplicationListener<ApplicationReadyEvent> {
 
   private static final Logger log = LoggerFactory.getLogger(IssuanceSweeper.class);
 
@@ -133,6 +136,28 @@ public final class IssuanceSweeper implements InitializingBean, DisposableBean {
       // A sweep that fails must not kill the schedule: scheduleWithFixedDelay cancels the task on
       // an escaping throwable, and a silently cancelled sweeper is the watcher that was not there.
       log.warn("einvoice: the issuance sweep failed and will run again next interval", e);
+      return 0;
+    }
+  }
+
+  /**
+   * D-SRE-3: once at startup, on this scheduler's thread, after every startup check has passed (the
+   * application is ready). The key comes from the environment, so a fixed key means a restart: the
+   * events a refused key stopped become due without waiting for a new sale.
+   */
+  @Override
+  public void onApplicationEvent(ApplicationReadyEvent event) {
+    scheduler.execute(this::rearmAccessRefusedOnce);
+  }
+
+  /**
+   * The startup re-arm of rows stopped on a refused Stripe key; a failure is logged, never fatal.
+   */
+  public int rearmAccessRefusedOnce() {
+    try {
+      return unitOfWork.rearmAccessRefused();
+    } catch (RuntimeException e) {
+      log.warn("einvoice: the startup re-arm of events stopped on a refused key failed", e);
       return 0;
     }
   }

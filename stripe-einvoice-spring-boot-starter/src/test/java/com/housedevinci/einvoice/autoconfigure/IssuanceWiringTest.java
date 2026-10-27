@@ -723,6 +723,8 @@ class IssuanceWiringTest {
     @Bean
     com.housedevinci.einvoice.application.IssuanceUnitOfWork hostUnitOfWork(
         InboundEventStore inbound,
+        com.housedevinci.einvoice.application.InboundRunLock runLock,
+        com.housedevinci.einvoice.application.RunPermits permits,
         StripeInvoiceSource source,
         com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore store,
         DocumentRenderer renderer,
@@ -733,7 +735,10 @@ class IssuanceWiringTest {
         EInvoiceProperties properties) {
       return new com.housedevinci.einvoice.application.IssuanceUnitOfWork(
           inbound,
+          runLock,
+          permits,
           source,
+          store,
           store,
           store,
           store,

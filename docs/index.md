@@ -166,8 +166,8 @@ the same lock (see "The issue date is the numbering day").
 
 Per `(seller, series, fiscal year, mode)`, every allocated number with:
 
-- its disposition: `ISSUED`, `VOID_UNUSED` with its reason and rule id, or still open (`NUMBERED`,
-  `ARCHIVING`, `FAILED_ARCHIVE`);
+- its disposition: `ISSUED`, `VOID_UNUSED` with its reason and rule id, `FAILED_VALIDATION` with
+  its rule id, or still open (`NUMBERED`, `ARCHIVING`, `FAILED_ARCHIVE`);
 - the issue date (BT-2), the supply date or period, the allocation timestamp, and the cause of any
   day between supply and issue;
 - the Stripe invoice id it is bound to.
@@ -182,7 +182,7 @@ document, and both belong on the page.
 
 - **Privileged, and with no HTTP endpoint anywhere in this module.** Expose it yourself, behind your
   own authorization, or not at all.
-- Legal only from `NUMBERED`, `ARCHIVING` or `FAILED_VALIDATION`. From `ISSUED` it is refused twice:
+- Legal only from `NUMBERED`, `ARCHIVING`, `FAILED_ARCHIVE` or `FAILED_VALIDATION`. From `ISSUED` it is refused twice:
   by the state enum and by the database trigger.
 - The reason is mandatory, screened (NFC, no control characters beyond tab/newline/carriage return,
   no unpaired surrogates, not blank after collapsing, bounded at 500 characters) and length-bounded.
@@ -206,14 +206,33 @@ cause. So the remedy is this explicit, privileged call, for one event at a time.
 - **Privileged, and with no HTTP endpoint and no actuator operation anywhere in this module**, for
   the same reason the void has none. Call it from your own admin action, behind your own
   authorization.
-- Eligible only from `FAILED_MAPPING`. Every other state, including a passed event and a second
-  call after a successful reprocess, is answered `REFUSED_NOT_ELIGIBLE` with the recorded state and
-  number, and nothing runs.
-- Refused outright if a legal number already exists for that invoice: this path never touches a
-  numbered invoice.
+- Eligible from `FAILED_MAPPING`, and from `FAILED_ISSUANCE` with any code, when the invoice holds
+  no number: the row is re-opened to `RECEIVED`, and the run goes through every refusal again. The
+  re-open statement itself refuses a row whose invoice holds a number anywhere. Every other state, including a passed event and a
+  second call after a successful reprocess, is answered `REFUSED_NOT_ELIGIBLE` with the recorded
+  state and number, and nothing runs.
+- **A closed number is refused as `REFUSED_NUMBERED`.** A `FAILED_ISSUANCE` or `FAILED_MAPPING` row
+  whose invoice holds an issued, burned or voided number is answered `REFUSED_NUMBERED` (code
+  `DEI-111`), not `REFUSED_NOT_ELIGIBLE`. It runs nothing, records nothing and takes no number.
+- **A numbered row is resumed in place.** When the invoice already holds an open number (numbered,
+  archiving or failed archive; asked by invoice id, under any seller and mode), a `FAILED_ISSUANCE` row with any code, or a `FAILED_MAPPING` row,
+  is re-opened in place: it stays (or becomes) `FAILED_ISSUANCE` with its code kept, never
+  `RECEIVED`. The run then resumes **the same number**. It is not filtered by the retry ceiling,
+  so a row past it is resumed too. Example: the archive was down for four days and the row holding
+  `INV-2026-000012` passed the ceiling; once the archive is back, the reprocess resumes
+  `INV-2026-000012` and writes `COMPLETED`. A cause that is still there is refused again, and the
+  number is kept. The re-open is one conditional statement on the row as read, so two calls give
+  one entry and one run.
 - It re-opens the row and then runs the ordinary pipeline. It cannot skip the preflight, and a
   re-run that refuses again costs nothing, exactly as the first run did.
 - Two simultaneous calls on one event produce one run and one number.
+- It takes one of the shared run permits first, and refuses at once with `DEI-102` when all of them
+  are in use: it runs on your thread, so it never waits. It then takes the invoice's run lock
+  **before** the re-open. While another run of the same invoice is live it answers
+  `REFUSED_RUN_IN_PROGRESS` (`DEI-217`) and records nothing; call again later.
+- Call it **outside a transaction**. Inside one (a `@Transactional` method, a `TransactionTemplate`,
+  a connection you hand over) it is refused with `DEI-218 RUN_IN_HOST_TRANSACTION` before the run
+  lock is tried, and records nothing. A run never joins a caller's transaction.
 - `actor` and `reason` are mandatory, screened and **refused rather than shortened** if they are
   over their bound (64 and 500 characters). They are never concatenated: the record holds them as
   two columns.
@@ -339,6 +358,7 @@ One Stripe event becomes one archived document, or none, and there is a record e
 | P1 claim | The legal number, in one transaction with the issuance row | Nothing: every data refusal already happened |
 | P2 render | The exact bytes, then validation of those exact bytes | `FAILED_VALIDATION` on the issuance row and a chained event carrying the rule id, for the operator's void |
 | P3 write | `ARCHIVING` with the hash and key, then the write-once PUT | `FAILED_ARCHIVE`; an outage is retried, a content conflict is not |
+| Resume | A row in `ARCHIVING` or `FAILED_ARCHIVE` with a recorded hash reads its own key before it renders | Same bytes: `ISSUED`, no render. Other bytes: `DEI-240`, not retried. Read failure: `FAILED_ARCHIVE`, retried. No object: P2 again, and a refusal is `FAILED_VALIDATION` with the first hash kept on the row |
 | P4 issue | `ISSUED` and the chained disposition, one transaction | Back to P3 on the retry, byte-identical, no second number |
 
 ## Replaying a refused event
@@ -388,10 +408,10 @@ Two signals, and the difference matters:
 | `einvoice.webhook.tolerance` | `300s` | bounded above at 10 minutes; larger is refused |
 | `einvoice.archive.type` / `.root` | `filesystem`, root required | supply your own `ArchiveStore` |
 | `einvoice.archive.allow-non-atomic-store` | `false` | `true` - WARNs at every startup, read-back only |
-| `einvoice.issuance.concurrency` / `.queue-capacity` | `2` / `1000` | - |
+| `einvoice.issuance.concurrency` / `.queue-capacity` | `2` / `1000` | - ; the pool must hold `3 x concurrency + 2` connections, refused at startup otherwise |
 | `einvoice.issuance.retry-ceiling` | `72h` | - |
 | `einvoice.issuance.alert-after` | `6h` | - |
-| `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision |
+| `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision. A row whose invoice holds an open number (numbered, archiving or failed archive) is kept past it until the number resolves |
 | `einvoice.reconcile.interval` / `.window` / `.grace` | `15m` / `2d` / `15m` | `enabled=false` removes the only watcher there is |
 | `einvoice.reconcile.drift-sample` | `10` | `0` stops re-hashing archived documents |
 | `einvoice.numbering.closed-year-cutoff` | unset | setting it refuses invoices whose supply date falls in a year closed longer ago than this |
@@ -401,6 +421,21 @@ Nothing here disables signature verification, validation before archiving, the t
 write-once archiving.
 
 ## The database, continued
+
+### One run per invoice: what the server needs
+
+Each live run holds a session advisory lock on its invoice (`einvoice.run_lock`) on one connection
+for its whole length. Three server settings decide how fast a dead run's lock goes:
+
+- `tcp_keepalives_idle = 60`, `tcp_keepalives_interval = 10`, `tcp_keepalives_count = 6`. A node
+  that loses power cannot close its sessions; only the server's keepalive ends them. Example: a
+  node dies at 10:00 while it runs `in_1`. With operating-system defaults `in_1` is busy until about
+  12:11; with these settings the 10:03 sweep runs it.
+- PgBouncer in session mode: keep `server_reset_query = DISCARD ALL` (its default). Emptied, a lock
+  outlives its client on the server connection, and the invoice stays busy until `server_lifetime`.
+- A network that drops connections idle for a few minutes ends a long run's session; the run stops
+  with `DEI-104` at WARN and is retried after its backoff. The keepalive settings above keep the
+  connection from looking idle.
 
 Two more tables: `einvoice_inbound_event` (the durable intake record - purgeable, not append-only,
 and the one table the runtime role may delete from) and `einvoice_finding` (the compliance findings

@@ -22,6 +22,20 @@ public final class ErrorCodes {
   /** The server behind the DataSource is not PostgreSQL. */
   public static final String UNSUPPORTED_DATABASE = "DEI-103";
 
+  /**
+   * The database connections do not keep one server session: a pooler in transaction or statement
+   * mode (PgBouncer, for example) sits between this module and PostgreSQL. The issuance row lock is
+   * a session lock, and under such a pooler it would silently be no lock at all (D-RTR-7, R5), so
+   * the module refuses to issue rather than run unlocked. Use session pooling or a direct
+   * connection. There is no weaker mode.
+   *
+   * <p>Also the code of a run that <b>lost</b> its inbound run lock (D-ORPE-2): the server or the
+   * network ended the holder's session mid-run. The run writes nothing more, is logged at WARN with
+   * the event id, and its connection is closed. Never {@link #INBOUND_RUN_IN_PROGRESS}, which means
+   * the lock was never taken.
+   */
+  public static final String SESSION_NOT_PINNED = "DEI-104";
+
   /** No series row and no configured definition for this (seller, series, mode). */
   public static final String SERIES_NOT_CONFIGURED = "DEI-110";
 
@@ -211,6 +225,34 @@ public final class ErrorCodes {
   /** The re-fetched invoice is void and this module never issued a document for it. */
   public static final String UPSTREAM_VOID_NOT_ISSUED = "DEI-213";
 
+  /**
+   * Another run of the same Stripe invoice holds its run lock (D-PR45-1). This run wrote nothing
+   * and answers with the stored state; the sweeper picks the row again later. Only ever "the lock
+   * was never acquired": a lock lost mid-run is {@link #SESSION_NOT_PINNED}. Logged at DEBUG.
+   * {@code DEI-214} to {@code DEI-216} are reserved by approved plans ({@link ReservedErrorCodes}).
+   */
+  public static final String INBOUND_RUN_IN_PROGRESS = "DEI-217";
+
+  /**
+   * A run was started inside a caller's transaction (D-PR49-1), and a run never joins one. It
+   * fetches from Stripe, renders and archives, so it would hold that transaction open for minutes;
+   * its writes would show only at the caller's commit, after its run lock was released; and a
+   * failed write would abort the caller's transaction before the lock could be released, leaving
+   * the lock on a pooled connection. Refused before the lock is tried: nothing was locked, read or
+   * written, and the caller's transaction is untouched. Call {@code IssuanceReprocess} and {@code
+   * IssuanceUnitOfWork.process} outside a transaction.
+   */
+  public static final String RUN_IN_HOST_TRANSACTION = "DEI-218";
+
+  /**
+   * Stripe refused the key: HTTP 401 or 403 (design "sweeper retry edges", section 5). A revoked or
+   * under-scoped restricted key does not improve with time, so the run stops with no retry, the
+   * reconciliation pass names the event, and the first successful Stripe call after a refusal (or
+   * the next startup) makes the stopped rows due again. A rate limit (429) and every other status
+   * stay {@link #STRIPE_UNAVAILABLE}.
+   */
+  public static final String STRIPE_ACCESS_REFUSED = "DEI-219";
+
   /** Our recomputation of a total or of a tax bucket disagrees with Stripe's own (D-12). */
   public static final String TOTALS_MISMATCH = "DEI-220";
 
@@ -242,6 +284,37 @@ public final class ErrorCodes {
    * running again.
    */
   public static final String ARCHIVE_FAILED = "DEI-243";
+
+  /**
+   * Another worker holds this issuance row's archive lock: it is between its ARCHIVING marker and
+   * its outcome, so its write may still land (D-RTR-7). Retryable: this run read nothing, rendered
+   * nothing and wrote nothing, and the next attempt decides from what the other worker left.
+   */
+  public static final String ISSUANCE_IN_FLIGHT = "DEI-245";
+
+  /**
+   * The issuance row lock could not be released on its own session (D-PR42-4): usually the backend
+   * died (a failover, a terminated backend, a network cut). The connection is closed, never pooled,
+   * so the lock goes with it. Logged at ERROR; the run's own outcome stands. DEI-246 is reserved by
+   * the archive marker design.
+   */
+  public static final String ROW_LOCK_RELEASE_FAILED = "DEI-247";
+
+  /**
+   * The caller's transaction was already aborted before this call (SQLState 25P02 at the first
+   * statement of a joined call): the module took no key and wrote nothing. Roll the transaction
+   * back and call again (D-PR43-1).
+   */
+  public static final String HOST_TRANSACTION_ABORTED = "DEI-248";
+
+  /**
+   * Joined mode refuses a PostgreSQL connection whose driver option {@code autosave} is {@code
+   * ALWAYS}, or whose driver cannot be read (D-PR43-6): that option rolls back a failed statement
+   * to the driver's own savepoint, so a failed issuance step would not abort the caller's
+   * transaction and its commit could keep a half-written invoice. Use NEVER or CONSERVATIVE. There
+   * is no opt-out.
+   */
+  public static final String HOST_AUTOSAVE_UNSUPPORTED = "DEI-249";
 
   /** The exact bytes did not pass validation. The failing rule id is recorded. */
   public static final String VALIDATION_REFUSED = "DEI-250";

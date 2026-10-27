@@ -90,6 +90,7 @@ public final class IssuanceTestHarness {
             JdbcIssuanceStore.DEFAULT_ALLOCATION_TIMEOUT,
             issueClock);
     this.inbound = new JdbcInboundEventStore(JdbcUnitOfWork.ownConnection(dataSource));
+    this.runLock = new JdbcInboundRunLock(JdbcUnitOfWork.ownConnection(dataSource), dataSource);
   }
 
   /**
@@ -104,8 +105,92 @@ public final class IssuanceTestHarness {
         PostgresSupport.freshDatabase(hint));
   }
 
+  private com.housedevinci.einvoice.application.InboundRunLock runLock;
+
+  /**
+   * Defence in depth only. The units of work built after this call run with no run lock: every run
+   * is granted, and its writes go to the plain store. Used by the tests written before the run lock
+   * (D-PR45-1) that drive two runs of one event at once on purpose, to keep proving the layers
+   * under the lock - the compare-and-set writes (D-PR9-F1), the allocator's one number per invoice
+   * and the PR 43 row lock - which the design keeps on purpose (D-ORPE-6c). Never a production
+   * path: the module wires {@code JdbcInboundRunLock} and nothing else.
+   */
+  public IssuanceTestHarness withoutRunLock() {
+    this.runLock =
+        new com.housedevinci.einvoice.application.InboundRunLock() {
+          @Override
+          public <T> Optional<T> whileHeld(
+              InboundEvent storedRow, java.util.function.Function<HeldRun, T> work) {
+            return Optional.of(work.apply(new HeldRun(inbound, () -> {})));
+          }
+        };
+    return this;
+  }
+
+  /** Enough permits for every race test of this suite; T18 builds its own bound. */
+  private final com.housedevinci.einvoice.application.RunPermits permits =
+      new com.housedevinci.einvoice.application.RunPermits(8);
+
+  /** The run lock every unit of work of this harness takes (D-PR45-1). */
+  public com.housedevinci.einvoice.application.InboundRunLock runLock() {
+    return runLock;
+  }
+
+  /** The permits every unit of work of this harness shares. */
+  public com.housedevinci.einvoice.application.RunPermits permits() {
+    return permits;
+  }
+
+  /**
+   * The store's real row lock, handing the work the test's own substitute ports instead of the
+   * lock-bound ones: for the probes that inject a store fault into a reader or a writer.
+   */
+  public static com.housedevinci.einvoice.application.IssuanceRowLock lockWith(
+      JdbcIssuanceStore store, IssuanceReader reader, IssuanceWriter writer) {
+    return new com.housedevinci.einvoice.application.IssuanceRowLock() {
+      @Override
+      public <T> Optional<T> whileHeld(long issuanceId, java.util.function.Function<Held, T> work) {
+        return store.whileHeld(issuanceId, held -> work.apply(new Held(reader, writer)));
+      }
+
+      @Override
+      public void verifySessionPinning() {
+        store.verifySessionPinning();
+      }
+    };
+  }
+
+  /** A harness over a data source the test chose: a small pool, a pooler, a fresh database. */
+  public static IssuanceTestHarness createOn(javax.sql.DataSource dataSource) {
+    return new IssuanceTestHarness(
+        TestValidators.passing(), Optional.empty(), "Europe/Paris", dataSource);
+  }
+
+  /** The data source every store of this harness uses. */
   public javax.sql.DataSource dataSource() {
     return dataSource;
+  }
+
+  /** A unit of work whose row lock and renderer the test chooses, for the D-RTR-7 lock paths. */
+  public IssuanceUnitOfWork unitOfWorkWithLock(
+      com.housedevinci.einvoice.application.IssuanceRowLock lock,
+      com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
+    return new IssuanceUnitOfWork(
+        inbound,
+        runLock,
+        permits,
+        source,
+        store,
+        store,
+        store,
+        lock,
+        substituteRenderer,
+        validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
+        archive,
+        preflightSupport,
+        clock,
+        configurationFor("DEFAULT", pinnedApiVersion));
   }
 
   public static IssuanceTestHarness create() {
@@ -128,10 +213,50 @@ public final class IssuanceTestHarness {
     return unitOfWorkPinnedTo(pinnedApiVersion);
   }
 
+  /**
+   * A unit of work in another mode over the same database and seller: a second instance of the
+   * other mode, the case D-SRE-6 is about. The configured series exists only in live mode, so a run
+   * of this instance that reaches the allocator is refused there.
+   */
+  public IssuanceUnitOfWork unitOfWorkInMode(Mode mode) {
+    IssuanceUnitOfWork.Configuration live = configurationFor("DEFAULT", pinnedApiVersion);
+    return new IssuanceUnitOfWork(
+        inbound,
+        runLock,
+        permits,
+        source,
+        store,
+        store,
+        store,
+        store,
+        renderer,
+        validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
+        archive,
+        preflightSupport,
+        clock,
+        new IssuanceUnitOfWork.Configuration(
+            live.sellerId(),
+            live.stripeAccountId(),
+            mode,
+            live.series(),
+            live.fiscalYearReset(),
+            live.taxZone(),
+            live.pinnedApiVersion(),
+            live.rulePackVersion(),
+            live.retryBackoff(),
+            live.maxRetryBackoff(),
+            live.closedYearCutoff(),
+            live.readBackAfterWrite()));
+  }
+
   public IssuanceUnitOfWork unitOfWorkPinnedTo(String apiVersion) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
+        store,
         store,
         store,
         store,
@@ -152,8 +277,11 @@ public final class IssuanceTestHarness {
       com.housedevinci.einvoice.application.NumberAllocator allocator) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
         allocator,
+        store,
         store,
         store,
         renderer,
@@ -172,7 +300,10 @@ public final class IssuanceTestHarness {
   public IssuanceUnitOfWork unitOfWorkWithSeries(String series) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
+        store,
         store,
         store,
         store,
@@ -193,7 +324,10 @@ public final class IssuanceTestHarness {
       com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
+        store,
         store,
         store,
         store,
@@ -210,12 +344,42 @@ public final class IssuanceTestHarness {
    * A unit of work with a substitute Stripe source and renderer, for a probe that holds one worker
    * inside the fetch or the render while another runs the same event (D-PR9-F1).
    */
+  /**
+   * A unit of work whose inbound store, run lock and permits the test chooses, for the one run per
+   * event paths (D-PR45-1): a spy store, a colliding key, a small permit bound.
+   */
+  public IssuanceUnitOfWork unitOfWorkWithRun(
+      com.housedevinci.einvoice.application.InboundEventStore substituteInbound,
+      com.housedevinci.einvoice.application.InboundRunLock substituteLock,
+      com.housedevinci.einvoice.application.RunPermits substitutePermits,
+      com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
+    return new IssuanceUnitOfWork(
+        substituteInbound,
+        substituteLock,
+        substitutePermits,
+        source,
+        store,
+        store,
+        store,
+        store,
+        substituteRenderer,
+        validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
+        archive,
+        preflightSupport,
+        clock,
+        configurationFor("DEFAULT", pinnedApiVersion));
+  }
+
   public IssuanceUnitOfWork unitOfWorkWithSourceAndRenderer(
       com.housedevinci.einvoice.application.StripeInvoiceSource substituteSource,
       com.housedevinci.einvoice.application.DocumentRenderer substituteRenderer) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         substituteSource,
+        store,
         store,
         store,
         store,
@@ -236,7 +400,10 @@ public final class IssuanceTestHarness {
       com.housedevinci.einvoice.application.ArchiveStore substituteArchive) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
+        store,
         store,
         store,
         store,
@@ -260,7 +427,10 @@ public final class IssuanceTestHarness {
       com.housedevinci.einvoice.application.ArchiveStore substituteArchive) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
+        store,
         store,
         store,
         store,
@@ -344,7 +514,7 @@ public final class IssuanceTestHarness {
     return reprocessFor(unitOfWorkWithRenderer(substituteRenderer));
   }
 
-  private com.housedevinci.einvoice.application.IssuanceReprocess reprocessFor(
+  public com.housedevinci.einvoice.application.IssuanceReprocess reprocessFor(
       IssuanceUnitOfWork unitOfWork) {
     return new com.housedevinci.einvoice.application.IssuanceReprocess(
         unitOfWork, inbound, store, reprocessLedger, clock);
@@ -466,9 +636,18 @@ public final class IssuanceTestHarness {
         clock.instant(),
         Duration.ofHours(72),
         com.housedevinci.einvoice.domain.RunningLimit.DEFAULT,
-        100,
+        DUE_PAGE,
         pin);
   }
+
+  /**
+   * The page a test asks the due query for. The test database is shared by the whole suite, and the
+   * due query is oldest first over every seller, so a page of 100 made "is this event due?" depend
+   * on how many other tests left due rows before it (D-PR50-CI-1: the edge table leaves about a
+   * hundred). The production page is {@code einvoice.issuance.queue-capacity}; its bound is tested
+   * on the store, not through this helper.
+   */
+  static final int DUE_PAGE = 100_000;
 
   public SeriesKey seriesKey() {
     return new SeriesKey(sellerId, "DEFAULT", 2026, Mode.LIVE);

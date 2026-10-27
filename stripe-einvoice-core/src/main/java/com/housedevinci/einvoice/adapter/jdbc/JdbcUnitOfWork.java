@@ -59,6 +59,24 @@ public interface JdbcUnitOfWork {
    */
   <T> T inReadUnit(SqlWork<T> work);
 
+  /**
+   * Runs {@code work} with one connection held for the whole call, outside any transaction of this
+   * unit of work (D-RTR-7). Own connection: a pooled connection is taken for the call and released
+   * after it. Joined: the caller's connection, inside the caller's transaction. {@code bound} is
+   * this unit of work; the issuance row lock builds its own held unit of work on the connection.
+   */
+  <T> T onOneConnection(SessionWork<T> work);
+
+  /** Work that holds one connection for its whole duration. */
+  @FunctionalInterface
+  interface SessionWork<T> {
+    /**
+     * @param joined true when {@code connection} is a caller's, inside the caller's open
+     *     transaction: every statement of the work then runs in that one transaction
+     */
+    T run(Connection connection, JdbcUnitOfWork bound, boolean joined) throws SQLException;
+  }
+
   /** The implementation's kind, for one log line at startup. */
   Participation participation();
 

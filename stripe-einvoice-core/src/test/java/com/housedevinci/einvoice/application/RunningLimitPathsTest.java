@@ -314,7 +314,10 @@ class RunningLimitPathsTest {
 
   @Test
   void probe_reprocess_accepts_a_third_state() {
-    Set<InboundState> accepted = EnumSet.of(InboundState.FAILED_MAPPING, InboundState.EXPIRED);
+    // D-PR50-2 (on main): FAILED_ISSUANCE is accepted with any code; the re-open statement itself
+    // refuses a numbered invoice.
+    Set<InboundState> accepted =
+        EnumSet.of(InboundState.FAILED_MAPPING, InboundState.FAILED_ISSUANCE, InboundState.EXPIRED);
     for (InboundState state : InboundState.values()) {
       for (String code : new String[] {"", ErrorCodes.ISSUE_CLOCK_BEHIND_SERIES}) {
         InboundEvent row =
@@ -337,10 +340,7 @@ class RunningLimitPathsTest {
                 "",
                 false,
                 Instant.EPOCH);
-        boolean expected =
-            accepted.contains(state)
-                || (state == InboundState.FAILED_ISSUANCE
-                    && code.equals(ErrorCodes.ISSUE_CLOCK_BEHIND_SERIES));
+        boolean expected = accepted.contains(state);
         assertThat(IssuanceReprocess.eligible(row))
             .as("%s / '%s'", state, code)
             .isEqualTo(expected);

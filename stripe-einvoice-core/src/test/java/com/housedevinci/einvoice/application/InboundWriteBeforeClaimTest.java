@@ -105,7 +105,7 @@ class InboundWriteBeforeClaimTest {
   @Test
   void a_worker_held_in_the_fetch_while_another_completes_returns_the_completed_outcome()
       throws Exception {
-    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    IssuanceTestHarness harness = IssuanceTestHarness.create().withoutRunLock();
     harness.source().with(TestInvoices.finalised("in_pr9f1_fetch_done"));
     String eventId = harness.receive("invoice.finalized", "in_pr9f1_fetch_done");
 
@@ -141,7 +141,7 @@ class InboundWriteBeforeClaimTest {
   @Test
   void a_worker_held_in_the_fetch_does_not_drag_a_row_another_worker_mapped_back_to_fetched()
       throws Exception {
-    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    IssuanceTestHarness harness = IssuanceTestHarness.create().withoutRunLock();
     harness.source().with(TestInvoices.finalised("in_pr9f1_fetch_mapped"));
     String eventId = harness.receive("invoice.finalized", "in_pr9f1_fetch_mapped");
 
@@ -168,9 +168,15 @@ class InboundWriteBeforeClaimTest {
       assertThat(harness.inbound().find(eventId).orElseThrow().state())
           .isEqualTo(InboundState.MAPPED);
 
-      // B leaves the fetch, makes its FETCHED write, and stops again in the preflight.
+      // B leaves the fetch and makes its FETCHED write. Under the run lock (D-PR45-1) the PR 45
+      // carry-on branch is gone: B's compare finds MAPPED, B stops, and writes nothing more. This
+      // harness runs without the run lock on purpose, to prove the compare-and-set beneath it.
       heldFetchB.gate.release.countDown();
-      assertThat(heldPreflightB.gate.awaitReached()).as("worker B is in the preflight").isTrue();
+      IssuanceUnitOfWork.Outcome b = workerB.get(WAIT, TimeUnit.SECONDS);
+      assertThat(b.state()).isEqualTo(InboundState.MAPPED);
+      assertThat(heldPreflightB.gate.reached.getCount())
+          .as("B stopped before the preflight")
+          .isOne();
       // Before the fix: FETCHED, because MAPPED -> FETCHED is an edge and B's write landed.
       assertThat(harness.inbound().find(eventId).orElseThrow().state())
           .as("the row A moved forward is not moved back")
@@ -179,11 +185,7 @@ class InboundWriteBeforeClaimTest {
       heldRenderA.gate.release.countDown();
       IssuanceUnitOfWork.Outcome a = workerA.get(WAIT, TimeUnit.SECONDS);
       assertThat(a.state()).isEqualTo(InboundState.COMPLETED);
-
       heldPreflightB.gate.release.countDown();
-      IssuanceUnitOfWork.Outcome b = workerB.get(WAIT, TimeUnit.SECONDS);
-      assertThat(b.state()).isEqualTo(InboundState.COMPLETED);
-      assertThat(b.legalNumber()).isEqualTo(a.legalNumber());
     } finally {
       heldRenderA.gate.release.countDown();
       heldFetchB.gate.release.countDown();
@@ -198,7 +200,7 @@ class InboundWriteBeforeClaimTest {
   @Test
   void a_refusal_that_loses_to_a_run_in_flight_steps_aside_and_leaves_the_row_alone()
       throws Exception {
-    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    IssuanceTestHarness harness = IssuanceTestHarness.create().withoutRunLock();
     harness.source().with(TestInvoices.finalised("in_pr9f1_refusal"));
     String eventId = harness.receive("invoice.finalized", "in_pr9f1_refusal");
 

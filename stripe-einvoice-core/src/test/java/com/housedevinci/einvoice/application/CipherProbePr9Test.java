@@ -278,18 +278,34 @@ class CipherProbePr9Test {
     CyclicBarrier start = new CyclicBarrier(2);
     ExecutorService pool = Executors.newFixedThreadPool(2);
     try {
-      Callable<InboundState> run =
+      Callable<IssuanceUnitOfWork.Outcome> run =
           () -> {
             start.await();
-            return harness.unitOfWorkWithRenderer(renderer).process(eventId).state();
+            return harness.unitOfWorkWithRenderer(renderer).process(eventId);
           };
-      List<Future<InboundState>> futures = pool.invokeAll(List.of(run, run));
-      for (Future<InboundState> future : futures) {
-        assertThat(future.get()).isEqualTo(InboundState.COMPLETED);
+      List<Future<IssuanceUnitOfWork.Outcome>> futures = pool.invokeAll(List.of(run, run));
+      // Ruling 2026-10-21 (try-only row lock): a run that finds the other run holding the row may
+      // answer FAILED_ISSUANCE with DEI-245 "in flight"; the event itself must still end COMPLETED.
+      // One run per event (D-PR45-1): the run that finds the other holding the event's run lock
+      // answers DEI-217 and writes nothing, which is the usual answer now.
+      for (Future<IssuanceUnitOfWork.Outcome> future : futures) {
+        IssuanceUnitOfWork.Outcome outcome = future.get();
+        assertThat(
+                outcome.state() == InboundState.COMPLETED
+                    || ErrorCodes.INBOUND_RUN_IN_PROGRESS.equals(outcome.code())
+                    || (outcome.state() == InboundState.FAILED_ISSUANCE
+                        && ErrorCodes.ISSUANCE_IN_FLIGHT.equals(outcome.code())))
+            .as("each run: COMPLETED, busy (DEI-217), or DEI-245 in flight, was %s", outcome)
+            .isTrue();
       }
+      // One of the two must have run to the end.
+      assertThat(futures.stream().map(f -> f.resultNow().state())).contains(InboundState.COMPLETED);
     } finally {
       pool.shutdownNow();
     }
+    assertThat(harness.inbound().find(eventId).orElseThrow().state())
+        .as("the event ends COMPLETED")
+        .isEqualTo(InboundState.COMPLETED);
     assertThat(harness.numberedRows()).isEqualTo(1);
     assertThat(harness.chainedEvents()).isEqualTo(1);
     assertThat(harness.archive().size()).isEqualTo(1);

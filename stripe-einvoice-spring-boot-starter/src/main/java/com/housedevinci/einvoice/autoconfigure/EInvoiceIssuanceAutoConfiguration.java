@@ -3,6 +3,7 @@ package com.housedevinci.einvoice.autoconfigure;
 import com.housedevinci.einvoice.adapter.file.FilesystemArchiveStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcFindingStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcInboundEventStore;
+import com.housedevinci.einvoice.adapter.jdbc.JdbcInboundRunLock;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcReprocessLedger;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcUnitOfWork;
@@ -12,12 +13,14 @@ import com.housedevinci.einvoice.application.DocumentRenderer;
 import com.housedevinci.einvoice.application.DocumentValidator;
 import com.housedevinci.einvoice.application.FindingStore;
 import com.housedevinci.einvoice.application.InboundEventStore;
+import com.housedevinci.einvoice.application.InboundRunLock;
 import com.housedevinci.einvoice.application.IssuanceChainVerifier;
 import com.housedevinci.einvoice.application.IssuanceReprocess;
 import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
 import com.housedevinci.einvoice.application.PreflightSupport;
 import com.housedevinci.einvoice.application.ReconciliationSweep;
 import com.housedevinci.einvoice.application.ReprocessLedger;
+import com.housedevinci.einvoice.application.RunPermits;
 import com.housedevinci.einvoice.application.StrandedInboundSweep;
 import com.housedevinci.einvoice.application.StripeInvoiceSource;
 import com.housedevinci.einvoice.domain.EInvoiceException;
@@ -71,11 +74,170 @@ public class EInvoiceIssuanceAutoConfiguration {
    * worker, the reconciliation sweep, the reprocess and the webhook controller are all already
    * conditional. Nothing else in this module reads an inbound event.
    */
+  /**
+   * D-PR42-1: the issuance row lock's session check, once, at startup, outside any transaction, so
+   * a host transaction never waits for the two connections the check needs. {@code DEI-104} (a
+   * pooler in transaction or statement mode) fails the startup. A database not reachable yet only
+   * WARNs, and the check then runs before the first lock instead.
+   */
+  /** Kept apart so the starter loads without HikariCP on the classpath. */
+  static final class HikariPoolSize {
+    private HikariPoolSize() {}
+
+    /** Connections one live run may hold at once: run lock, row lock, one short-lived. */
+    static final int PER_RUN = 3;
+
+    /** The one sweeper thread every module job runs on (T23 pins it). */
+    static final int JOBS = 1;
+
+    /** The host application's own share. */
+    static final int HOST = 1;
+
+    static void cannotCheck() {
+      log.warn(
+          "einvoice: the connection pool is not HikariCP, so the rule 3 x"
+              + " einvoice.issuance.concurrency + 2 <= maximum pool size could not be checked at"
+              + " startup. Check it by hand: a smaller pool stalls issuance with DEI-102.");
+    }
+
+    static void refuseBelowRunNeed(javax.sql.DataSource dataSource, int concurrency) {
+      int max;
+      try {
+        if (!dataSource.isWrapperFor(com.zaxxer.hikari.HikariConfigMXBean.class)) {
+          cannotCheck();
+          return;
+        }
+        max = dataSource.unwrap(com.zaxxer.hikari.HikariConfigMXBean.class).getMaximumPoolSize();
+      } catch (java.sql.SQLException e) {
+        cannotCheck();
+        return;
+      }
+      int need = PER_RUN * concurrency + JOBS + HOST;
+      if (need > max) {
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG,
+            "einvoice.issuance.concurrency is "
+                + concurrency
+                + " and spring.datasource.hikari.maximum-pool-size is "
+                + max
+                + ": issuance needs 3 x "
+                + concurrency
+                + " + 1 (module jobs) + 1 (host) = "
+                + need
+                + " connections. Lower einvoice.issuance.concurrency or raise the pool size.");
+      }
+    }
+
+    static void refuseBelowTwo(javax.sql.DataSource dataSource) {
+      int max;
+      try {
+        if (!dataSource.isWrapperFor(com.zaxxer.hikari.HikariConfigMXBean.class)) {
+          return;
+        }
+        max = dataSource.unwrap(com.zaxxer.hikari.HikariConfigMXBean.class).getMaximumPoolSize();
+      } catch (java.sql.SQLException e) {
+        return;
+      }
+      if (max < 2) {
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG,
+            "the connection pool has a maximum size of "
+                + max
+                + "; the issuance row lock needs at least 2 (its session check opens two"
+                + " connections at once). Raise spring.datasource.hikari.maximum-pool-size to 2"
+                + " or more.");
+      }
+    }
+  }
+
+  @Bean
+  public org.springframework.beans.factory.SmartInitializingSingleton einvoiceSessionPinningCheck(
+      ObjectProvider<JdbcIssuanceStore> store) {
+    return () ->
+        store.ifAvailable(
+            s -> {
+              // D-PR43-2: the check needs two free connections. A pool that can never give them
+              // would hold its only connection for the pool's timeout on every issuance.
+              if (org.springframework.util.ClassUtils.isPresent(
+                  "com.zaxxer.hikari.HikariConfigMXBean", null)) {
+                HikariPoolSize.refuseBelowTwo(s.dataSource());
+              }
+              try {
+                s.verifySessionPinning();
+              } catch (EInvoiceException e) {
+                if (ErrorCodes.SESSION_NOT_PINNED.equals(e.code())) {
+                  throw e;
+                }
+                log.warn(
+                    "einvoice: the database session check could not run at startup ({}); it runs"
+                        + " before the first issuance row lock instead",
+                    e.code());
+              }
+            });
+  }
+
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnProperty(prefix = "einvoice.issuance", name = "enabled", matchIfMissing = true)
   public InboundEventStore einvoiceInboundEventStore(JdbcUnitOfWork unitOfWork) {
     return new JdbcInboundEventStore(unitOfWork);
+  }
+
+  /**
+   * At most one run per Stripe invoice (D-PR45-1). Not {@code @ConditionalOnMissingBean}: the lock
+   * is a control, and a host that replaced it would run two renders of one number at once. Wired
+   * even with the intake off: it reads and writes nothing on its own, and a host that builds its
+   * own unit of work must still be given it.
+   */
+  @Bean
+  public InboundRunLock einvoiceInboundRunLock(
+      JdbcUnitOfWork unitOfWork, javax.sql.DataSource dataSource) {
+    return new JdbcInboundRunLock(unitOfWork, dataSource);
+  }
+
+  /**
+   * The one bound on live runs, shared by the worker and the reprocess (D-ORPE-4). Not replaceable,
+   * for the same reason as the lock: the pool rule below counts on it.
+   */
+  @Bean
+  public RunPermits einvoiceRunPermits(EInvoiceProperties properties) {
+    return new RunPermits(properties.getIssuance().getConcurrency());
+  }
+
+  /**
+   * The pool rule (D-ORPE-4, D-ORPE-7d), checked at startup: {@code 3 x concurrency + 1 + 1 <=
+   * maximum pool size}. A live run counts three connections: its run lock for the whole run, the
+   * issuance row lock during the archive write, and one short-lived connection for the allocator
+   * and the reads. Every module job (sweep, reconciliation, purge, chain check) runs on the one
+   * sweeper thread, so the jobs count one. The host counts one. Refused with {@code DEI-100}; a
+   * host lowers {@code einvoice.issuance.concurrency} or raises the pool. A pool that does not
+   * unwrap to HikariCP cannot be checked: a WARN at every startup says so.
+   *
+   * <p>No {@code @ConditionalOnBean} (D-PR49-2): that condition is evaluated when this definition
+   * is registered, before the unit of work's own definition below, so the rule never existed in a
+   * started context. The unit of work is looked up after every singleton exists instead, which also
+   * covers one the host builds.
+   */
+  @Bean
+  public org.springframework.beans.factory.SmartInitializingSingleton einvoiceRunPoolRule(
+      javax.sql.DataSource dataSource,
+      RunPermits permits,
+      ObjectProvider<IssuanceUnitOfWork> unitOfWork) {
+    return () -> {
+      if (unitOfWork.stream().findAny().isPresent()) {
+        refusePoolBelowRunNeed(dataSource, permits);
+      }
+    };
+  }
+
+  /** The rule's arithmetic, for {@code RunPoolRuleTest}. */
+  static void refusePoolBelowRunNeed(javax.sql.DataSource dataSource, RunPermits permits) {
+    if (!org.springframework.util.ClassUtils.isPresent(
+        "com.zaxxer.hikari.HikariConfigMXBean", null)) {
+      HikariPoolSize.cannotCheck();
+      return;
+    }
+    HikariPoolSize.refuseBelowRunNeed(dataSource, permits.permits());
   }
 
   @Bean
@@ -177,6 +339,8 @@ public class EInvoiceIssuanceAutoConfiguration {
   @ConditionalOnProperty(prefix = "einvoice.issuance", name = "enabled", matchIfMissing = true)
   public IssuanceUnitOfWork einvoiceIssuanceUnitOfWork(
       InboundEventStore inbound,
+      InboundRunLock runLock,
+      RunPermits permits,
       StripeInvoiceSource source,
       JdbcIssuanceStore store,
       DocumentRenderer renderer,
@@ -187,7 +351,10 @@ public class EInvoiceIssuanceAutoConfiguration {
       EInvoiceProperties properties) {
     return new IssuanceUnitOfWork(
         inbound,
+        runLock,
+        permits,
         source,
+        store,
         store,
         store,
         store,
@@ -264,7 +431,7 @@ public class EInvoiceIssuanceAutoConfiguration {
   @ConditionalOnMissingBean
   @ConditionalOnBean(IssuanceUnitOfWork.class)
   public ReconciliationSweep einvoiceReconciliationSweep(
-      StripeInvoiceSource source,
+      IssuanceUnitOfWork unitOfWork,
       JdbcIssuanceStore store,
       InboundEventStore inbound,
       ArchiveStore archive,
@@ -272,8 +439,10 @@ public class EInvoiceIssuanceAutoConfiguration {
       ReprocessLedger reprocessLedger,
       Clock clock,
       EInvoiceProperties properties) {
+    // The unit of work's own source: a successful list call counts as an accepted key and re-arms
+    // the events a refused key stopped (D-SRE-3).
     return new ReconciliationSweep(
-        source,
+        unitOfWork.stripeSource(),
         store,
         inbound,
         archive,
@@ -286,7 +455,7 @@ public class EInvoiceIssuanceAutoConfiguration {
             properties.getIssuance().getAlertAfter(),
             properties.getReconcile().getDriftSample(),
             properties.getReconcile().getPageSize()),
-        configuration(properties, source));
+        unitOfWork.configuration());
   }
 
   @Bean

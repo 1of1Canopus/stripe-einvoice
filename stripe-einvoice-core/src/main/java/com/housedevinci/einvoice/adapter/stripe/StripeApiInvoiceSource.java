@@ -383,15 +383,25 @@ public final class StripeApiInvoiceSource implements StripeInvoiceSource {
 
   /**
    * An outage, a rate limit or a 5xx. Never a verdict about the sale: the caller records a
-   * retryable terminal and the sweeper comes back.
+   * retryable terminal and the sweeper comes back. A 401 or a 403 is the exception, {@code
+   * DEI-219}: the key itself was refused.
    *
    * <p>The message carries the status code and nothing else - a Stripe error body can quote a
    * customer's own field value back at us.
    */
   private static EInvoiceException unavailable(StripeException e) {
+    Integer status = e.getStatusCode();
+    if (status != null && (status == 401 || status == 403)) {
+      // A revoked or under-scoped restricted key does not improve with time: its own code, so the
+      // run stops instead of retrying (design "sweeper retry edges", section 5). 429 stays below.
+      return new EInvoiceException(
+          ErrorCodes.STRIPE_ACCESS_REFUSED,
+          "the Stripe API refused the key (status " + status + ")",
+          e);
+    }
     return new EInvoiceException(
         ErrorCodes.STRIPE_UNAVAILABLE,
-        "the Stripe API could not be read (status " + e.getStatusCode() + ")",
+        "the Stripe API could not be read (status " + status + ")",
         e);
   }
 }

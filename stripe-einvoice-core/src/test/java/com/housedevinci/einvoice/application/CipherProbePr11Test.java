@@ -91,10 +91,19 @@ class CipherProbePr11Test {
             + invoiceId
             + "'; ALTER TABLE einvoice_issuance ENABLE TRIGGER USER");
 
-    // One statement, the runtime role's own grants, no chained event.
+    // D-RTR-2: a burn that plants a reason is now refused at the trigger, before the verifier.
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () ->
+                PostgresSupport.execute(
+                    "UPDATE einvoice_issuance SET state = 'FAILED_VALIDATION',"
+                        + " void_reason = 'buyer asked us to cancel', void_rule_id = 'BR-CL-01'"
+                        + " WHERE stripe_invoice_id = '"
+                        + invoiceId
+                        + "'"))
+        .hasMessageContaining("a burn records its rule id and nothing else");
+    // One statement, the runtime role's own grants, no chained event: the forged rule id alone.
     PostgresSupport.execute(
-        "UPDATE einvoice_issuance SET state = 'FAILED_VALIDATION',"
-            + " void_reason = 'buyer asked us to cancel', void_rule_id = 'BR-CL-01'"
+        "UPDATE einvoice_issuance SET state = 'FAILED_VALIDATION', void_rule_id = 'BR-CL-01'"
             + " WHERE stripe_invoice_id = '"
             + invoiceId
             + "'");
@@ -249,10 +258,14 @@ class CipherProbePr11Test {
       DocumentValidator validator) {
     return new IssuanceUnitOfWork(
         harness.inbound(),
+        harness.runLock(),
+        harness.permits(),
         harness.source(),
         harness.store(),
         reader,
         writer,
+        com.housedevinci.einvoice.adapter.jdbc.IssuanceTestHarness.lockWith(
+            harness.store(), reader, writer),
         harness.renderer(),
         validator,
         new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
@@ -318,6 +331,12 @@ class CipherProbePr11Test {
         throw failure;
       }
       return delegate.findBySource(sellerId, mode, stripeInvoiceId);
+    }
+
+    @Override
+    public java.util.Set<com.housedevinci.einvoice.domain.IssuanceState> issuanceStates(
+        String stripeInvoiceId) {
+      return delegate.issuanceStates(stripeInvoiceId);
     }
 
     @Override

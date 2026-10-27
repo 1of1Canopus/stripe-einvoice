@@ -53,6 +53,38 @@ class IssuanceStateTest {
   }
 
   @Test
+  void a_resumed_row_that_is_refused_can_burn_its_number() {
+    // QUESTIONS 38, D-DD-B1: a resumed run re-validates from ARCHIVING and FAILED_ARCHIVE, so a
+    // refusal there must be recordable, through the same burn as from NUMBERED.
+    assertThat(IssuanceState.FAILED_ARCHIVE.transitionTo(IssuanceState.FAILED_VALIDATION))
+        .isEqualTo(IssuanceState.FAILED_VALIDATION);
+    assertThat(IssuanceState.ARCHIVING.transitionTo(IssuanceState.FAILED_VALIDATION))
+        .isEqualTo(IssuanceState.FAILED_VALIDATION);
+    assertThat(IssuanceState.ARCHIVING.allowedNext())
+        .containsExactlyInAnyOrder(
+            IssuanceState.ISSUED,
+            IssuanceState.FAILED_ARCHIVE,
+            IssuanceState.FAILED_VALIDATION,
+            IssuanceState.VOID_UNUSED);
+    assertThat(IssuanceState.FAILED_ARCHIVE.allowedNext())
+        .containsExactlyInAnyOrder(
+            IssuanceState.ARCHIVING, IssuanceState.FAILED_VALIDATION, IssuanceState.VOID_UNUSED);
+    // Every other way into or out of a burn stays refused.
+    for (IssuanceState from :
+        new IssuanceState[] {IssuanceState.ISSUED, IssuanceState.VOID_UNUSED}) {
+      assertThatThrownBy(() -> from.transitionTo(IssuanceState.FAILED_VALIDATION))
+          .isInstanceOf(EInvoiceException.class);
+    }
+    for (IssuanceState to :
+        new IssuanceState[] {
+          IssuanceState.FAILED_ARCHIVE, IssuanceState.ARCHIVING, IssuanceState.ISSUED
+        }) {
+      assertThatThrownBy(() -> IssuanceState.FAILED_VALIDATION.transitionTo(to))
+          .isInstanceOf(EInvoiceException.class);
+    }
+  }
+
+  @Test
   void an_unknown_state_column_is_refused_without_echoing_what_it_held() {
     // A state column that does not decode was written by exactly the actor the ledger exists to
     // detect, and its content is not something to copy into a log line.
