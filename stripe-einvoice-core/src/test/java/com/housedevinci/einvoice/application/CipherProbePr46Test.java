@@ -117,9 +117,11 @@ class CipherProbePr46Test {
     assertThatCode(() -> h.unitOfWorkWithRenderer(racing).process(eventId))
         .as("a row moved by the expiry is answered from what is stored, never DEI-210")
         .doesNotThrowAnyException();
-    assertThat(expiredInsideTheRun.get()).isEqualTo(1);
-    assertThat(h.inbound().find(eventId).orElseThrow().state()).isEqualTo(InboundState.EXPIRED);
-    assertThat(h.numberedRows()).isZero();
+    // Changed in the fix pass (QUESTIONS 59): with the run lock on main, the expiry skips a row
+    // whose run is live (one-run-per-event design, row 16), before the claim as after it. The run
+    // then finishes the finalised invoice. The escape assertion above is unchanged.
+    assertThat(expiredInsideTheRun.get()).isZero();
+    assertThat(h.inbound().find(eventId).orElseThrow().state()).isEqualTo(InboundState.COMPLETED);
   }
 
   // D-PR46-3. The expiry lands after the claim. The run holds a number and waits on the archive
@@ -172,13 +174,11 @@ class CipherProbePr46Test {
           }
         };
 
-    assertThatCode(() -> h.unitOfWorkWithArchive(slow).process(eventId))
-        .doesNotThrowAnyException();
+    assertThatCode(() -> h.unitOfWorkWithArchive(slow).process(eventId)).doesNotThrowAnyException();
     assertThat(expiredInsideTheRun.get())
         .as("a row whose run holds a number is never expired under that run")
         .isZero();
-    assertThat(h.inbound().find(eventId).orElseThrow().state())
-        .isEqualTo(InboundState.COMPLETED);
+    assertThat(h.inbound().find(eventId).orElseThrow().state()).isEqualTo(InboundState.COMPLETED);
   }
 
   // Attack that held: an operator reprocesses the same EXPIRED row twice. The second request

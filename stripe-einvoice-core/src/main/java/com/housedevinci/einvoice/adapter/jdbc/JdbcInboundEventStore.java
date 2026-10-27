@@ -187,8 +187,11 @@ public final class JdbcInboundEventStore implements InboundEventStore {
           + OPEN_NUMBER_KEEPS_ROW
           + " ORDER BY e.received_at LIMIT ?";
 
-  /** Tried, never waited for: a row whose run is live is skipped this hour. */
-  static final String PURGE_TRY_RUN_KEY = "SELECT pg_catalog.pg_try_advisory_xact_lock(?, ?)";
+  /**
+   * Tried, never waited for, for one transaction: a row whose run is live is skipped by the purge
+   * this hour (design row 10) and by the expiry this pass (design row 16).
+   */
+  static final String TRY_RUN_KEY = "SELECT pg_catalog.pg_try_advisory_xact_lock(?, ?)";
 
   static final String PURGE_ONE =
       "DELETE FROM einvoice_inbound_event e WHERE e.event_id = ? AND e.received_at < ?"
@@ -618,6 +621,14 @@ public final class JdbcInboundEventStore implements InboundEventStore {
     return unitOfWork.inTransaction(
         unit -> {
           Connection c = unit.connection();
+          // One-run-per-event design, row 16 (D-PR46-2): the expiry is a writer of the row, so it
+          // takes the run key in its own transaction, tried and never waited for. A row whose run
+          // is live is skipped this pass: that run may hold a number and be about to issue it, and
+          // an expiry under it would report a stuck row for a document that exists. Once the run
+          // ends, a row that made progress has a new clock; one that did not is expired next pass.
+          if (!tryRunKey(c, stranded.objectId())) {
+            return false;
+          }
           try (PreparedStatement ps = c.prepareStatement(EXPIRE)) {
             int i = 1;
             ps.setString(i++, ErrorCodes.INBOUND_CEILING_REACHED);
@@ -718,19 +729,27 @@ public final class JdbcInboundEventStore implements InboundEventStore {
         });
   }
 
+  /**
+   * Tries the run key of one invoice for the length of the caller's transaction (rows 10 and 16 of
+   * the one-run-per-event design). False when a run of that invoice is live. Never waits, so a job
+   * on the sweeper's thread never blocks behind a run, and no lock order exists to deadlock on.
+   */
+  private static boolean tryRunKey(Connection c, String objectId) throws SQLException {
+    try (PreparedStatement lock = c.prepareStatement(TRY_RUN_KEY)) {
+      lock.setInt(1, AdvisoryLocks.RUN_CLASS_ID);
+      lock.setInt(2, JdbcInboundRunLock.runKey(objectId));
+      try (ResultSet rs = lock.executeQuery()) {
+        return rs.next() && rs.getBoolean(1);
+      }
+    }
+  }
+
   private int purgeOne(String eventId, String objectId, Instant cutoff) {
     return unitOfWork.inTransaction(
         unit -> {
           Connection c = unit.connection();
-          try (PreparedStatement lock = c.prepareStatement(PURGE_TRY_RUN_KEY)) {
-            lock.setInt(1, AdvisoryLocks.RUN_CLASS_ID);
-            lock.setInt(2, JdbcInboundRunLock.runKey(objectId));
-            try (ResultSet rs = lock.executeQuery()) {
-              rs.next();
-              if (!rs.getBoolean(1)) {
-                return 0;
-              }
-            }
+          if (!tryRunKey(c, objectId)) {
+            return 0;
           }
           try (PreparedStatement ps = c.prepareStatement(PURGE_ONE)) {
             ps.setString(1, eventId);

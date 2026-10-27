@@ -143,6 +143,13 @@ public interface InboundEventStore {
    * a row that moved in between is not touched, nothing is recorded, and the answer is false - a
    * skip, never an exception (F-6). A finding acknowledged for an earlier expiry of the same event
    * is opened again: a second expiry is news.
+   *
+   * <p>A row whose invoice has a live run is never expired (one-run-per-event design, row 16): the
+   * write first tries the invoice's run lock in its own transaction, and a held lock is a skip with
+   * the answer false, nothing written, nothing recorded. Example: a run holds {@code
+   * INV-2026-000001} and waits 73 hours on the archive; every sweep in that time skips its {@code
+   * MAPPED} row; the run then writes {@code COMPLETED}. An implementation outside this module must
+   * take the same lock, or an expiry can report a stuck row for a document that was issued.
    */
   boolean expire(InboundEvent stranded, ComplianceFinding finding, Instant now);
 

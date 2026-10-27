@@ -43,6 +43,12 @@ All notable changes to this project are documented here. The format follows
   number and before it announces an archive write. The retention purge skips a row whose run is
   live. `IssuanceReprocess` takes the lock before it re-opens a row and gains the disposition
   `REFUSED_RUN_IN_PROGRESS`. See "One run per invoice" in the README.
+- **The time limit never expires a live run (D-PR46-2, one-run-per-event design rows 16 and 17).**
+  The expiry tries the invoice's run lock in its own transaction and skips a held row this pass,
+  writing and recording nothing. Before, a run that held a number and waited past the running
+  limit on the archive had its `MAPPED` row expired under it with a "stuck" finding, then issued
+  the invoice and threw `DEI-210` on its `COMPLETED` write. The operator's re-open of an `EXPIRED`
+  row goes through the run lock like any reprocess.
 - **A run never joins a caller's transaction (D-PR49-1).** `IssuanceReprocess` and
   `IssuanceUnitOfWork.process` called inside a transaction are refused with the new code
   `DEI-218 RUN_IN_HOST_TRANSACTION` before the run lock is tried, and record nothing. A failed

@@ -212,6 +212,11 @@ on the invoice (the first four bytes of SHA-256 of the Stripe object id; the ses
   Stripe outage, a pin change, a mode or account mismatch or an unsubscribed type is recorded
   `FAILED_ISSUANCE` with that refusal's own code, keeping the number. It is retried with a backoff
   (no retry for `DEI-205` and `DEI-219`), and the reprocess resumes it once the cause is fixed.
+- **A live run is never expired.** The time limit on running rows (`running-ceiling`,
+  `parked-ceiling`) tries the invoice's run lock before it expires a row, and skips the row while a
+  run holds it. Example: a run holds `INV-2026-000001` and waits 73 hours on a slow archive; every
+  sweep in that time skips its `MAPPED` row; the run then issues the invoice and writes `COMPLETED`.
+  A row whose run ended without progress is expired at the next sweep.
 - **A lost lock is `DEI-104`, at WARN.** If the server or the network ends the run's session
   mid-run, the run's next write refuses, the run writes nothing more, and one WARN names the event.
   The connection is closed, not pooled.
