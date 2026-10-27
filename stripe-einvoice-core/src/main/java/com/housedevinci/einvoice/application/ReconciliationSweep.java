@@ -162,7 +162,9 @@ public final class ReconciliationSweep {
       failures.run("archive to us", () -> archiveToUs(counts, rows.get(), now));
     } else {
       // Without the rows every object would look like an orphan; the failure above is the report.
-      log.warn("einvoice: reconciliation check 'archive to us' not run: the series read failed");
+      log.warn(
+          "einvoice: reconciliation checks 'us to archive' and 'archive to us' not run:"
+              + " the series read failed");
     }
     failures.run("unfinished reprocess", () -> unfinishedReprocess(counts, now));
 
@@ -362,9 +364,12 @@ public final class ReconciliationSweep {
             "einvoice: reconciliation check '{}' failed ({}); the other checks still run",
             check,
             e instanceof EInvoiceException einvoice ? einvoice.code() : e.getClass().getName());
+        // D-PR51-3: an adapter behind a circuit breaker may throw one exception object from
+        // every call. Attaching it to itself throws "Self-suppression not permitted", which would
+        // escape the pass with no code and skip every later check; attaching it twice adds noise.
         if (first == null) {
           first = e;
-        } else {
+        } else if (e != first && !java.util.Arrays.asList(first.getSuppressed()).contains(e)) {
           first.addSuppressed(e);
         }
         return Optional.empty();
