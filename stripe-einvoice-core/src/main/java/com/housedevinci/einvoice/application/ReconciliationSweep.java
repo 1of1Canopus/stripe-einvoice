@@ -295,9 +295,9 @@ public final class ReconciliationSweep {
     for (Issuance issuance : rows) {
       issuance.archiveObjectKey().ifPresent(known::add);
     }
-    for (String key :
-        archive.list(
-            configuration.mode().wire() + "/" + configuration.sellerId(), settings.pageSize())) {
+    // The trailing slash is the seller boundary: without it "live/acme" also lists "live/acme2".
+    String sellerFolder = configuration.mode().wire() + "/" + configuration.sellerId() + "/";
+    for (String key : archive.list(sellerFolder, settings.pageSize())) {
       if (!known.contains(key) && !key.startsWith(ArchiveCapabilityProbe.SCRATCH_PREFIX)) {
         counts.orphans++;
         // Alerted, never deleted: an object we cannot explain is evidence of something, and a
