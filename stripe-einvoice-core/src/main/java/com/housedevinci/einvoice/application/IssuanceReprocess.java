@@ -43,30 +43,45 @@ public final class IssuanceReprocess {
   public static final InboundState ELIGIBLE = InboundState.FAILED_MAPPING;
 
   /**
-   * True for the two terminals a reprocess may start from when the invoice holds no number: {@code
-   * FAILED_MAPPING}, and {@code FAILED_ISSUANCE} with any code (D-PR50-2). These rows are re-opened
-   * to {@code RECEIVED}, and the re-run goes through every refusal again, so a cause that is still
-   * there (a clock still behind, {@code DEI-132}) is refused again. Any code is safe because the
-   * re-open statement refuses, in itself, a row whose invoice holds a number anywhere. Example: the
-   * allocator refused {@code in_9} with {@code DEI-132}; at the retry Stripe was down, so the row
-   * became {@code FAILED_ISSUANCE DEI-211} and passed the 72-hour ceiling; once the clock is fixed
-   * the reprocess runs it.
+   * True for the three terminals a reprocess may start from when the invoice holds no number:
+   * {@code FAILED_MAPPING}, {@code FAILED_ISSUANCE} with any code (D-PR50-2), and {@code EXPIRED}
+   * (QUESTIONS 29). These rows are re-opened to {@code RECEIVED}, and the re-run goes through every
+   * refusal again, so a cause that is still there (a clock still behind, {@code DEI-132}) is
+   * refused again. Any code is safe because the re-open statement refuses, in itself, a row whose
+   * invoice holds a number anywhere. Example: the allocator refused {@code in_9} with {@code
+   * DEI-132}; at the retry Stripe was down, so the row became {@code FAILED_ISSUANCE DEI-211} and
+   * passed the 72-hour ceiling; once the clock is fixed the reprocess runs it.
    */
   public static boolean eligible(InboundEvent event) {
-    return event.state() == ELIGIBLE || event.state() == InboundState.FAILED_ISSUANCE;
+    return event.state() == ELIGIBLE
+        || event.state() == InboundState.FAILED_ISSUANCE
+        || event.state() == ELIGIBLE_EXPIRED;
   }
 
   /**
+   * The third state a reprocess starts from (QUESTIONS 29): a row that stayed running past its time
+   * limit. Without this the state would have no exit: the reconciliation re-enqueue writes a {@code
+   * recon-<invoice>} row that already exists, so it is deduplicated away, and it lists finalised
+   * invoices only, so a parked draft is never re-enqueued at all. Every refusal below still
+   * applies. An expired row whose invoice holds an open number (a {@code MAPPED} row past its
+   * limit, QUESTIONS 48) is re-opened in place like a numbered {@code FAILED_ISSUANCE} row and
+   * resumes that number.
+   */
+  public static final InboundState ELIGIBLE_EXPIRED = InboundState.EXPIRED;
+
+  /**
    * True for the terminals a reprocess may start from when the invoice holds a number (D-SRE-2):
-   * {@code FAILED_ISSUANCE} with any code, and {@code FAILED_MAPPING}. These rows are re-opened in
-   * place, never to {@code RECEIVED}, and the run resumes the same number. Example: the archive was
-   * down for four days, the row holding {@code INV-2026-000012} passed the retry ceiling; once the
-   * archive is back, the reprocess resumes {@code INV-2026-000012} and writes {@code COMPLETED}. A
-   * row still due is accepted too: its run is the sweeper's next run, taken now, under the same run
-   * lock, with a name on it.
+   * {@code FAILED_ISSUANCE} with any code, {@code FAILED_MAPPING}, and {@code EXPIRED} (QUESTIONS
+   * 48). These rows are re-opened in place, never to {@code RECEIVED}, and the run resumes the same
+   * number. Example: the archive was down for four days, the row holding {@code INV-2026-000012}
+   * passed the retry ceiling; once the archive is back, the reprocess resumes {@code
+   * INV-2026-000012} and writes {@code COMPLETED}. A row still due is accepted too: its run is the
+   * sweeper's next run, taken now, under the same run lock, with a name on it.
    */
   public static boolean eligibleNumbered(InboundEvent event) {
-    return event.state() == InboundState.FAILED_ISSUANCE || event.state() == ELIGIBLE;
+    return event.state() == InboundState.FAILED_ISSUANCE
+        || event.state() == ELIGIBLE
+        || event.state() == ELIGIBLE_EXPIRED;
   }
 
   private final IssuanceUnitOfWork unitOfWork;

@@ -47,7 +47,9 @@ class SweeperRetryEdgeTableTest {
           Map.entry(InboundState.COMPLETED, Holds.CONCLUDED),
           Map.entry(InboundState.DROPPED, Holds.CONCLUDED),
           Map.entry(InboundState.FAILED_MAPPING, Holds.CONCLUDED),
-          Map.entry(InboundState.FAILED_TOTALS, Holds.CONCLUDED));
+          Map.entry(InboundState.FAILED_TOTALS, Holds.CONCLUDED),
+          // QUESTIONS 29: an expired row is final for every run; only a reprocess re-opens it.
+          Map.entry(InboundState.EXPIRED, Holds.CONCLUDED));
 
   private enum Holds {
     NEVER,

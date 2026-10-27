@@ -84,7 +84,9 @@ class IssuanceOperationsTest {
                       Mode.LIVE,
                       "primary",
                       body,
-                      NOW),
+                      // The context's own clock: a row recorded months before it is past the
+                      // running-row time limit (QUESTIONS 29) and is expired, not due.
+                      context.getBean(Clock.class).instant()),
                   body);
 
               assertThat(sweeper.sweepOnce()).isPositive();

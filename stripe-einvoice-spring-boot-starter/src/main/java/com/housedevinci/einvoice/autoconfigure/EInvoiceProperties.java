@@ -1,6 +1,9 @@
 package com.housedevinci.einvoice.autoconfigure;
 
+import com.housedevinci.einvoice.domain.EInvoiceException;
+import com.housedevinci.einvoice.domain.RunningLimit;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -709,6 +712,50 @@ public class EInvoiceProperties {
     /** How often the sweeper re-picks what is due. */
     @NotNull private Duration sweepInterval = Duration.ofMinutes(1);
 
+    /**
+     * How long an inbound row may stay {@code RECEIVED}, {@code FETCHED} or {@code MAPPED} without
+     * progress (QUESTIONS 29). Past it, the row is moved to {@code EXPIRED} with {@code DEI-266},
+     * the finding {@code DEI-282} is raised on its event id, and the row is no longer due. Must be
+     * positive and longer than {@code max-retry-backoff}; above seven days it WARNs at every start.
+     */
+    @NotNull private Duration runningCeiling = RunningLimit.DEFAULT.running();
+
+    /**
+     * The same limit for a {@code PARKED} row: an invoice still a draft. Longer, because a draft
+     * finalised after weeks is normal, but never unbounded: a draft nobody will ever finalise must
+     * be reported. Must be at least {@code running-ceiling}; above 365 days it WARNs at every
+     * start.
+     */
+    @NotNull private Duration parkedCeiling = RunningLimit.DEFAULT.parked();
+
+    /**
+     * F-5: a limit that means "none", or one the row's own retry schedule cannot fit inside, is
+     * refused at binding. Never read as "no limit".
+     */
+    @AssertTrue(
+        message =
+            "einvoice.issuance.running-ceiling and parked-ceiling must be positive, running-ceiling"
+                + " must be longer than max-retry-backoff, and parked-ceiling at least"
+                + " running-ceiling")
+    public boolean isRunningLimitValid() {
+      if (runningCeiling == null || parkedCeiling == null) {
+        return true; // @NotNull reports it by name
+      }
+      try {
+        runningLimit();
+        return true;
+      } catch (EInvoiceException e) {
+        return false;
+      }
+    }
+
+    /** The two limits as the domain reads them, refused by the same rules as the binding. */
+    public RunningLimit runningLimit() {
+      RunningLimit limit = new RunningLimit(runningCeiling, parkedCeiling);
+      limit.requireLongerThan(maxRetryBackoff);
+      return limit;
+    }
+
     public boolean isEnabled() {
       return enabled;
     }
@@ -771,6 +818,22 @@ public class EInvoiceProperties {
 
     public void setSweepInterval(Duration sweepInterval) {
       this.sweepInterval = sweepInterval;
+    }
+
+    public Duration getRunningCeiling() {
+      return runningCeiling;
+    }
+
+    public void setRunningCeiling(Duration runningCeiling) {
+      this.runningCeiling = runningCeiling;
+    }
+
+    public Duration getParkedCeiling() {
+      return parkedCeiling;
+    }
+
+    public void setParkedCeiling(Duration parkedCeiling) {
+      this.parkedCeiling = parkedCeiling;
     }
   }
 

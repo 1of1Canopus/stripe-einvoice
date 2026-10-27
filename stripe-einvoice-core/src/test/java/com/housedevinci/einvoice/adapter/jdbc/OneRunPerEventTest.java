@@ -12,12 +12,14 @@ import com.housedevinci.einvoice.application.MappingInput;
 import com.housedevinci.einvoice.application.PreflightReport;
 import com.housedevinci.einvoice.application.ReprocessRequest;
 import com.housedevinci.einvoice.application.RunPermits;
+import com.housedevinci.einvoice.application.StrandedInboundSweep;
 import com.housedevinci.einvoice.application.TestInvoices;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
 import com.housedevinci.einvoice.domain.Mode;
+import com.housedevinci.einvoice.domain.RunningLimit;
 import com.zaxxer.hikari.HikariConfigMXBean;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
@@ -400,6 +402,76 @@ class OneRunPerEventTest {
     assertThat(harness.inbound().find(eventId)).isEmpty();
   }
 
+  /**
+   * T22, path 16: the QUESTIONS 29 expiry skips a row whose run is live, and expires it once the
+   * lock is released. Example: a run of {@code in_orpe_t22} holds its lock; the row is 73 hours old
+   * and stranded; the sweep under the lock expires nothing and records no finding; the next sweep
+   * after release expires it.
+   */
+  @Test
+  void the_expiry_skips_a_held_row_and_expires_it_after_release() {
+    IssuanceTestHarness harness =
+        IssuanceTestHarness.createOn(PostgresSupport.freshDatabase("orpe_expiry", 6));
+    String eventId = harness.receive("invoice.finalized", "in_orpe_t22");
+    InboundEvent stored = row(harness, eventId);
+    harness.moveClockForward(Duration.ofHours(73));
+    StrandedInboundSweep sweep =
+        new StrandedInboundSweep(
+            harness.inbound(), RunningLimit.DEFAULT, 10, harness.unitOfWork().configuration());
+    assertThat(harness.inbound().stranded(harness.now(), RunningLimit.DEFAULT, 10))
+        .extracting(InboundEvent::eventId)
+        .containsExactly(eventId);
+
+    Optional<Integer> whileHeld =
+        harness.runLock().whileHeld(stored, held -> sweep.expire(harness.now()));
+
+    assertThat(whileHeld).contains(0);
+    assertThat(row(harness, eventId).state()).isEqualTo(InboundState.RECEIVED);
+    assertThat(harness.openFindings())
+        .noneMatch(f -> f.code().equals(ErrorCodes.RECON_STUCK_INBOUND));
+    assertThat(sweep.expire(harness.now())).isEqualTo(1);
+    assertThat(row(harness, eventId).state()).isEqualTo(InboundState.EXPIRED);
+    assertThat(row(harness, eventId).lastCode()).isEqualTo(ErrorCodes.INBOUND_CEILING_REACHED);
+    assertThat(harness.openFindings())
+        .anyMatch(
+            f -> f.code().equals(ErrorCodes.RECON_STUCK_INBOUND) && f.subjectId().equals(eventId));
+  }
+
+  /**
+   * Path 17 (as T4): an operator's re-open of an {@code EXPIRED} row while a run of its invoice
+   * holds the lock refuses, records nothing and moves nothing.
+   */
+  @Test
+  void a_reprocess_of_an_expired_row_while_a_run_holds_the_lock_records_nothing() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    harness.source().with(TestInvoices.finalised("in_orpe_t4_expired"));
+    String eventId = harness.receive("invoice.finalized", "in_orpe_t4_expired");
+    harness
+        .inbound()
+        .transition(
+            eventId, InboundState.EXPIRED, ErrorCodes.INBOUND_CEILING_REACHED, harness.now(), null);
+    InboundEvent before = row(harness, eventId);
+
+    IssuanceReprocess.Result result =
+        harness
+            .runLock()
+            .whileHeld(
+                before,
+                held ->
+                    harness
+                        .reprocess()
+                        .reprocess(new ReprocessRequest(eventId, "ops-alice", "draft finalised")))
+            .orElseThrow();
+
+    assertThat(result.disposition())
+        .isEqualTo(IssuanceReprocess.Disposition.REFUSED_RUN_IN_PROGRESS);
+    assertThat(harness.reprocessRecords(eventId)).isEmpty();
+    assertThat(row(harness, eventId).state()).isEqualTo(InboundState.EXPIRED);
+    assertThat(harness.reprocess().reprocess(new ReprocessRequest(eventId, "ops-alice", "again")))
+        .extracting(IssuanceReprocess.Result::disposition)
+        .isEqualTo(IssuanceReprocess.Disposition.REPROCESSED);
+  }
+
   /** T11, path 14: two invoices whose keys collide only wait for each other. */
   @Test
   void a_key_collision_costs_one_sweep_and_both_invoices_complete() throws Exception {
@@ -730,8 +802,27 @@ class OneRunPerEventTest {
 
     @Override
     public List<InboundEvent> due(
-        Instant now, Duration retryCeiling, int limit, String pinnedApiVersion) {
-      return delegate.due(now, retryCeiling, limit, pinnedApiVersion);
+        Instant now,
+        Duration retryCeiling,
+        com.housedevinci.einvoice.domain.RunningLimit runningLimit,
+        int limit,
+        String pinnedApiVersion) {
+      return delegate.due(now, retryCeiling, runningLimit, limit, pinnedApiVersion);
+    }
+
+    @Override
+    public List<InboundEvent> stranded(
+        Instant now, com.housedevinci.einvoice.domain.RunningLimit runningLimit, int limit) {
+      return delegate.stranded(now, runningLimit, limit);
+    }
+
+    @Override
+    public boolean expire(
+        InboundEvent stranded,
+        com.housedevinci.einvoice.domain.ComplianceFinding finding,
+        Instant now) {
+      writes.add("expire");
+      return delegate.expire(stranded, finding, now);
     }
 
     @Override
