@@ -240,6 +240,19 @@ All notable changes to this project are documented here. The format follows
   which only the sweep does. The finding repeats on every pass until the row leaves the newest
   `page-size` disposed numbers with a key.
 
+- **A resumed run whose new bytes differ from the recorded document burns the number (D-RTR-5).**
+  `F-2026-0042`'s first archive write fails after its hash H1 is recorded. The host upgrades its
+  renderer; the retry finds no object, renders H2, and H2 passes. It used to end on `DEI-240`
+  with the row left `FAILED_ARCHIVE`, nothing chained, and the sweep re-enqueueing it to the retry
+  ceiling. It now burns the number: `FAILED_VALIDATION` with rule id `DEI-244`, new code
+  `RENDER_NOT_REPRODUCIBLE`; H1 and its key stay on the row and in the one chained event; nothing
+  is archived; one WARN names both hashes and both keys, no content; the sweep reports `DEI-279`
+  and enqueues nothing. Another extension with the same bytes is another key and burns too.
+  `DEI-240` keeps its one meaning: the store holds other bytes at the key. Renderers must be
+  byte-stable across a retry (README, `DocumentRenderer`).
+  A later event for any burned number now records the burn's rule id with its `DEI-250` (it had
+  none), so after a `DEI-244` burn it does not read as a validation refusal (D-PR53-1).
+
 - **The stuck check names every open number (D-PR50-B1).** `DEI-273` read only the newest page of
   the series years its two-day window touched, and only after the Stripe list call, which throws
   on a refused key or an outage. A number left open across a year end, or through an outage that

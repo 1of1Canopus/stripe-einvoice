@@ -9,6 +9,15 @@ package com.housedevinci.einvoice.application;
  * input renders the same bytes</b>, under any time zone and any locale (D-15). A renderer that does
  * not is a renderer whose retry writes a second document under the same number.
  *
+ * <p><b>Byte-stable across a retry.</b> The same input must render the same bytes, with the same
+ * extension, on every attempt for one number. The unit of work stores only the hash it recorded
+ * before the first archive write. When a resumed run finds no object at that key and renders bytes
+ * that pass but differ, the number is burned with {@code DEI-244} (D-RTR-5): the hash and key are
+ * write-once, so the new bytes can never be archived under it. Causes seen: a renderer upgrade, a
+ * change to the seller profile (the seller's street name corrected in configuration between two
+ * attempts), a mapping change, a new rule pack that changes the output, or a renderer that writes a
+ * timestamp or a random id. Drain open numbers before such a change.
+ *
  * <p>There is deliberately no default implementation. An application with no renderer bean issues
  * nothing and says so at startup, rather than archiving something this module made up.
  */

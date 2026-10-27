@@ -28,7 +28,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * QUESTIONS 38, D-DD-B1: what a resumed issuance row may conclude. One test per path of the archive
- * retry refusal design, revision 2 (S1 to S15, plus the two pins P8 and Q2).
+ * retry refusal design, revision 2 (S1 to S15, plus the pin Q2; the P8 pin moved to {@link
+ * ResumedRenderMismatchPathsTest} with D-RTR-5).
  *
  * <p>Example of the defect: {@code F-2026-0042} fails its archive write on 10 January; the retry
  * renders BT-2 = 3 January; EINVOICE-DATES refuses; the row could not record it and the event ended
@@ -292,23 +293,10 @@ class ArchiveRetryRefusalPathsTest {
     assertThat(row.event().nextAttemptAt()).as("a conflict does not heal by waiting").isNull();
   }
 
-  // ------------------------------------------------------------------ pins: P8, Q2
+  // ------------------------------------------------------------------ pin: Q2
 
-  @Test
-  void a_different_hash_on_retry_is_a_content_conflict() {
-    // D-RTR-5 (its own item before the tag): the bytes pass but differ from the recorded hash.
-    Row row = prepare(FAILED_ARCHIVE_NO_OBJECT, "in_p8");
-
-    IssuanceUnitOfWork.Outcome outcome =
-        row.retry(
-            ArchiveRetryFixture.editing(row.harness(), (xml, input) -> xml + "<!-- again -->"),
-            TestValidators.passing(),
-            ArchiveRetryFixture.READER);
-
-    assertThat(outcome.code()).isEqualTo(ErrorCodes.ARCHIVE_CONTENT_CONFLICT);
-    assertThat(row.now().state()).isEqualTo(IssuanceState.FAILED_ARCHIVE);
-    assertThat(row.harness().archive().size()).isZero();
-  }
+  // P8 (D-RTR-5): the pin a_different_hash_on_retry_is_a_content_conflict is rewritten as
+  // ResumedRenderMismatchPathsTest.a_resumed_render_with_another_hash_burns_the_number.
 
   @Test
   void an_object_landing_after_the_burn_is_reported() {
