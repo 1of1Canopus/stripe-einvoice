@@ -153,4 +153,28 @@ class SweeperRetryEdgeTableTest {
     assertThat(outcome.state()).isEqualTo(InboundState.REFUSED_MODE);
     assertThat(outcome.code()).isEqualTo(ErrorCodes.MODE_MISMATCH);
   }
+
+  /**
+   * D-PR50-CI-1. The table leaves about a hundred due rows in the suite's shared database, all
+   * received at the harness's start time. A row concluded later with a backoff must still be seen
+   * by the harness's due helper, whatever ran before it.
+   */
+  @Test
+  void a_row_with_a_backoff_is_seen_as_due_behind_a_full_page_of_older_due_rows() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    for (int i = 0; i < 150; i++) {
+      harness.receive("invoice.finalized", "in_sre_crowd_" + System.nanoTime() + "_" + i);
+    }
+    harness.moveClockForward(java.time.Duration.ofMinutes(1));
+    String eventId = harness.receive("invoice.finalized", "in_sre_behind_" + System.nanoTime());
+    harness
+        .source()
+        .breakWith(
+            new com.housedevinci.einvoice.domain.EInvoiceException(
+                ErrorCodes.STRIPE_UNAVAILABLE, "stripe is down"));
+    assertThat(harness.unitOfWork().process(eventId).state()).isEqualTo(InboundState.FAILED_FETCH);
+    harness.moveClockForward(java.time.Duration.ofHours(2));
+
+    assertThat(harness.due()).extracting(InboundEvent::eventId).contains(eventId);
+  }
 }
