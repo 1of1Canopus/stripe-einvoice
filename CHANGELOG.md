@@ -60,9 +60,15 @@ All notable changes to this project are documented here. The format follows
   (which refuses at once with `DEI-102`). The starter refuses at startup (`DEI-100`) a Hikari pool
   smaller than `3 x concurrency + 2`, unwrapping a proxied pool first. The rule runs in every
   started context with a unit of work, the starter's or one the host builds (D-PR49-2).
-- **Reserved error codes (D-ORPE-8).** `ReservedErrorCodes` lists the codes approved plans already
-  gave a meaning (`DEI-214` to `DEI-216`); a test fails the build when a code in `ErrorCodes` repeats
-  a value or takes a reserved code under another name.
+- **Reserved error codes (D-ORPE-8, D-PR49-3).** `ReservedErrorCodes` lists every code a reviewed
+  design already gave a meaning, each with its name and the design that reserves it: the Pro slice
+  1 code table (`DEI-123` to `DEI-129`, `DEI-214` to `DEI-216`, `DEI-600` to `DEI-630`),
+  `DEI-218`, `DEI-244 RENDER_NOT_REPRODUCIBLE`, `DEI-246 ARCHIVE_UNMARKED`, `DEI-232
+  ARCHIVE_FOREIGN`, `DEI-266`, `DEI-281` and `DEI-282`. A test fails the build when a code in
+  `ErrorCodes` repeats a value, takes a reserved code under another name, or defines a reserved
+  name under another code, and when one name is reserved under two codes. The archive marker
+  design first reserved `DEI-247` for `ARCHIVE_FOREIGN`; `DEI-247` is `ROW_LOCK_RELEASE_FAILED`,
+  so the marker's refusal is `DEI-232`.
 
 - **Invoice dates go up with their numbers (D-PS1-27).** The issue date (BT-2) of an invoice is
   now the day its number is given: the database clock (`pg_catalog.clock_timestamp()`), read after
@@ -212,6 +218,23 @@ All notable changes to this project are documented here. The format follows
   remain and mean an invoice.
 
 ### Fixed
+
+- **The stuck check names every open number (D-PR50-B1).** `DEI-273` read only the newest page of
+  the series years its two-day window touched, and only after the Stripe list call, which throws
+  on a refused key or an outage. A number left open across a year end, or through an outage that
+  lasted past the window, was never named. Example: a number allocated on 30 December stays open;
+  the Stripe key is refused until 3 January; no pass named it. The check now runs first, before
+  any Stripe call, and reads open numbers of the seller and mode in every series and year, oldest
+  first, through the new port method `IssuanceReader.openOlderThan` (served by the existing
+  `einvoice_issuance_open` index). Implementers must add it. When it reads a full page it logs a
+  WARN, since more may be open.
+- **Every reconciliation check runs in every pass (D-PR51-1).** A refused Stripe key or a Stripe
+  outage threw at the list call and skipped the archive checks (`DEI-271`, `DEI-275`, `DEI-272`)
+  and the unfinished-reprocess check (`DEI-276`) for as long as it lasted. Each check now runs on
+  its own: one that fails is logged at WARN with its name and code, and the next one still runs.
+  Example: the key is revoked on Friday and an archived invoice is deleted on Saturday; Saturday's
+  pass still names the missing object. The pass then throws its first failure, so a pass with a
+  failed check is still never "completed" and `DEI-274` still fires.
 
 - **A refusal on a resumed run is recorded (QUESTIONS 38, D-DD-B1).** A run that resumed a row in
   `ARCHIVING` or `FAILED_ARCHIVE` and was then refused by the validator, the date check or the
