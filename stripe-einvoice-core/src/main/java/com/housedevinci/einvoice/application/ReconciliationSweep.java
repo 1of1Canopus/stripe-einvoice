@@ -133,29 +133,86 @@ public final class ReconciliationSweep {
     this.configuration = configuration;
   }
 
+  /**
+   * One pass. Every check runs in every pass, each on its own (D-PR51-1): a check whose dependency
+   * fails (Stripe refuses the key, the archive is down, a read times out) is logged and the next
+   * check still runs. Example: the Stripe key is revoked on Friday and an archived invoice is
+   * deleted on Saturday; Saturday's pass still names the missing object. The pass then throws the
+   * first failure, so the sweeper still logs it and the stale signal ({@code DEI-274}) still fires:
+   * a pass with a failed check is never a completed pass.
+   */
   public Result sweep() {
     Instant now = clock.instant();
     Instant to = now.minus(settings.grace());
     Instant from = to.minus(settings.window());
+    Counts counts = new Counts();
+    Failures failures = new Failures();
+
     // D-SRE-5a: an event stopped on a refused Stripe key (DEI-219, no next attempt) is named once
     // per event id; record() dedupes, so a row stopped for a week is one finding, not one per pass.
-    // First, before any Stripe call: with the key still refused, the list call below throws, and
-    // these findings are the ones that must still be written.
-    int keyRefused = 0;
+    failures.run("key refused", () -> keyRefused(counts, now));
+    // D-PR50-B1: open numbers by seller and mode, every series year, oldest first.
+    failures.run("stuck", () -> stuck(counts, now));
+    failures.run("stripe to us", () -> stripeToUs(counts, from, to, now));
+    // The rows are read once, before any archive call, so an archive failure in the next check
+    // cannot leave the orphan check with half a set of known keys.
+    Optional<List<Issuance>> rows = failures.call("series read", () -> seriesRows(from, to, now));
+    if (rows.isPresent()) {
+      failures.run("us to archive", () -> usToArchive(counts, rows.get(), now));
+      failures.run("archive to us", () -> archiveToUs(counts, rows.get(), now));
+    } else {
+      // Without the rows every object would look like an orphan; the failure above is the report.
+      log.warn("einvoice: reconciliation check 'archive to us' not run: the series read failed");
+    }
+    failures.run("unfinished reprocess", () -> unfinishedReprocess(counts, now));
+
+    Result result =
+        new Result(
+            now,
+            counts.checked,
+            counts.missing,
+            counts.archiveMissing,
+            counts.drift,
+            counts.orphans,
+            counts.stuck,
+            counts.unfinished,
+            counts.voided,
+            counts.burned,
+            counts.keyRefused);
+    log.info(
+        "einvoice: reconciliation checked {} finalised invoices and raised {} findings"
+            + " (missing {}, archive missing {}, drift {}, orphan {}, stuck {},"
+            + " unfinished reprocess {}, voided {}, burned {}, key refused {}); failed checks {}",
+        counts.checked,
+        result.total(),
+        counts.missing,
+        counts.archiveMissing,
+        counts.drift,
+        counts.orphans,
+        counts.stuck,
+        counts.unfinished,
+        counts.voided,
+        counts.burned,
+        counts.keyRefused,
+        failures.failed);
+    failures.throwFirst();
+    return result;
+  }
+
+  private void keyRefused(Counts counts, Instant now) {
     for (String eventId :
         inbound.accessRefused(
             configuration.sellerId(), configuration.mode(), settings.pageSize())) {
-      keyRefused++;
+      counts.keyRefused++;
       record(ErrorCodes.STRIPE_ACCESS_REFUSED, eventId, now);
     }
+  }
 
-    // D-PR50-B1: the stuck check reads open numbers by seller and mode, in every series year and
-    // oldest first, and runs here, before the Stripe list call. Scoped to the window's series years
-    // and after the list call, it never named a number left open across a year end or through a
-    // refused key or an outage: the list call throws, and by the time it answers again the window
-    // has left the number's year. Example: a number allocated on 30 December stays open; the key
-    // is refused until 3 January; this pass still names it on 30 December evening.
-    int stuck = 0;
+  private void stuck(Counts counts, Instant now) {
+    // Scoped to the window's series years and run after the Stripe list call, this check never
+    // named a number left open across a year end or through a refused key or an outage. Example: a
+    // number allocated on 30 December stays open; the key is refused until 3 January; this pass
+    // still names it on 30 December evening.
     List<Issuance> openNumbers =
         reader.openOlderThan(
             configuration.sellerId(),
@@ -163,7 +220,7 @@ public final class ReconciliationSweep {
             now.minus(settings.alertAfter()),
             settings.pageSize());
     for (Issuance open : openNumbers) {
-      stuck++;
+      counts.stuck++;
       record(ErrorCodes.RECON_STUCK_ISSUANCE, open.stripeInvoiceId(), now);
     }
     if (openNumbers.size() >= settings.pageSize()) {
@@ -173,13 +230,11 @@ public final class ReconciliationSweep {
               + " more may be open",
           openNumbers.size());
     }
+  }
 
-    int checked = 0;
-    int missing = 0;
-    int voided = 0;
-    int burned = 0;
+  private void stripeToUs(Counts counts, Instant from, Instant to, Instant now) {
     for (String invoiceId : source.finalisedInvoiceIds(from, to)) {
-      checked++;
+      counts.checked++;
       Optional<Issuance> issuance =
           reader.findBySource(configuration.sellerId(), configuration.mode(), invoiceId);
       if (issuance.isEmpty() || issuance.get().state() != IssuanceState.ISSUED) {
@@ -190,100 +245,137 @@ public final class ReconciliationSweep {
         // re-enqueued, through the same idempotent path as before.
         switch (issuance.map(i -> i.state()).orElse(null)) {
           case IssuanceState.VOID_UNUSED -> {
-            voided++;
+            counts.voided++;
             record(ErrorCodes.RECON_VOIDED_NO_DOCUMENT, invoiceId, now);
           }
           case IssuanceState.FAILED_VALIDATION -> {
-            burned++;
+            counts.burned++;
             record(ErrorCodes.RECON_BURNED_NO_DOCUMENT, invoiceId, now);
           }
           case null, default -> {
-            missing++;
+            counts.missing++;
             record(ErrorCodes.RECON_MISSING_ISSUANCE, invoiceId, now);
             enqueue(invoiceId, now);
           }
         }
       }
     }
+  }
 
-    int archiveMissing = 0;
-    int drift = 0;
-    Set<String> known = new HashSet<>();
-    int checkedForDrift = 0;
+  private List<Issuance> seriesRows(Instant from, Instant to, Instant now) {
+    List<Issuance> rows = new ArrayList<>();
     for (SeriesKey key : seriesKeys(from, to, now)) {
-      for (Issuance issuance : reader.inSeries(key, settings.pageSize())) {
-        issuance.archiveObjectKey().ifPresent(known::add);
-        if (issuance.state() == IssuanceState.ISSUED) {
-          Optional<String> problem =
-              checkArchived(issuance, checkedForDrift++ < settings.driftSample());
-          if (problem.isPresent()) {
-            if (ErrorCodes.RECON_ARCHIVE_MISSING.equals(problem.get())) {
-              archiveMissing++;
-            } else {
-              drift++;
-            }
-            record(problem.get(), issuance.stripeInvoiceId(), now);
+      rows.addAll(reader.inSeries(key, settings.pageSize()));
+    }
+    return rows;
+  }
+
+  private void usToArchive(Counts counts, List<Issuance> rows, Instant now) {
+    int checkedForDrift = 0;
+    for (Issuance issuance : rows) {
+      if (issuance.state() == IssuanceState.ISSUED) {
+        Optional<String> problem =
+            checkArchived(issuance, checkedForDrift++ < settings.driftSample());
+        if (problem.isPresent()) {
+          if (ErrorCodes.RECON_ARCHIVE_MISSING.equals(problem.get())) {
+            counts.archiveMissing++;
+          } else {
+            counts.drift++;
           }
+          record(problem.get(), issuance.stripeInvoiceId(), now);
         }
       }
     }
+  }
 
-    int orphans = 0;
+  private void archiveToUs(Counts counts, List<Issuance> rows, Instant now) {
+    Set<String> known = new HashSet<>();
+    for (Issuance issuance : rows) {
+      issuance.archiveObjectKey().ifPresent(known::add);
+    }
     for (String key :
         archive.list(
             configuration.mode().wire() + "/" + configuration.sellerId(), settings.pageSize())) {
       if (!known.contains(key) && !key.startsWith(ArchiveCapabilityProbe.SCRATCH_PREFIX)) {
-        orphans++;
+        counts.orphans++;
         // Alerted, never deleted: an object we cannot explain is evidence of something, and a
         // library that tidies it away has destroyed the only copy of that something.
         record(ErrorCodes.RECON_ORPHAN_OBJECT, key, now);
       }
     }
+  }
 
+  private void unfinishedReprocess(Counts counts, Instant now) {
     // R-03: a REQUESTED row with no CONCLUDED means one thing - a process that died between the
     // privileged re-open and the end of its run - because a run that throws still concludes with
     // the code that escaped. That is an operator's problem: the event may be running again with
     // nobody watching the outcome, so it is a finding on the event id rather than a log line.
-    int unfinished = 0;
     for (ReprocessLedger.ReprocessRecord open :
         reprocessLedger.unfinished(
             configuration.sellerId(),
             configuration.mode(),
             now.minus(settings.alertAfter()),
             settings.pageSize())) {
-      unfinished++;
+      counts.unfinished++;
       record(ErrorCodes.RECON_REPROCESS_UNFINISHED, open.eventId(), now);
     }
+  }
 
-    Result result =
-        new Result(
-            now,
-            checked,
-            missing,
-            archiveMissing,
-            drift,
-            orphans,
-            stuck,
-            unfinished,
-            voided,
-            burned,
-            keyRefused);
-    log.info(
-        "einvoice: reconciliation checked {} finalised invoices and raised {} findings"
-            + " (missing {}, archive missing {}, drift {}, orphan {}, stuck {},"
-            + " unfinished reprocess {}, voided {}, burned {}, key refused {})",
-        checked,
-        result.total(),
-        missing,
-        archiveMissing,
-        drift,
-        orphans,
-        stuck,
-        unfinished,
-        voided,
-        burned,
-        keyRefused);
-    return result;
+  /** What one pass has counted so far; a failed check keeps what it counted before it failed. */
+  private static final class Counts {
+    int checked;
+    int missing;
+    int voided;
+    int burned;
+    int archiveMissing;
+    int drift;
+    int stuck;
+    int orphans;
+    int unfinished;
+    int keyRefused;
+  }
+
+  /**
+   * The failures of one pass. A failed check is logged by name and code and kept; the first one is
+   * thrown at the end of the pass with the others attached as suppressed, so nothing is swallowed.
+   */
+  private static final class Failures {
+    private final List<String> failed = new ArrayList<>();
+    private RuntimeException first;
+
+    void run(String check, Runnable body) {
+      call(
+          check,
+          () -> {
+            body.run();
+            return Boolean.TRUE;
+          });
+    }
+
+    <T> Optional<T> call(String check, java.util.function.Supplier<T> body) {
+      try {
+        return Optional.of(body.get());
+      } catch (RuntimeException e) {
+        failed.add(check);
+        // The code only: a message from a host adapter may carry what this log must not.
+        log.warn(
+            "einvoice: reconciliation check '{}' failed ({}); the other checks still run",
+            check,
+            e instanceof EInvoiceException einvoice ? einvoice.code() : e.getClass().getName());
+        if (first == null) {
+          first = e;
+        } else {
+          first.addSuppressed(e);
+        }
+        return Optional.empty();
+      }
+    }
+
+    void throwFirst() {
+      if (first != null) {
+        throw first;
+      }
+    }
   }
 
   /** Empty when the document is where it should be and still hashes to what the row recorded. */

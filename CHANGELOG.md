@@ -195,8 +195,15 @@ All notable changes to this project are documented here. The format follows
   the Stripe key is refused until 3 January; no pass named it. The check now runs first, before
   any Stripe call, and reads open numbers of the seller and mode in every series and year, oldest
   first, through the new port method `IssuanceReader.openOlderThan` (served by the existing
-  `einvoice_issuance_open` index). When it reads a full page it logs a WARN, since more may be
-  open.
+  `einvoice_issuance_open` index). Implementers must add it. When it reads a full page it logs a
+  WARN, since more may be open.
+- **Every reconciliation check runs in every pass (D-PR51-1).** A refused Stripe key or a Stripe
+  outage threw at the list call and skipped the archive checks (`DEI-271`, `DEI-275`, `DEI-272`)
+  and the unfinished-reprocess check (`DEI-276`) for as long as it lasted. Each check now runs on
+  its own: one that fails is logged at WARN with its name and code, and the next one still runs.
+  Example: the key is revoked on Friday and an archived invoice is deleted on Saturday; Saturday's
+  pass still names the missing object. The pass then throws its first failure, so a pass with a
+  failed check is still never "completed" and `DEI-274` still fires.
 
 - **A refusal on a resumed run is recorded (QUESTIONS 38, D-DD-B1).** A run that resumed a row in
   `ARCHIVING` or `FAILED_ARCHIVE` and was then refused by the validator, the date check or the
