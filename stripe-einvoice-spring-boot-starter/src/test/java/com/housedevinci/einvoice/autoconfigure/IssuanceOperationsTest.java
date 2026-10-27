@@ -210,7 +210,11 @@ class IssuanceOperationsTest {
                       java.util.Optional.of(sweeper),
                       context.getBean(EInvoiceProperties.class),
                       Clock.systemUTC());
-              assertThat(fresh.health().getStatus().getCode()).isEqualTo("UP");
+              org.springframework.boot.health.contributor.Health now = fresh.health();
+              // The details say which of sweep, reconciliation or chain made it DOWN.
+              assertThat(now.getStatus().getCode())
+                  .as("health %s", now.getDetails())
+                  .isEqualTo("UP");
               assertThat(fresh.health().getDetails()).containsKeys("lastSweep", "chain");
 
               // A day later, with nothing having run since: never "healthy", because the whole
