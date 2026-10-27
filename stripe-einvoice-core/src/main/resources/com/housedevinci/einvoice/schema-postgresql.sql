@@ -317,6 +317,32 @@ ALTER TABLE einvoice_issuance_event ADD COLUMN IF NOT EXISTS date_gap_cause     
 ALTER TABLE einvoice_inbound_event ADD COLUMN IF NOT EXISTS parked_at  timestamptz;
 ALTER TABLE einvoice_inbound_event ADD COLUMN IF NOT EXISTS retried_at timestamptz;
 
+-- QUESTIONS 29: the clock of the running-row time limit. A running row whose clock is older than
+-- einvoice.issuance.running-ceiling (parked-ceiling for a parked one) stops being due, is moved to
+-- EXPIRED and is reported once. The application restarts the clock on progress.
+--
+-- F-2: rows that exist at the upgrade get the upgrade instant, never their arrival. Nobody knows
+-- how long they had been running under a version with no limit, and a clock from arrival would
+-- expire a whole healthy backlog on the first sweep. The default covers a 0.1.0 writer during a
+-- rolling upgrade; a null is read as "not past any limit". Every step is a no-op on a re-run.
+ALTER TABLE einvoice_inbound_event ADD COLUMN IF NOT EXISTS due_since timestamptz;
+DO $$
+BEGIN
+  IF EXISTS (
+      SELECT 1 FROM pg_attribute a
+       WHERE a.attrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_inbound_event')
+         AND a.attname = 'due_since' AND NOT a.attisdropped AND NOT a.attnotnull) THEN
+    UPDATE einvoice_inbound_event SET due_since = GREATEST(received_at, now())
+     WHERE due_since IS NULL;
+    ALTER TABLE einvoice_inbound_event ALTER COLUMN due_since SET DEFAULT now();
+    ALTER TABLE einvoice_inbound_event ALTER COLUMN due_since SET NOT NULL;
+  END IF;
+END $$;
+-- The sweep's stranded query reads running rows by their clock.
+CREATE INDEX IF NOT EXISTS einvoice_inbound_running_clock
+  ON einvoice_inbound_event (due_since)
+  WHERE state IN ('RECEIVED', 'FETCHED', 'MAPPED', 'PARKED');
+
 DO $$
 DECLARE
   c record;
@@ -893,7 +919,8 @@ BEGIN
       ('einvoice_issuance_event', 'prev_issue_date', false),
       ('einvoice_issuance_event', 'date_gap_cause', false),
       ('einvoice_inbound_event', 'parked_at', false),
-      ('einvoice_inbound_event', 'retried_at', false)
+      ('einvoice_inbound_event', 'retried_at', false),
+      ('einvoice_inbound_event', 'due_since', false)
     ) AS t(tbl, col, no_default)
   LOOP
     IF missing IS NULL AND NOT EXISTS (
