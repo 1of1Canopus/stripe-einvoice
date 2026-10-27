@@ -182,6 +182,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A resumed run whose new bytes differ from the recorded document burns the number (D-RTR-5).**
+  `F-2026-0042`'s first archive write fails after its hash H1 is recorded. The host upgrades its
+  renderer; the retry finds no object, renders H2, and H2 passes. It used to end on `DEI-240`
+  with the row left `FAILED_ARCHIVE`, nothing chained, and the sweep re-enqueueing it to the retry
+  ceiling. It now burns the number: `FAILED_VALIDATION` with rule id `DEI-244`, new code
+  `RENDER_NOT_REPRODUCIBLE`; H1 and its key stay on the row and in the one chained event; nothing
+  is archived; one WARN names both hashes and both keys, no content; the sweep reports `DEI-279`
+  and enqueues nothing. Another extension with the same bytes is another key and burns too.
+  `DEI-240` keeps its one meaning: the store holds other bytes at the key. Renderers must be
+  byte-stable across a retry (README, `DocumentRenderer`).
 - **A refusal on a resumed run is recorded (QUESTIONS 38, D-DD-B1).** A run that resumed a row in
   `ARCHIVING` or `FAILED_ARCHIVE` and was then refused by the validator, the date check or the
   renderer ended on `DEI-113` (illegal transition), with the number still open and re-enqueued by
