@@ -242,37 +242,33 @@ class DisposedNumberArchivePathsTest {
   }
 
   @Test
-  void a_read_failure_after_the_existence_check_is_a_finding() {
-    // Review item 4: both calls sit in the same try; a failure of either is O7.
-    Burned b = burned(FAILED_ARCHIVE_WITH_OBJECT, "in_o7_get");
-    b.land();
-    DisposedArchiveFixture.Counting failing =
-        new DisposedArchiveFixture.Counting(b.harness().archive())
-            .failingGetOn(
-                b.key(), new EInvoiceException(ErrorCodes.ARCHIVE_UNAVAILABLE, "503 on GET"));
-    b.harness().moveClockForward(Duration.ofHours(1));
-
-    ReconciliationSweep.Result result = b.harness().sweepWith(SETTINGS, failing).sweep();
-
-    assertThat(failing.existsCalls(b.key())).isEqualTo(1);
-    assertThat(result.disposedUnverified()).isEqualTo(1);
-    assertThat(codesFor(b.harness(), "in_o7_get")).contains(ErrorCodes.ARCHIVE_UNAVAILABLE);
-  }
-
-  @Test
-  void the_cheap_question_is_asked_first() {
-    // Review item 4: the common case, no object, is one existence check and no read.
-    Burned b = burned(FAILED_ARCHIVE_WITH_OBJECT, "in_head");
+  void one_read_per_disposed_key() {
+    // D-PR52-2: the S3 store has no fast existence check (the port default reads the bytes), so the
+    // check reads each disposed key once and decides on what came back. This reverses item 4 of
+    // the design review, which assumed a HEAD.
+    Burned found = burned(FAILED_ARCHIVE_WITH_OBJECT, "in_one_read_found");
+    found.land();
     DisposedArchiveFixture.Counting counting =
-        new DisposedArchiveFixture.Counting(b.harness().archive());
-    b.harness().moveClockForward(Duration.ofHours(1));
+        new DisposedArchiveFixture.Counting(found.harness().archive());
+    found.harness().moveClockForward(Duration.ofHours(1));
 
-    ReconciliationSweep.Result result = b.harness().sweepWith(SETTINGS, counting).sweep();
+    ReconciliationSweep.Result result = found.harness().sweepWith(SETTINGS, counting).sweep();
 
-    assertThat(counting.existsCalls(b.key())).isEqualTo(1);
-    assertThat(counting.getCalls(b.key())).isZero();
-    assertThat(result.disposedWithObject()).isZero();
-    assertThat(result.disposedUnverified()).isZero();
+    assertThat(result.disposedWithObject()).isEqualTo(1);
+    assertThat(counting.getCalls(found.key())).isEqualTo(1);
+    assertThat(counting.existsCalls(found.key())).isZero();
+
+    Burned absent = burned(FAILED_ARCHIVE_WITH_OBJECT, "in_one_read_absent");
+    DisposedArchiveFixture.Counting quiet =
+        new DisposedArchiveFixture.Counting(absent.harness().archive());
+    absent.harness().moveClockForward(Duration.ofHours(1));
+
+    ReconciliationSweep.Result none = absent.harness().sweepWith(SETTINGS, quiet).sweep();
+
+    assertThat(none.disposedWithObject()).isZero();
+    assertThat(none.disposedUnverified()).isZero();
+    assertThat(quiet.getCalls(absent.key())).isEqualTo(1);
+    assertThat(quiet.existsCalls(absent.key())).isZero();
   }
 
   // ------------------------------------------------------------------ O8
@@ -310,16 +306,33 @@ class DisposedNumberArchivePathsTest {
 
   // ------------------------------------------------------------------ O10
 
+  /** A number left open with its key recorded, then voided by the operator: VOID_UNUSED, keyed. */
+  static String voidedWithKey(IssuanceTestHarness harness, String invoiceId) {
+    RetryEdgeFixture.numberWithArchiveDown(harness, invoiceId);
+    harness
+        .store()
+        .voidUnused(new VoidRequest(harness.sellerId(), Mode.LIVE, invoiceId, "ops void", ""));
+    Issuance row = harness.issuance(invoiceId).orElseThrow();
+    assertThat(row.state()).isEqualTo(IssuanceState.VOID_UNUSED);
+    assertThat(row.archiveObjectKey()).isPresent();
+    return row.archiveKey();
+  }
+
   @Test
-  void a_disposed_row_beyond_the_page_is_not_swept() {
-    // Review item 1: the bound is rows, not hours. The check covers disposed rows among the newest
-    // page-size numbers of each series; an older one is the residual stated in SECURITY-NOTES.
-    Burned b = burned(FAILED_ARCHIVE_WITH_OBJECT, "in_o10");
-    b.land();
-    IssuanceTestHarness harness = b.harness();
-    for (String id : List.of("in_o10_a", "in_o10_b")) {
-      harness.source().with(TestInvoices.finalised(id));
-      harness.unitOfWork().process(harness.receive("invoice.finalized", id));
+  void the_newest_page_of_disposed_rows_is_looked_up_and_a_full_page_warns() {
+    // D-PR52-1: the bound is a page of disposed rows with a key, newest number first, not a page
+    // of all rows. Newer issued numbers do not push a disposed row out; only newer disposed ones
+    // do.
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    String oldest = voidedWithKey(harness, "in_o10_old_" + System.nanoTime());
+    harness.moveClockForward(Duration.ofMinutes(5));
+    String middle = voidedWithKey(harness, "in_o10_mid_" + System.nanoTime());
+    harness.moveClockForward(Duration.ofMinutes(5));
+    String newest = voidedWithKey(harness, "in_o10_new_" + System.nanoTime());
+    for (int i = 0; i < 3; i++) {
+      String fine = "in_o10_issued_" + i + "_" + System.nanoTime();
+      harness.source().with(TestInvoices.finalised(fine));
+      harness.unitOfWork().process(harness.receive("invoice.finalized", fine));
     }
     DisposedArchiveFixture.Counting counting =
         new DisposedArchiveFixture.Counting(harness.archive());
@@ -328,12 +341,38 @@ class DisposedNumberArchivePathsTest {
         new ReconciliationSweep.Settings(
             Duration.ofDays(30), Duration.ZERO, Duration.ofHours(6), 10, 2);
 
-    ReconciliationSweep.Result result = harness.sweepWith(pageOfTwo, counting).sweep();
+    String log = DisposedArchiveFixture.log(() -> harness.sweepWith(pageOfTwo, counting).sweep());
 
-    assertThat(counting.lookups(b.key())).isZero();
-    assertThat(result.disposedWithObject()).isZero();
-    assertThat(codesFor(harness, "in_o10"))
-        .doesNotContain(ErrorCodes.RECON_OBJECT_FOR_DISPOSED_NUMBER);
+    assertThat(counting.lookups(newest)).isEqualTo(1);
+    assertThat(counting.lookups(middle)).isEqualTo(1);
+    assertThat(counting.lookups(oldest)).as("past the page of disposed rows").isZero();
+    assertThat(log).contains("disposed-number check read").contains("its page limit");
+  }
+
+  @Test
+  void disposed_rows_with_a_key_are_read_by_seller_and_mode_newest_first_and_bounded() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    IssuanceTestHarness other = IssuanceTestHarness.create();
+    String first = "in_disp_first_" + System.nanoTime();
+    voidedWithKey(harness, first);
+    harness.moveClockForward(Duration.ofMinutes(5));
+    String second = "in_disp_second_" + System.nanoTime();
+    voidedWithKey(harness, second);
+    harness.moveClockForward(Duration.ofMinutes(5));
+    String open = "in_disp_open_" + System.nanoTime();
+    RetryEdgeFixture.numberWithArchiveDown(harness, open);
+    String issued = "in_disp_issued_" + System.nanoTime();
+    harness.source().with(TestInvoices.finalised(issued));
+    harness.unitOfWork().process(harness.receive("invoice.finalized", issued));
+    voidedWithKey(other, "in_disp_foreign_" + System.nanoTime());
+
+    assertThat(harness.reader().disposedWithKey(harness.sellerId(), Mode.LIVE, 10))
+        .extracting(Issuance::stripeInvoiceId)
+        .containsExactly(second, first);
+    assertThat(harness.reader().disposedWithKey(harness.sellerId(), Mode.LIVE, 1))
+        .extracting(Issuance::stripeInvoiceId)
+        .containsExactly(second);
+    assertThat(harness.reader().disposedWithKey(harness.sellerId(), Mode.TEST, 10)).isEmpty();
   }
 
   // ------------------------------------------------------------------ one check among the others
@@ -377,17 +416,34 @@ class DisposedNumberArchivePathsTest {
                 .findFirst()
                 .orElseThrow());
     assertThat(calls.lastIndexOf("inSeries")).isNotNegative().isLessThan(firstArchiveCall);
-    assertThat(calls).contains("exists:" + b.key());
+    assertThat(calls.lastIndexOf("disposedWithKey")).isNotNegative().isLessThan(firstArchiveCall);
+    assertThat(calls).contains("get:" + b.key());
   }
 
   @Test
-  void a_failed_series_read_names_the_check_and_looks_up_nothing() {
-    // Without the rows there is nothing to look up; the WARN names the check that did not run.
+  void a_failed_series_read_does_not_stop_the_disposed_check() {
+    // D-PR52-1: the check reads its own rows, so the series read is not on its path.
     Burned b = burned(FAILED_ARCHIVE_WITH_OBJECT, "in_pr51_read_down");
     b.land();
     List<String> calls = new CopyOnWriteArrayList<>();
     IssuanceReader reader =
         DisposedArchiveFixture.recordingReader(b.harness().reader(), calls, "inSeries");
+    b.harness().moveClockForward(Duration.ofHours(1));
+
+    assertThatThrownBy(() -> b.harness().sweepWith(SETTINGS, reader, b.harness().archive()).sweep())
+        .isInstanceOf(EInvoiceException.class);
+
+    assertThat(codesFor(b.harness(), "in_pr51_read_down"))
+        .contains(ErrorCodes.RECON_OBJECT_FOR_DISPOSED_NUMBER);
+  }
+
+  @Test
+  void a_failed_disposed_read_names_the_check_and_looks_up_nothing() {
+    Burned b = burned(FAILED_ARCHIVE_WITH_OBJECT, "in_disp_read_down");
+    b.land();
+    List<String> calls = new CopyOnWriteArrayList<>();
+    IssuanceReader reader =
+        DisposedArchiveFixture.recordingReader(b.harness().reader(), calls, "disposedWithKey");
     DisposedArchiveFixture.Counting archive =
         new DisposedArchiveFixture.Counting(b.harness().archive(), calls);
     b.harness().moveClockForward(Duration.ofHours(1));
@@ -399,12 +455,12 @@ class DisposedNumberArchivePathsTest {
                     .isInstanceOf(EInvoiceException.class));
 
     assertThat(archive.lookups(b.key())).isZero();
-    assertThat(log).contains("'disposed numbers'");
-    assertThat(codesFor(b.harness(), "in_pr51_read_down"))
+    assertThat(log).contains("'disposed read'");
+    assertThat(codesFor(b.harness(), "in_disp_read_down"))
         .doesNotContain(ErrorCodes.RECON_OBJECT_FOR_DISPOSED_NUMBER);
     assertThat(calls)
-        .as("the checks that need no rows still ran")
-        .contains("openOlderThan", "findBySource");
+        .as("the other checks still ran")
+        .contains("openOlderThan", "findBySource", "inSeries");
   }
 
   @Test

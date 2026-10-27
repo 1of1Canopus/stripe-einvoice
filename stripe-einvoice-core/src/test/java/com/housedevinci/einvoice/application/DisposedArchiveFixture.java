@@ -31,7 +31,6 @@ final class DisposedArchiveFixture {
     private final Map<String, Integer> gets = new ConcurrentHashMap<>();
     private volatile String failingKey = "";
     private volatile RuntimeException failure;
-    private volatile boolean failOnGetOnly;
     private final List<String> calls;
 
     Counting(ArchiveStore delegate) {
@@ -48,14 +47,6 @@ final class DisposedArchiveFixture {
     Counting failingOn(String key, RuntimeException thrown) {
       this.failingKey = key;
       this.failure = thrown;
-      this.failOnGetOnly = false;
-      return this;
-    }
-
-    /** Only {@code get} of {@code key} throws: the existence check answers. */
-    Counting failingGetOn(String key, RuntimeException thrown) {
-      failingOn(key, thrown);
-      this.failOnGetOnly = true;
       return this;
     }
 
@@ -90,7 +81,7 @@ final class DisposedArchiveFixture {
     public boolean exists(ArchiveKey key) {
       exists.merge(key.value(), 1, Integer::sum);
       calls.add("exists:" + key.value());
-      if (!failOnGetOnly && key.value().equals(failingKey)) {
+      if (key.value().equals(failingKey)) {
         throw failure;
       }
       return delegate.exists(key);
