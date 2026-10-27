@@ -5,6 +5,7 @@ import com.housedevinci.einvoice.domain.IssuanceState;
 import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.SeriesKey;
 import com.housedevinci.einvoice.domain.SeriesReport;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -45,4 +46,15 @@ public interface IssuanceReader {
    * the content hash, which are what the archive directions of the sweep compare against.
    */
   List<Issuance> inSeries(SeriesKey seriesKey, int limit);
+
+  /**
+   * Open numbers of this seller and mode allocated before {@code before}, oldest first, in every
+   * series and every fiscal year (D-PR50-B1).
+   *
+   * <p>The stuck check reads this, not {@link #inSeries}: a number left open is stuck whatever year
+   * it was allocated in and however many newer numbers came after it. Example: the application is
+   * down from 30 December to 5 January; a number allocated on 30 December and never archived is
+   * still named by the first pass of January. "Open" is {@link IssuanceState#open()}.
+   */
+  List<Issuance> openOlderThan(String sellerId, Mode mode, Instant before, int limit);
 }

@@ -2073,6 +2073,44 @@ public final class JdbcIssuanceStore
         });
   }
 
+  /**
+   * D-PR50-B1: the stuck check's read. Seller and mode in the predicate, any series and any year,
+   * oldest first. The open states come from {@code IssuanceState.open()}, so the domain and this
+   * query cannot disagree. Served by {@code einvoice_issuance_open (state, allocated_at)}.
+   */
+  static final String OPEN_OLDER_THAN =
+      "SELECT "
+          + SELECT_ISSUANCE_COLUMNS
+          + " FROM einvoice_issuance WHERE seller_id = ? AND mode = ? AND state IN ("
+          + java.util.Arrays.stream(IssuanceState.values())
+              .filter(IssuanceState::open)
+              .map(state -> "'" + state.name() + "'")
+              .collect(java.util.stream.Collectors.joining(","))
+          + ") AND allocated_at < ? ORDER BY allocated_at, id LIMIT ?";
+
+  @Override
+  public List<Issuance> openOlderThan(String sellerId, Mode mode, Instant before, int limit) {
+    Objects.requireNonNull(sellerId, "sellerId");
+    Objects.requireNonNull(mode, "mode");
+    Objects.requireNonNull(before, "before");
+    return unitOfWork.inReadUnit(
+        unit -> {
+          List<Issuance> rows = new ArrayList<>();
+          try (PreparedStatement ps = unit.connection().prepareStatement(OPEN_OLDER_THAN)) {
+            ps.setString(1, sellerId);
+            ps.setString(2, mode.wire());
+            ps.setObject(3, ts(before));
+            ps.setInt(4, Math.max(1, limit));
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                rows.add(readIssuance(rs));
+              }
+            }
+          }
+          return List.copyOf(rows);
+        });
+  }
+
   @Override
   public SeriesReport seriesReport(SeriesKey key) {
     return unitOfWork.inReadUnit(
