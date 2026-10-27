@@ -741,6 +741,18 @@ class OneRunPerEventTest {
     }
 
     @Override
+    public int rearmAccessRefused(boolean livemode, String stripeAccountId, Instant now) {
+      writes.add("rearm");
+      return delegate.rearmAccessRefused(livemode, stripeAccountId, now);
+    }
+
+    @Override
+    public List<String> accessRefused(
+        String sellerId, com.housedevinci.einvoice.domain.Mode mode, int limit) {
+      return delegate.accessRefused(sellerId, mode, limit);
+    }
+
+    @Override
     public List<StateCount> countsByState() {
       return delegate.countsByState();
     }

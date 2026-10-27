@@ -244,6 +244,15 @@ public final class ErrorCodes {
    */
   public static final String RUN_IN_HOST_TRANSACTION = "DEI-218";
 
+  /**
+   * Stripe refused the key: HTTP 401 or 403 (design "sweeper retry edges", section 5). A revoked or
+   * under-scoped restricted key does not improve with time, so the run stops with no retry, the
+   * reconciliation pass names the event, and the first successful Stripe call after a refusal (or
+   * the next startup) makes the stopped rows due again. A rate limit (429) and every other status
+   * stay {@link #STRIPE_UNAVAILABLE}.
+   */
+  public static final String STRIPE_ACCESS_REFUSED = "DEI-219";
+
   /** Our recomputation of a total or of a tax bucket disagrees with Stripe's own (D-12). */
   public static final String TOTALS_MISMATCH = "DEI-220";
 

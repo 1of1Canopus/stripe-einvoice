@@ -201,6 +201,43 @@ public final class IssuanceTestHarness {
     return unitOfWorkPinnedTo(pinnedApiVersion);
   }
 
+  /**
+   * A unit of work in another mode over the same database and seller: a second instance of the
+   * other mode, the case D-SRE-6 is about. The configured series exists only in live mode, so a run
+   * of this instance that reaches the allocator is refused there.
+   */
+  public IssuanceUnitOfWork unitOfWorkInMode(Mode mode) {
+    IssuanceUnitOfWork.Configuration live = configurationFor("DEFAULT", pinnedApiVersion);
+    return new IssuanceUnitOfWork(
+        inbound,
+        runLock,
+        permits,
+        source,
+        store,
+        store,
+        store,
+        store,
+        renderer,
+        validator,
+        new com.housedevinci.einvoice.adapter.validation.UblDocumentDates(),
+        archive,
+        preflightSupport,
+        clock,
+        new IssuanceUnitOfWork.Configuration(
+            live.sellerId(),
+            live.stripeAccountId(),
+            mode,
+            live.series(),
+            live.fiscalYearReset(),
+            live.taxZone(),
+            live.pinnedApiVersion(),
+            live.rulePackVersion(),
+            live.retryBackoff(),
+            live.maxRetryBackoff(),
+            live.closedYearCutoff(),
+            live.readBackAfterWrite()));
+  }
+
   public IssuanceUnitOfWork unitOfWorkPinnedTo(String apiVersion) {
     return new IssuanceUnitOfWork(
         inbound,
@@ -581,8 +618,17 @@ public final class IssuanceTestHarness {
    * equals {@code pin} is re-picked.
    */
   public List<InboundEvent> due(String pin) {
-    return inbound.due(clock.instant(), Duration.ofHours(72), 100, pin);
+    return inbound.due(clock.instant(), Duration.ofHours(72), DUE_PAGE, pin);
   }
+
+  /**
+   * The page a test asks the due query for. The test database is shared by the whole suite, and the
+   * due query is oldest first over every seller, so a page of 100 made "is this event due?" depend
+   * on how many other tests left due rows before it (D-PR50-CI-1: the edge table leaves about a
+   * hundred). The production page is {@code einvoice.issuance.queue-capacity}; its bound is tested
+   * on the store, not through this helper.
+   */
+  static final int DUE_PAGE = 100_000;
 
   public SeriesKey seriesKey() {
     return new SeriesKey(sellerId, "DEFAULT", 2026, Mode.LIVE);

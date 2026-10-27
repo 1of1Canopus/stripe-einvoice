@@ -330,10 +330,13 @@ class ArchiveRetryRefusalPathsTest {
   // ------------------------------------------------------------------ S7
 
   @Test
-  void a_reprocess_never_resumes_a_numbered_row() {
-    // S7 is refused by design, not a burn path: IssuanceReprocess refuses any event whose invoice
-    // already holds a number (REFUSED_NUMBERED), so it cannot reach a resumed FAILED_ARCHIVE row.
-    // The resumed row is reached by the sweeper's retry of its own event instead (S1 to S6).
+  void a_reprocess_that_resumes_a_numbered_row_meets_the_same_refusal_as_the_retry() {
+    // S7. Until the sweeper retry edges, IssuanceReprocess refused any event whose invoice held a
+    // number (REFUSED_NUMBERED), so it could not reach a resumed FAILED_ARCHIVE row. D-SRE-2
+    // (approved by the security review, round 2) re-opens a numbered row in place and resumes its
+    // number, so the reprocess now reaches that row and goes through the run's own refusal: the
+    // backdated document is refused by EINVOICE-DATES and the number burns, exactly as on the
+    // sweeper's retry (S1 to S6). No second number, no document, the burn chained once.
     Row row = prepare(FAILED_ARCHIVE_NO_OBJECT, "in_s7");
     IssuanceTestHarness harness = row.harness();
     AtomicBoolean profileIncomplete = new AtomicBoolean(true);
@@ -361,15 +364,19 @@ class ArchiveRetryRefusalPathsTest {
     assertThat(harness.unitOfWorkWithRenderer(repairable).process(paid).state())
         .isEqualTo(InboundState.FAILED_MAPPING);
     profileIncomplete.set(false);
-    int renders = harness.renderer().renders();
+    long numbers = harness.numberedRows();
 
     IssuanceReprocess.Result result =
         harness.reprocessWith(repairable).reprocess(new ReprocessRequest(paid, "ops", "fixed"));
 
-    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REFUSED_NUMBERED);
-    assertThat(harness.renderer().renders()).isEqualTo(renders);
-    assertThat(row.now().state()).isEqualTo(IssuanceState.FAILED_ARCHIVE);
-    assertThat(row.chained()).isEmpty();
+    assertThat(result.disposition()).isEqualTo(IssuanceReprocess.Disposition.REPROCESSED);
+    assertThat(result.state()).isEqualTo(InboundState.FAILED_ISSUANCE);
+    assertThat(result.code()).isEqualTo(ErrorCodes.VALIDATION_REFUSED);
+    assertThat(harness.numberedRows()).isEqualTo(numbers);
+    assertThat(row.now().state()).isEqualTo(IssuanceState.FAILED_VALIDATION);
+    assertThat(row.now().voidRuleId()).isEqualTo(DocumentDatesRule.RULE_ID);
+    assertThat(row.chained()).containsExactly(burnLine(row.now(), DocumentDatesRule.RULE_ID));
+    assertThat(harness.archive().size()).isZero();
   }
 
   // ------------------------------------------------------------------ S8

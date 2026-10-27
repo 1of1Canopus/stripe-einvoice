@@ -2,6 +2,7 @@ package com.housedevinci.einvoice.application;
 
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
+import com.housedevinci.einvoice.domain.Mode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -118,8 +119,31 @@ public interface InboundEventStore {
    */
   List<InboundEvent> due(Instant now, Duration retryCeiling, int limit, String pinnedApiVersion);
 
-  /** Rows that never reached a terminal state and are older than the retention ceiling (I-07). */
+  /**
+   * Rows older than the retention ceiling, any state (I-07), except a row whose Stripe invoice
+   * holds an open number, numbered, archiving or failed archive (D-SRE-7, D-PR50-1): the reprocess
+   * needs that row to resume the number, so it stays until the number resolves and leaves at the
+   * next purge after.
+   */
   int purgeOlderThan(Instant cutoff, int limit);
+
+  /**
+   * Makes due now every row stopped on a refused Stripe key ({@code DEI-219}, state {@code
+   * FAILED_FETCH} or {@code FAILED_ISSUANCE}, no next attempt) whose recorded {@code livemode} and
+   * Stripe account are the given ones (D-SRE-3). Touches {@code next_attempt_at} only, and only
+   * where it is null, so a row a live run has stamped is never moved.
+   *
+   * <p>No default implementation: a store that cannot re-arm would leave the rows stopped for ever.
+   *
+   * @return how many rows were made due
+   */
+  int rearmAccessRefused(boolean livemode, String stripeAccountId, Instant now);
+
+  /**
+   * The event ids of one seller's rows stopped on a refused Stripe key and not re-armed, oldest
+   * first, for the reconciliation pass's finding (D-SRE-5a). No default implementation.
+   */
+  List<String> accessRefused(String sellerId, Mode mode, int limit);
 
   /** Counts per state, for the compliance findings list and the metrics. Never a body. */
   List<StateCount> countsByState();

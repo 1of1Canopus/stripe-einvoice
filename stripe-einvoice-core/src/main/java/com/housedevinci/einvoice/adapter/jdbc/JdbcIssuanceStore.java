@@ -101,6 +101,13 @@ public final class JdbcIssuanceStore
           + SELECT_ISSUANCE_COLUMNS
           + " FROM einvoice_issuance WHERE seller_id = ? AND mode = ? AND stripe_invoice_id = ?";
 
+  /**
+   * D-SRE-6: any seller, any mode; the states only. The one unscoped read of the issuance table,
+   * named in {@code SourceAssertionsTest}.
+   */
+  static final String STATES_FOR_SOURCE =
+      "SELECT state FROM einvoice_issuance WHERE stripe_invoice_id = ?";
+
   static final String CREATE_SERIES_ROW =
       "INSERT INTO einvoice_series (seller_id, document_type, series, fiscal_year, mode, prefix,"
           + " width, next_number, updated_at) VALUES (?,?,?,?,?,?,?,1,?) ON CONFLICT DO NOTHING";
@@ -2021,6 +2028,24 @@ public final class JdbcIssuanceStore
         return rs.next() ? Optional.of(readIssuance(rs)) : Optional.empty();
       }
     }
+  }
+
+  @Override
+  public java.util.Set<IssuanceState> issuanceStates(String stripeInvoiceId) {
+    Objects.requireNonNull(stripeInvoiceId, "stripeInvoiceId");
+    return unitOfWork.inReadUnit(
+        unit -> {
+          java.util.Set<IssuanceState> states = java.util.EnumSet.noneOf(IssuanceState.class);
+          try (PreparedStatement ps = unit.connection().prepareStatement(STATES_FOR_SOURCE)) {
+            ps.setString(1, stripeInvoiceId);
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                states.add(IssuanceState.valueOf(rs.getString(1)));
+              }
+            }
+          }
+          return java.util.Set.copyOf(states);
+        });
   }
 
   static final String IN_SERIES =

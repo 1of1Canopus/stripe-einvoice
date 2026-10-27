@@ -334,6 +334,12 @@ class CipherProbePr11Test {
     }
 
     @Override
+    public java.util.Set<com.housedevinci.einvoice.domain.IssuanceState> issuanceStates(
+        String stripeInvoiceId) {
+      return delegate.issuanceStates(stripeInvoiceId);
+    }
+
+    @Override
     public com.housedevinci.einvoice.domain.SeriesReport seriesReport(
         com.housedevinci.einvoice.domain.SeriesKey seriesKey) {
       return delegate.seriesReport(seriesKey);

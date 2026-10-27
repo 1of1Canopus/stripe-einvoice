@@ -206,11 +206,23 @@ cause. So the remedy is this explicit, privileged call, for one event at a time.
 - **Privileged, and with no HTTP endpoint and no actuator operation anywhere in this module**, for
   the same reason the void has none. Call it from your own admin action, behind your own
   authorization.
-- Eligible only from `FAILED_MAPPING`. Every other state, including a passed event and a second
-  call after a successful reprocess, is answered `REFUSED_NOT_ELIGIBLE` with the recorded state and
-  number, and nothing runs.
-- Refused outright if a legal number already exists for that invoice: this path never touches a
-  numbered invoice.
+- Eligible from `FAILED_MAPPING`, and from `FAILED_ISSUANCE` with any code, when the invoice holds
+  no number: the row is re-opened to `RECEIVED`, and the run goes through every refusal again. The
+  re-open statement itself refuses a row whose invoice holds a number anywhere. Every other state, including a passed event and a
+  second call after a successful reprocess, is answered `REFUSED_NOT_ELIGIBLE` with the recorded
+  state and number, and nothing runs.
+- **A closed number is refused as `REFUSED_NUMBERED`.** A `FAILED_ISSUANCE` or `FAILED_MAPPING` row
+  whose invoice holds an issued, burned or voided number is answered `REFUSED_NUMBERED` (code
+  `DEI-111`), not `REFUSED_NOT_ELIGIBLE`. It runs nothing, records nothing and takes no number.
+- **A numbered row is resumed in place.** When the invoice already holds an open number (numbered,
+  archiving or failed archive; asked by invoice id, under any seller and mode), a `FAILED_ISSUANCE` row with any code, or a `FAILED_MAPPING` row,
+  is re-opened in place: it stays (or becomes) `FAILED_ISSUANCE` with its code kept, never
+  `RECEIVED`. The run then resumes **the same number**. It is not filtered by the retry ceiling,
+  so a row past it is resumed too. Example: the archive was down for four days and the row holding
+  `INV-2026-000012` passed the ceiling; once the archive is back, the reprocess resumes
+  `INV-2026-000012` and writes `COMPLETED`. A cause that is still there is refused again, and the
+  number is kept. The re-open is one conditional statement on the row as read, so two calls give
+  one entry and one run.
 - It re-opens the row and then runs the ordinary pipeline. It cannot skip the preflight, and a
   re-run that refuses again costs nothing, exactly as the first run did.
 - Two simultaneous calls on one event produce one run and one number.
@@ -399,7 +411,7 @@ Two signals, and the difference matters:
 | `einvoice.issuance.concurrency` / `.queue-capacity` | `2` / `1000` | - ; the pool must hold `3 x concurrency + 2` connections, refused at startup otherwise |
 | `einvoice.issuance.retry-ceiling` | `72h` | - |
 | `einvoice.issuance.alert-after` | `6h` | - |
-| `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision |
+| `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision. A row whose invoice holds an open number (numbered, archiving or failed archive) is kept past it until the number resolves |
 | `einvoice.reconcile.interval` / `.window` / `.grace` | `15m` / `2d` / `15m` | `enabled=false` removes the only watcher there is |
 | `einvoice.reconcile.drift-sample` | `10` | `0` stops re-hashing archived documents |
 | `einvoice.numbering.closed-year-cutoff` | unset | setting it refuses invoices whose supply date falls in a year closed longer ago than this |

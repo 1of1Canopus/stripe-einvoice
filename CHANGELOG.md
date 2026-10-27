@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **A refused Stripe key stops the event (D-PR45-B1, design "sweeper retry edges" section 5).**
+  HTTP 401 and 403 from the Stripe API are the new code `DEI-219 STRIPE_ACCESS_REFUSED`; every
+  other status stays `DEI-211`. The event stops with no retry. Each reconciliation pass records one
+  finding per stopped event (`DEI-219`, subject the event id), before its own Stripe call. The
+  first successful Stripe call after a refusal, and every startup (on the sweeper's thread once the
+  application is ready), makes the stopped events due again: only rows of this instance's mode and
+  Stripe account, and only rows with no next attempt. New port methods
+  `InboundEventStore.rearmAccessRefused` and `InboundEventStore.accessRefused`, new
+  `IssuanceUnitOfWork.rearmAccessRefused()` and `IssuanceUnitOfWork.stripeSource()`; the
+  reconciliation sweep bean reads through the unit of work's source. `ReconciliationSweep.Result`
+  gains `accessRefused`.
+
 - **One run per invoice (D-PR45-1).** A run of the issuance pipeline holds a session advisory lock
   keyed on the Stripe invoice for its whole length (new port `InboundRunLock`, adapter
   `JdbcInboundRunLock`, class id `0x45494E52`, session setting `einvoice.run_lock`). A second run
@@ -74,6 +86,39 @@ All notable changes to this project are documented here. The format follows
   than this version), `DEI-136` (schema not upgraded and `initialize-schema=false`).
 
 ### Changed
+
+- **The sweeper's retry edges (D-PR45-B1).** A re-run that reached a refusal or a fetch failure
+  from a state with no edge to it threw `DEI-210` and recorded nothing, every sweep tick. Ten new
+  edges: `PARKED` and `FAILED_FETCH` to the three refusals; `FETCHED` to the three refusals and
+  `FAILED_FETCH`, taken only when the issuance table holds no number for the invoice. A row that
+  may hold a number (`MAPPED`, `FAILED_ISSUANCE`, a numbered `FETCHED`) never writes a
+  pre-`FETCHED` state: the conclusion is written `FAILED_ISSUANCE` with its own code, with a
+  backoff (none for `DEI-205` and `DEI-219`). No new edge leaves a numbered state.
+- **New port method `IssuanceReader.anyIssuanceFor(stripeInvoiceId)` (D-SRE-6).** The one reader
+  method with no seller and mode: "does this row hold a number?" is asked by invoice id only, so an
+  instance of the other mode cannot see a live number as absent. Implementers must add it.
+- **The reprocess resumes a numbered row (D-SRE-2, D-SRE-8).** `IssuanceReprocess` now accepts a
+  `FAILED_ISSUANCE` row with any code, and a `FAILED_MAPPING` row, whose invoice holds a number. It
+  re-opens it in place (`FAILED_ISSUANCE`, code kept, never `RECEIVED`) with one conditional
+  statement on the row as read and the ledger entry in the same transaction, then resumes the same
+  number. New port method `ReprocessLedger.reopenInPlaceAndRecord`. The re-open to `RECEIVED`
+  refuses a numbered row in its own statement; `REFUSED_NUMBERED` now means a number appeared
+  between the read and that statement.
+- **`REFUSED_NUMBERED` in full (D-PR50-4).** The answer means the invoice holds a number that the
+  reprocess may not reopen: an issued, burned or voided one, or a number that appeared between the
+  read and the re-open statement. It runs nothing, records nothing and takes no number.
+- **The answer for a closed number changed since 0.1.0 (D-PR50-4).** In 0.1.0 a reprocess of an
+  event whose invoice holds a voided number answered `REFUSED_NOT_ELIGIBLE`. It now answers
+  `REFUSED_NUMBERED`. A script that branches on the answer must handle the new value.
+
+- **The reprocess accepts `FAILED_ISSUANCE` with any code when the invoice holds no number
+  (D-PR50-2).** A row the allocator refused before the claim, or a `MAPPED` row that crashed
+  before it, can be mapped to `FAILED_ISSUANCE` by a later outage and pass the retry ceiling with
+  no number; it now has an operator path. The re-open to `RECEIVED` keeps its no-number guard.
+  `IssuanceReprocess.ELIGIBLE_ISSUANCE_CODE` (unreleased) is removed.
+- **The retention purge keeps a row whose number is open (D-SRE-7).** A row whose invoice holds a
+  open number (numbered, archiving or failed archive) outlives `einvoice.inbound.retention`, so the reprocess
+  can still resume that number; it leaves at the first purge after the number resolves.
 
 - **BREAKING CHANGE: `InboundEventStore.stampAttempt` (D-PR45-1).** A new abstract method on the
   port, with no default: a run stamps its row as it starts (`attempts + 1`, a next attempt one

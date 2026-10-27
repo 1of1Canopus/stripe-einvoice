@@ -29,8 +29,12 @@ class InboundEventStoreTest {
   }
 
   private static InboundEvent received(String eventId) {
+    return received(eventId, "in_1");
+  }
+
+  private static InboundEvent received(String eventId, String objectId) {
     EventIdentity identity =
-        new EventIdentity(eventId, "invoice.finalized", "2026-03-31.clover", true, "", "in_1");
+        new EventIdentity(eventId, "invoice.finalized", "2026-03-31.clover", true, "", objectId);
     return InboundEvent.received(identity, Mode.LIVE, "primary", BODY, NOW);
   }
 
@@ -266,7 +270,9 @@ class InboundEventStoreTest {
     JdbcInboundEventStore store = store();
     String old = freshId();
     String recent = freshId();
-    store.record(received(old), BODY);
+    // Own invoice ids: in the shared database "in_1" holds open numbers of other tests, and the
+    // purge keeps the row of an open number (D-SRE-7), under any seller.
+    store.record(received(old, "in_purge_" + old), BODY);
     // The purge takes the oldest rows first, LIMIT 100, over the shared test database. Every
     // harness test leaves events dated in January 2026, so a row only 90 days before NOW was not
     // among the first 100 once enough of them existed (order-dependent). The old row is dated
@@ -276,7 +282,7 @@ class InboundEventStoreTest {
             + " WHERE event_id = '"
             + old
             + "'");
-    store.record(received(recent), BODY);
+    store.record(received(recent, "in_purge_" + recent), BODY);
 
     // Both rows and the cutoff hang off the fixed NOW. The wall clock made this a date bomb:
     // from 2026-10-15 the "recent" row (received at NOW) was older than now() - 30 days.

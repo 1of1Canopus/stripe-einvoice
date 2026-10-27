@@ -7,6 +7,7 @@ import com.housedevinci.einvoice.application.ReprocessLedger;
 import com.housedevinci.einvoice.application.ReprocessRequest;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
+import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
 import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.Timestamps;
@@ -76,28 +77,63 @@ public final class JdbcReprocessLedger implements ReprocessLedger {
               return OptionalLong.empty();
             }
           }
-          try (PreparedStatement record =
-              c.prepareStatement(INSERT_REQUESTED, Statement.RETURN_GENERATED_KEYS)) {
+          return requested(c, request, sellerId, mode, at);
+        });
+  }
+
+  @Override
+  public OptionalLong reopenInPlaceAndRecord(
+      ReprocessRequest request, String sellerId, Mode mode, InboundEvent asRead, Instant now) {
+    if (!asRead.eventId().equals(request.eventId())) {
+      throw new EInvoiceException(
+          ErrorCodes.INVALID, "the row read is not the row the reprocess request names");
+    }
+    return unitOfWork.inTransaction(
+        unit -> {
+          Connection c = unit.connection();
+          Instant at = Timestamps.toStorage(now);
+          try (PreparedStatement reopen =
+              c.prepareStatement(JdbcInboundEventStore.REOPEN_IN_PLACE)) {
             int i = 1;
-            record.setString(i++, request.eventId());
-            record.setString(i++, sellerId);
-            record.setString(i++, mode.wire());
-            record.setString(i++, request.actor());
-            record.setString(i++, request.reason());
-            record.setObject(i, ts(at));
-            record.executeUpdate();
-            try (ResultSet keys = record.getGeneratedKeys()) {
-              if (!keys.next()) {
-                // Unreachable with a bigserial primary key; never silently returning "no record"
-                // for a row that was just re-opened is the whole property.
-                throw new EInvoiceException(
-                    ErrorCodes.STORE_UNAVAILABLE,
-                    "the reprocess record was written without returning its sequence");
-              }
-              return OptionalLong.of(keys.getLong(1));
+            reopen.setObject(i++, ts(at));
+            reopen.setString(i++, asRead.eventId());
+            reopen.setString(i++, asRead.state().name());
+            reopen.setString(i++, asRead.lastCode() == null ? "" : asRead.lastCode());
+            reopen.setInt(i++, asRead.attempts());
+            reopen.setObject(i, ts(asRead.updatedAt()));
+            if (reopen.executeUpdate() != 1) {
+              return OptionalLong.empty();
             }
           }
+          return requested(c, request, sellerId, mode, at);
         });
+  }
+
+  /** The {@code REQUESTED} row, in the caller's transaction beside its re-open (D9-03). */
+  private static OptionalLong requested(
+      Connection c, ReprocessRequest request, String sellerId, Mode mode, Instant at)
+      throws java.sql.SQLException {
+    try (PreparedStatement record =
+        c.prepareStatement(INSERT_REQUESTED, Statement.RETURN_GENERATED_KEYS)) {
+      int i = 1;
+      record.setString(i++, request.eventId());
+      record.setString(i++, sellerId);
+      record.setString(i++, mode.wire());
+      record.setString(i++, request.actor());
+      record.setString(i++, request.reason());
+      record.setObject(i, ts(at));
+      record.executeUpdate();
+      try (ResultSet keys = record.getGeneratedKeys()) {
+        if (!keys.next()) {
+          // Unreachable with a bigserial primary key; never silently returning "no record" for a
+          // row that was just re-opened is the whole property.
+          throw new EInvoiceException(
+              ErrorCodes.STORE_UNAVAILABLE,
+              "the reprocess record was written without returning its sequence");
+        }
+        return OptionalLong.of(keys.getLong(1));
+      }
+    }
   }
 
   @Override
