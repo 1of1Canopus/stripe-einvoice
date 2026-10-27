@@ -161,12 +161,13 @@ module is where that is set out.
   write is not a database call, so a lock freed during the write lets another worker burn the row
   before the object lands (the next transaction of the first worker then refuses); the
   reconciliation check for objects at burned keys reports it (`DEI-281`).
-- **The disposed-number check covers rows, not time.** The reconciliation check for an object at
-  the key of a burned or voided number (`DEI-281`) reads the newest `page-size` numbers (500 by
-  default) of each series the pass reads. A disposed row older than that is not looked up again.
-  Example: a seller issuing 500 numbers an hour pushes a burned row out of the page within the hour.
-  A late PUT lands within the client timeout plus the store's own completion time, so the row is
-  almost always still in the page. The exhaustive archive walk is a Pro item.
+- **The disposed-number check covers a page of disposed rows.** The reconciliation check for an
+  object at the key of a burned or voided number (`DEI-281`) reads the newest `page-size` (500 by
+  default) burned or voided rows that recorded a key, in every series and year. Issued numbers do
+  not push a row out of that page; only disposed rows with a key numbered after it do, and a full page logs a
+  WARN. Such rows are rare: a burn after a resumed run, or a void while a PUT was in flight.
+  Example: a seller would have to burn or void 500 keyed numbers before an older one stops being
+  looked up.
 - **Invoice dates ran backwards inside a series in 0.1.x.** Up to 0.1.x an invoice was dated by
   Stripe's finalisation time and numbered when its work reached the allocator, so a late webhook,
   a retry, a park, a reprocess or the reconciliation sweep could give an older date to a later

@@ -159,7 +159,8 @@ If the first PUT completes on the store after the burn (or after a void), the sw
 `DEI-281` on the invoice: the ledger says the number has no document, and the archive holds one.
 Nothing is deleted. The operator keeps the object as evidence and notes it next to the number in
 the series report. The finding repeats on every pass while the row is among the newest
-`page-size` numbers of its series: on a seller with 50 invoices a month, about ten months.
+`page-size` burned or voided numbers that recorded a key (500 by default), in any year. Issued
+numbers do not push it out: only 500 burned or voided numbers with a key, numbered after it, do.
 
 ### Database connections: one session per connection
 

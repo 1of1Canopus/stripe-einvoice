@@ -224,16 +224,21 @@ All notable changes to this project are documented here. The format follows
   operator. The row keeps its key, so the orphan check counted the object as known and nothing
   reported it. Example: the PUT for `F-2026-0042` times out, the retry finds nothing and burns the
   number, and the first PUT completes 15 seconds later. The sweep now has a fifth check, run on its
-  own like the others: every `FAILED_VALIDATION` or `VOID_UNUSED` row with a key, among the rows
-  the series read already returned, is looked up at that key (an existence check first, a read
-  only when it says yes). An object there is the new code
+  own like the others: every `FAILED_VALIDATION` or `VOID_UNUSED` row with a key, in any year, is
+  read at that key, once (D-PR52-2: the S3 store has no fast existence check, and a read of a
+  missing key costs the same). The rows come from the new port method
+  `IssuanceReader.disposedWithKey`: burned or voided rows with a key, of the seller and mode, every
+  series and year, newest number first, a page of `page-size` with a WARN when full (D-PR52-1: a
+  2026 number voided on 10 January 2027 while its PUT lands is still looked up). Implementers must
+  add it. It is served by the existing `einvoice_issuance_open` index. An object there is the new
+  code
   `DEI-281 RECON_OBJECT_FOR_DISPOSED_NUMBER`, subject the Stripe invoice id; when its bytes do not
   hash to the row's hash it is `DEI-275` too. A lookup that fails is `DEI-241` and is counted, never
   read as clean. The WARN line names the number, state, key and hash match, no content and no
   exception message. Nothing is deleted. `ReconciliationSweep.Result` gains `disposedWithObject`
   and `disposedUnverified`, both in `total()`: a source break for code that calls its constructor,
   which only the sweep does. The finding repeats on every pass until the row leaves the newest
-  `page-size` numbers of its series.
+  `page-size` disposed numbers with a key.
 
 - **The stuck check names every open number (D-PR50-B1).** `DEI-273` read only the newest page of
   the series years its two-day window touched, and only after the Stripe list call, which throws

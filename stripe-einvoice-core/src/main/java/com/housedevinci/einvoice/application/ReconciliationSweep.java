@@ -45,16 +45,16 @@ import org.slf4j.LoggerFactory;
  *   <li><b>Stuck.</b> Numbers allocated and still open past {@code alert-after}, in any series
  *       year, read before the Stripe call so a refused key or an outage cannot skip them.
  *   <li><b>Disposed numbers with an object</b> (D-RTR-4). A burned or voided row that recorded a
- *       key is looked up at that key: an object there is {@code DEI-281}, and {@code DEI-275} too
- *       when its bytes do not hash to the row's hash. A lookup that fails is {@code DEI-241},
- *       counted as unverified, never as clean. Example: the PUT for {@code F-2026-0042} timed out,
- *       the resumed run found nothing and burned the number, and the PUT completed on the store
- *       afterwards.
+ *       key, in any year, is read at that key: an object there is {@code DEI-281}, and {@code
+ *       DEI-275} too when its bytes do not hash to the row's hash. A lookup that fails is {@code
+ *       DEI-241}, counted as unverified, never as clean. Example: the PUT for {@code F-2026-0042}
+ *       timed out, the resumed run found nothing and burned the number, and the PUT completed on
+ *       the store afterwards.
  * </ol>
  *
- * <p>The archive checks and the disposed-number check read the newest {@code page-size} rows of
- * each series the window touches, not a time range. A disposed row older than that is not looked up
- * again; that residual is stated in SECURITY-NOTES.
+ * <p>The archive checks read the newest {@code page-size} rows of each series the window touches.
+ * The disposed-number check reads its own page: the newest {@code page-size} burned or voided rows
+ * with a key, in every year (D-PR52-1).
  *
  * <p>It <b>alerts and never repairs</b>: no auto-delete, no auto-void, no overwrite. Every one of
  * these conditions has a human decision behind it that a library must not take.
@@ -177,15 +177,25 @@ public final class ReconciliationSweep {
     // The rows are read once, before any archive call, so an archive failure in the next check
     // cannot leave the orphan check with half a set of known keys.
     Optional<List<Issuance>> rows = failures.call("series read", () -> seriesRows(from, to, now));
+    // D-PR52-1: disposed rows are read by when they can matter, not by when they were numbered:
+    // every year, newest first, a page of disposed rows with a key. Read here, before any archive
+    // call, like the series rows.
+    Optional<List<Issuance>> disposed = failures.call("disposed read", this::disposedRows);
     if (rows.isPresent()) {
       failures.run("us to archive", () -> usToArchive(counts, rows.get(), now));
-      failures.run("disposed numbers", () -> disposedNumbers(counts, rows.get(), now));
-      failures.run("archive to us", () -> archiveToUs(counts, rows.get(), now));
+    }
+    if (disposed.isPresent()) {
+      failures.run("disposed numbers", () -> disposedNumbers(counts, disposed.get(), now));
+    }
+    if (rows.isPresent()) {
+      List<Issuance> known = new ArrayList<>(rows.get());
+      disposed.ifPresent(known::addAll);
+      failures.run("archive to us", () -> archiveToUs(counts, known, now));
     } else {
       // Without the rows every object would look like an orphan; the failure above is the report.
       log.warn(
-          "einvoice: reconciliation checks 'us to archive', 'disposed numbers' and 'archive to us'"
-              + " not run: the series read failed");
+          "einvoice: reconciliation checks 'us to archive' and 'archive to us' not run:"
+              + " the series read failed");
     }
     failures.run("unfinished reprocess", () -> unfinishedReprocess(counts, now));
 
@@ -316,12 +326,25 @@ public final class ReconciliationSweep {
     }
   }
 
+  private List<Issuance> disposedRows() {
+    List<Issuance> disposed =
+        reader.disposedWithKey(configuration.sellerId(), configuration.mode(), settings.pageSize());
+    if (disposed.size() >= settings.pageSize()) {
+      // Newest first, so the rows past the page are the older numbers; the count says how many.
+      log.warn(
+          "einvoice: the disposed-number check read {} disposed numbers, its page limit;"
+              + " older ones were not looked up",
+          disposed.size());
+    }
+    return disposed;
+  }
+
   /**
-   * The disposed-number check (D-RTR-4): every burned or voided row among the rows already read
-   * that recorded a key is looked up at that key. Its rows come from the series read, so no archive
-   * call happens before them. An object there is {@code DEI-281}, and {@code DEI-275} too when its
-   * bytes do not hash to the row's hash. A lookup that fails is {@code DEI-241}, counted as
-   * unverified and never as clean, and the next row is still looked up.
+   * The disposed-number check (D-RTR-4): every burned or voided row with a key, in any year, is
+   * read at that key (D-PR52-1). Its rows are read before any archive call. An object there is
+   * {@code DEI-281}, and {@code DEI-275} too when its bytes do not hash to the row's hash. A read
+   * that fails is {@code DEI-241}, counted as unverified and never as clean, and the next row is
+   * still read.
    */
   private void disposedNumbers(Counts counts, List<Issuance> rows, Instant now) {
     for (Issuance issuance : rows) {
@@ -363,21 +386,17 @@ public final class ReconciliationSweep {
   }
 
   /**
-   * One disposed row with a key. The cheap question first: an existence check (a HEAD on S3), and a
-   * read only when the store says there is an object, to compare its hash with the row's. Both
-   * calls share one try: a failure of either is {@code UNVERIFIED}, never {@code ABSENT}, because
-   * "could not look" is not "nothing there". An object the existence check saw and the read then
-   * did not is a store contradicting itself, and is unverified too. The log carries the code or the
-   * exception class, never a message: a message from a host adapter may carry what this log must
-   * not (D-PR51-1).
+   * One disposed row with a key: one read of that key (D-PR52-2). The S3 store has no fast
+   * existence check (the port default reads the bytes), and a read of a missing key costs the same
+   * as a HEAD, so one read answers both "is there an object" and "is it our bytes". A failure is
+   * {@code UNVERIFIED}, never {@code ABSENT}, because "could not look" is not "nothing there". The
+   * log carries the code or the exception class, never a message: a message from a host adapter may
+   * carry what this log must not (D-PR51-1).
    */
   private DisposedCheck checkDisposed(Issuance issuance) {
     ArchiveKey key = new ArchiveKey(issuance.archiveKey());
     Optional<byte[]> stored;
     try {
-      if (!archive.exists(key)) {
-        return DisposedCheck.ABSENT;
-      }
       stored = archive.get(key);
     } catch (RuntimeException e) {
       log.warn(
@@ -388,7 +407,7 @@ public final class ReconciliationSweep {
       return DisposedCheck.UNVERIFIED;
     }
     if (stored.isEmpty()) {
-      return DisposedCheck.UNVERIFIED;
+      return DisposedCheck.ABSENT;
     }
     boolean same = Hashes.sha256Hex(stored.get()).equals(issuance.documentSha256());
     // Ids and hashes only, never content.
