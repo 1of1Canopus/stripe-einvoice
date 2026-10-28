@@ -18,7 +18,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -174,7 +173,6 @@ class CipherProbePr52Test {
    * Default settings, one invoice. Issued in January 2026; the pass of 10 March 2027 reads the 2027
    * series only, but lists the whole seller prefix, so the 2026 document is an "orphan".
    */
-  @Disabled("D-PR52-3 design stop: the orphan check window design, own PR before 0.2.0")
   @Test
   void probe_last_years_issued_document_is_reported_as_an_orphan() {
     IssuanceTestHarness harness = IssuanceTestHarness.create();
@@ -195,7 +193,6 @@ class CipherProbePr52Test {
    * row page the newest: the oldest issued document is a false orphan, and an object nobody
    * predicted, written after it, is never seen.
    */
-  @Disabled("D-PR52-3 design stop: the orphan check window design, own PR before 0.2.0")
   @Test
   void probe_a_real_orphan_past_the_first_list_page_is_never_seen() {
     IssuanceTestHarness harness = IssuanceTestHarness.create();
@@ -228,7 +225,6 @@ class CipherProbePr52Test {
    * {@code <id>} lists {@code live/<id>} and so also reads {@code live/<id>x/...}: another seller's
    * legal number and document hash become a finding of this seller.
    */
-  @Disabled("D-PR52-3 design stop: the orphan check window design, own PR before 0.2.0")
   @Test
   void probe_a_seller_reports_a_longer_named_sellers_object_as_its_orphan() {
     IssuanceTestHarness harness = IssuanceTestHarness.create();
