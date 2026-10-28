@@ -378,11 +378,12 @@ once. The refused events are on `einvoice_inbound_event` with their bodies intac
 
 ## Reconciliation, health and findings
 
-The sweep runs every `einvoice.reconcile.interval` and closes four directions: a finalised Stripe
+The sweep runs every `einvoice.reconcile.interval` and runs each check on its own: a finalised Stripe
 invoice with no issued document (re-enqueued through the same idempotent path, never issued
 inline), an `ISSUED` row whose object is missing, an archived document that no longer hashes to its
-record, an archive object no row predicted, and a number open past `einvoice.issuance.alert-after`.
-It **alerts and never repairs**.
+record, an archive object no row predicted, a number open past `einvoice.issuance.alert-after`, and
+an archive object at the key of a burned or voided number (`DEI-281`, plus `DEI-275` when its bytes
+differ from the row's hash). It **alerts and never repairs**.
 
 Two signals, and the difference matters:
 

@@ -160,7 +160,14 @@ module is where that is set out.
   The `DEI-104` and `DEI-247` messages name the row id, never the token. Not closed: an archive
   write is not a database call, so a lock freed during the write lets another worker burn the row
   before the object lands (the next transaction of the first worker then refuses); the
-  reconciliation check for objects at burned keys reports it.
+  reconciliation check for objects at burned keys reports it (`DEI-281`).
+- **The disposed-number check covers a page of disposed rows.** The reconciliation check for an
+  object at the key of a burned or voided number (`DEI-281`) reads the newest `page-size` (500 by
+  default) burned or voided rows that recorded a key, in every series and year. Issued numbers do
+  not push a row out of that page; only disposed rows with a key numbered after it do, and a full page logs a
+  WARN. Such rows are rare: a burn after a resumed run, or a void while a PUT was in flight.
+  Example: a seller would have to burn or void 500 keyed numbers before an older one stops being
+  looked up.
 - **Invoice dates ran backwards inside a series in 0.1.x.** Up to 0.1.x an invoice was dated by
   Stripe's finalisation time and numbered when its work reached the allocator, so a late webhook,
   a retry, a park, a reprocess or the reconciliation sweep could give an older date to a later

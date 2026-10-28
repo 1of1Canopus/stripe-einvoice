@@ -149,7 +149,9 @@ public record Issuance(
    * <p>On {@code ARCHIVING} and {@code ISSUED} it names the archived bytes. On a {@code
    * FAILED_VALIDATION} row burned after a resumed run (QUESTIONS 38) it names the <em>first</em>
    * bytes, which passed and were not in the archive when the resumed run read the key; the rule id
-   * names the refusal of the later bytes, and the run logged both hashes at WARN.
+   * names the refusal of the later bytes, and the run logged both hashes at WARN. With rule id
+   * {@code DEI-244} (D-RTR-5), the later bytes passed but differ from the recorded hash; they were
+   * never stored, and only the WARN line names their hash.
    */
   public Optional<String> documentHash() {
     return documentSha256.isEmpty() ? Optional.empty() : Optional.of(documentSha256);

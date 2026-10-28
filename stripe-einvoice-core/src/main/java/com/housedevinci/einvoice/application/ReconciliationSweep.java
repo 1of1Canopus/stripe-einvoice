@@ -32,7 +32,7 @@ import org.slf4j.LoggerFactory;
  * us is precisely the one that never arrived. The <em>dashboard</em> is Pro; the sweep, the archive
  * checks, the stuck check and the signal are here.
  *
- * <p>Four directions:
+ * <p>Five checks:
  *
  * <ol>
  *   <li><b>Stripe to us.</b> Invoices finalised in the window with no {@code ISSUED} row are a
@@ -44,7 +44,17 @@ import org.slf4j.LoggerFactory;
  *   <li><b>The archive to us.</b> Objects that no row predicted.
  *   <li><b>Stuck.</b> Numbers allocated and still open past {@code alert-after}, in any series
  *       year, read before the Stripe call so a refused key or an outage cannot skip them.
+ *   <li><b>Disposed numbers with an object</b> (D-RTR-4). A burned or voided row that recorded a
+ *       key, in any year, is read at that key: an object there is {@code DEI-281}, and {@code
+ *       DEI-275} too when its bytes do not hash to the row's hash. A lookup that fails is {@code
+ *       DEI-241}, counted as unverified, never as clean. Example: the PUT for {@code F-2026-0042}
+ *       timed out, the resumed run found nothing and burned the number, and the PUT completed on
+ *       the store afterwards.
  * </ol>
+ *
+ * <p>The archive checks read the newest {@code page-size} rows of each series the window touches.
+ * The disposed-number check reads its own page: the newest {@code page-size} burned or voided rows
+ * with a key, in every year (D-PR52-1).
  *
  * <p>It <b>alerts and never repairs</b>: no auto-delete, no auto-void, no overwrite. Every one of
  * these conditions has a human decision behind it that a library must not take.
@@ -85,7 +95,13 @@ public final class ReconciliationSweep {
     }
   }
 
-  /** What one sweep found. Counts and a completion time: no ids, no buyer field. */
+  /**
+   * What one sweep found. Counts and a completion time: no ids, no buyer field.
+   *
+   * <p>{@code disposedWithObject} counts burned or voided numbers with an object at their key
+   * ({@code DEI-281}); {@code disposedUnverified} counts those whose lookup failed ({@code
+   * DEI-241}). Both are in {@link #total()}. Built only by the sweep.
+   */
   public record Result(
       Instant completedAt,
       int stripeInvoicesChecked,
@@ -97,7 +113,9 @@ public final class ReconciliationSweep {
       int unfinishedReprocesses,
       int voidedNoDocument,
       int burnedNoDocument,
-      int accessRefused) {
+      int accessRefused,
+      int disposedWithObject,
+      int disposedUnverified) {
 
     public int total() {
       return missingIssuance
@@ -108,7 +126,9 @@ public final class ReconciliationSweep {
           + unfinishedReprocesses
           + voidedNoDocument
           + burnedNoDocument
-          + accessRefused;
+          + accessRefused
+          + disposedWithObject
+          + disposedUnverified;
     }
   }
 
@@ -157,9 +177,20 @@ public final class ReconciliationSweep {
     // The rows are read once, before any archive call, so an archive failure in the next check
     // cannot leave the orphan check with half a set of known keys.
     Optional<List<Issuance>> rows = failures.call("series read", () -> seriesRows(from, to, now));
+    // D-PR52-1: disposed rows are read by when they can matter, not by when they were numbered:
+    // every year, newest first, a page of disposed rows with a key. Read here, before any archive
+    // call, like the series rows.
+    Optional<List<Issuance>> disposed = failures.call("disposed read", this::disposedRows);
     if (rows.isPresent()) {
       failures.run("us to archive", () -> usToArchive(counts, rows.get(), now));
-      failures.run("archive to us", () -> archiveToUs(counts, rows.get(), now));
+    }
+    if (disposed.isPresent()) {
+      failures.run("disposed numbers", () -> disposedNumbers(counts, disposed.get(), now));
+    }
+    if (rows.isPresent()) {
+      List<Issuance> known = new ArrayList<>(rows.get());
+      disposed.ifPresent(known::addAll);
+      failures.run("archive to us", () -> archiveToUs(counts, known, now));
     } else {
       // Without the rows every object would look like an orphan; the failure above is the report.
       log.warn(
@@ -180,11 +211,14 @@ public final class ReconciliationSweep {
             counts.unfinished,
             counts.voided,
             counts.burned,
-            counts.keyRefused);
+            counts.keyRefused,
+            counts.disposedWithObject,
+            counts.disposedUnverified);
     log.info(
         "einvoice: reconciliation checked {} finalised invoices and raised {} findings"
             + " (missing {}, archive missing {}, drift {}, orphan {}, stuck {},"
-            + " unfinished reprocess {}, voided {}, burned {}, key refused {}); failed checks {}",
+            + " unfinished reprocess {}, voided {}, burned {}, key refused {},"
+            + " disposed with object {}, disposed unverified {}); failed checks {}",
         counts.checked,
         result.total(),
         counts.missing,
@@ -196,6 +230,8 @@ public final class ReconciliationSweep {
         counts.voided,
         counts.burned,
         counts.keyRefused,
+        counts.disposedWithObject,
+        counts.disposedUnverified,
         failures.failed);
     failures.throwFirst();
     return result;
@@ -290,7 +326,104 @@ public final class ReconciliationSweep {
     }
   }
 
+  private List<Issuance> disposedRows() {
+    List<Issuance> disposed =
+        reader.disposedWithKey(configuration.sellerId(), configuration.mode(), settings.pageSize());
+    if (disposed.size() >= settings.pageSize()) {
+      // Newest first, so the rows past the page are the older numbers; the count says how many.
+      log.warn(
+          "einvoice: the disposed-number check read {} disposed numbers, its page limit;"
+              + " older ones were not looked up",
+          disposed.size());
+    }
+    return disposed;
+  }
+
+  /**
+   * The disposed-number check (D-RTR-4): every burned or voided row with a key, in any year, is
+   * read at that key (D-PR52-1). Its rows are read before any archive call. An object there is
+   * {@code DEI-281}, and {@code DEI-275} too when its bytes do not hash to the row's hash. A read
+   * that fails is {@code DEI-241}, counted as unverified and never as clean, and the next row is
+   * still read.
+   */
+  private void disposedNumbers(Counts counts, List<Issuance> rows, Instant now) {
+    for (Issuance issuance : rows) {
+      if (!disposedWithoutDocument(issuance.state()) || issuance.archiveObjectKey().isEmpty()) {
+        continue;
+      }
+      switch (checkDisposed(issuance)) {
+        case ABSENT -> {
+          // The common case: the number has no document, and the archive agrees.
+        }
+        case SAME_BYTES -> {
+          counts.disposedWithObject++;
+          record(ErrorCodes.RECON_OBJECT_FOR_DISPOSED_NUMBER, issuance.stripeInvoiceId(), now);
+        }
+        case OTHER_BYTES -> {
+          counts.disposedWithObject++;
+          counts.drift++;
+          record(ErrorCodes.RECON_OBJECT_FOR_DISPOSED_NUMBER, issuance.stripeInvoiceId(), now);
+          record(ErrorCodes.RECON_ARCHIVE_DRIFT, issuance.stripeInvoiceId(), now);
+        }
+        case UNVERIFIED -> {
+          counts.disposedUnverified++;
+          record(ErrorCodes.ARCHIVE_UNAVAILABLE, issuance.stripeInvoiceId(), now);
+        }
+      }
+    }
+  }
+
+  private enum DisposedCheck {
+    ABSENT,
+    SAME_BYTES,
+    OTHER_BYTES,
+    UNVERIFIED
+  }
+
+  /** Burned or voided: the number will never carry a document. */
+  private static boolean disposedWithoutDocument(IssuanceState state) {
+    return state == IssuanceState.FAILED_VALIDATION || state == IssuanceState.VOID_UNUSED;
+  }
+
+  /**
+   * One disposed row with a key: one read of that key (D-PR52-2). The S3 store has no fast
+   * existence check (the port default reads the bytes), and a read of a missing key costs the same
+   * as a HEAD, so one read answers both "is there an object" and "is it our bytes". A failure is
+   * {@code UNVERIFIED}, never {@code ABSENT}, because "could not look" is not "nothing there". The
+   * log carries the code or the exception class, never a message: a message from a host adapter may
+   * carry what this log must not (D-PR51-1).
+   */
+  private DisposedCheck checkDisposed(Issuance issuance) {
+    ArchiveKey key = new ArchiveKey(issuance.archiveKey());
+    Optional<byte[]> stored;
+    try {
+      stored = archive.get(key);
+    } catch (RuntimeException e) {
+      log.warn(
+          "einvoice: reconciliation could not look up the archive key of {} number {} ({})",
+          issuance.state(),
+          issuance.legalNumber().value(),
+          e instanceof EInvoiceException einvoice ? einvoice.code() : e.getClass().getName());
+      return DisposedCheck.UNVERIFIED;
+    }
+    if (stored.isEmpty()) {
+      return DisposedCheck.ABSENT;
+    }
+    boolean same = Hashes.sha256Hex(stored.get()).equals(issuance.documentSha256());
+    // Ids and hashes only, never content.
+    log.warn(
+        "einvoice: an archive object exists at the key of burned or voided number {} ({}): {},"
+            + " {}. Alerted, never deleted",
+        issuance.legalNumber().value(),
+        issuance.state(),
+        key.value(),
+        same ? "hash matches the row" : "hash differs");
+    return same ? DisposedCheck.SAME_BYTES : DisposedCheck.OTHER_BYTES;
+  }
+
   private void archiveToUs(Counts counts, List<Issuance> rows, Instant now) {
+    // Every row's key, whatever its state: an object at a disposed row's key is reported once, by
+    // the disposed-number check, never a second time as an unknown object (D-RTR-4, O8).
     Set<String> known = new HashSet<>();
     for (Issuance issuance : rows) {
       issuance.archiveObjectKey().ifPresent(known::add);
@@ -335,6 +468,8 @@ public final class ReconciliationSweep {
     int orphans;
     int unfinished;
     int keyRefused;
+    int disposedWithObject;
+    int disposedUnverified;
   }
 
   /**

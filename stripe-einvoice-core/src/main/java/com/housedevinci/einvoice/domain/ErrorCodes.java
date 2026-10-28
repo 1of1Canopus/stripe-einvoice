@@ -286,6 +286,16 @@ public final class ErrorCodes {
   public static final String ARCHIVE_FAILED = "DEI-243";
 
   /**
+   * A resumed run rendered bytes that passed validation but differ from the document the row
+   * recorded before its first archive write (D-RTR-5): another hash, or another extension and so
+   * another key. The recorded document was never stored, and the new one may not be, because the
+   * hash and key are write-once. The number is burned ({@code FAILED_VALIDATION}, rule id this
+   * code), terminal. Usually a renderer upgrade, a seller profile or mapping change, or a new rule
+   * pack between two attempts. Distinct from {@code DEI-240}: there the store holds other bytes.
+   */
+  public static final String RENDER_NOT_REPRODUCIBLE = "DEI-244";
+
+  /**
    * Another worker holds this issuance row's archive lock: it is between its ARCHIVING marker and
    * its outcome, so its write may still land (D-RTR-7). Retryable: this run read nothing, rendered
    * nothing and wrote nothing, and the next attempt decides from what the other worker left.
@@ -316,7 +326,11 @@ public final class ErrorCodes {
    */
   public static final String HOST_AUTOSAVE_UNSUPPORTED = "DEI-249";
 
-  /** The exact bytes did not pass validation. The failing rule id is recorded. */
+  /**
+   * The exact bytes did not pass validation. The failing rule id is recorded. A later event for a
+   * number already burned answers this code too, with the rule id the burn recorded: with {@code
+   * DEI-244} nothing was refused, the later bytes passed but were not the recorded document.
+   */
   public static final String VALIDATION_REFUSED = "DEI-250";
 
   /** A validation could not run. Never PASSED by construction (checklist lines 18 and 57). */
@@ -392,7 +406,11 @@ public final class ErrorCodes {
   /** An archived document no longer hashes to what its row recorded. */
   public static final String RECON_ARCHIVE_DRIFT = "DEI-275";
 
-  /** An archive object that no {@code ISSUED} row predicted. Alerted, never deleted. */
+  /**
+   * An archive object that no row predicted, whatever the row's state. Alerted, never deleted. An
+   * object at the key of a burned or voided row was predicted and is {@link
+   * #RECON_OBJECT_FOR_DISPOSED_NUMBER} instead, reported once (D-RTR-4).
+   */
   public static final String RECON_ORPHAN_OBJECT = "DEI-272";
 
   /** A number allocated and open past {@code einvoice.issuance.alert-after}. */
@@ -418,6 +436,17 @@ public final class ErrorCodes {
    * The operator's next step is the void; re-enqueueing it only repeats the refusal.
    */
   public static final String RECON_BURNED_NO_DOCUMENT = "DEI-279";
+
+  /**
+   * An archive object exists at the key of a burned or voided number (D-RTR-4). The ledger says the
+   * number has no document; the archive holds bytes for it. Example: the PUT for {@code
+   * F-2026-0042} timed out on the client, the resumed run found nothing and burned the number, and
+   * the first PUT completed on the store afterwards. The finding's subject is the Stripe invoice
+   * id; the WARN line names the legal number, the key and whether the bytes hash to the row's
+   * recorded hash (other bytes are {@link #RECON_ARCHIVE_DRIFT} too). Alerted, never deleted: keep
+   * the object as evidence and record it in the series report.
+   */
+  public static final String RECON_OBJECT_FOR_DISPOSED_NUMBER = "DEI-281";
 
   /**
    * An inbound row stayed in a running state past {@code einvoice.issuance.running-ceiling} (or

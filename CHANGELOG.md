@@ -219,6 +219,40 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **An archive object at a burned or voided number is reported (D-RTR-4).** A PUT can time out on
+  the client and complete on the store after the number was burned by a resumed run or voided by an
+  operator. The row keeps its key, so the orphan check counted the object as known and nothing
+  reported it. Example: the PUT for `F-2026-0042` times out, the retry finds nothing and burns the
+  number, and the first PUT completes 15 seconds later. The sweep now has a fifth check, run on its
+  own like the others: every `FAILED_VALIDATION` or `VOID_UNUSED` row with a key, in any year, is
+  read at that key, once (D-PR52-2: the S3 store has no fast existence check, and a read of a
+  missing key costs the same). The rows come from the new port method
+  `IssuanceReader.disposedWithKey`: burned or voided rows with a key, of the seller and mode, every
+  series and year, newest number first, a page of `page-size` with a WARN when full (D-PR52-1: a
+  2026 number voided on 10 January 2027 while its PUT lands is still looked up). Implementers must
+  add it. It is served by the existing `einvoice_issuance_open` index. An object there is the new
+  code
+  `DEI-281 RECON_OBJECT_FOR_DISPOSED_NUMBER`, subject the Stripe invoice id; when its bytes do not
+  hash to the row's hash it is `DEI-275` too. A lookup that fails is `DEI-241` and is counted, never
+  read as clean. The WARN line names the number, state, key and hash match, no content and no
+  exception message. Nothing is deleted. `ReconciliationSweep.Result` gains `disposedWithObject`
+  and `disposedUnverified`, both in `total()`: a source break for code that calls its constructor,
+  which only the sweep does. The finding repeats on every pass until the row leaves the newest
+  `page-size` disposed numbers with a key.
+
+- **A resumed run whose new bytes differ from the recorded document burns the number (D-RTR-5).**
+  `F-2026-0042`'s first archive write fails after its hash H1 is recorded. The host upgrades its
+  renderer; the retry finds no object, renders H2, and H2 passes. It used to end on `DEI-240`
+  with the row left `FAILED_ARCHIVE`, nothing chained, and the sweep re-enqueueing it to the retry
+  ceiling. It now burns the number: `FAILED_VALIDATION` with rule id `DEI-244`, new code
+  `RENDER_NOT_REPRODUCIBLE`; H1 and its key stay on the row and in the one chained event; nothing
+  is archived; one WARN names both hashes and both keys, no content; the sweep reports `DEI-279`
+  and enqueues nothing. Another extension with the same bytes is another key and burns too.
+  `DEI-240` keeps its one meaning: the store holds other bytes at the key. Renderers must be
+  byte-stable across a retry (README, `DocumentRenderer`).
+  A later event for any burned number now records the burn's rule id with its `DEI-250` (it had
+  none), so after a `DEI-244` burn it does not read as a validation refusal (D-PR53-1).
+
 - **The stuck check names every open number (D-PR50-B1).** `DEI-273` read only the newest page of
   the series years its two-day window touched, and only after the Stripe list call, which throws
   on a refused key or an outage. A number left open across a year end, or through an outage that

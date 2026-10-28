@@ -2111,6 +2111,39 @@ public final class JdbcIssuanceStore
         });
   }
 
+  /**
+   * D-PR52-1: the disposed-number check's read. Seller and mode in the predicate, any series and
+   * any year, newest number first. Served by {@code einvoice_issuance_open (state, allocated_at)},
+   * whose leading column is the state.
+   */
+  static final String DISPOSED_WITH_KEY =
+      "SELECT "
+          + SELECT_ISSUANCE_COLUMNS
+          + " FROM einvoice_issuance WHERE seller_id = ? AND mode = ?"
+          + " AND state IN ('FAILED_VALIDATION','VOID_UNUSED') AND archive_key <> ''"
+          + " ORDER BY allocated_at DESC, id DESC LIMIT ?";
+
+  @Override
+  public List<Issuance> disposedWithKey(String sellerId, Mode mode, int limit) {
+    Objects.requireNonNull(sellerId, "sellerId");
+    Objects.requireNonNull(mode, "mode");
+    return unitOfWork.inReadUnit(
+        unit -> {
+          List<Issuance> rows = new ArrayList<>();
+          try (PreparedStatement ps = unit.connection().prepareStatement(DISPOSED_WITH_KEY)) {
+            ps.setString(1, sellerId);
+            ps.setString(2, mode.wire());
+            ps.setInt(3, Math.max(1, limit));
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                rows.add(readIssuance(rs));
+              }
+            }
+          }
+          return List.copyOf(rows);
+        });
+  }
+
   @Override
   public SeriesReport seriesReport(SeriesKey key) {
     return unitOfWork.inReadUnit(
