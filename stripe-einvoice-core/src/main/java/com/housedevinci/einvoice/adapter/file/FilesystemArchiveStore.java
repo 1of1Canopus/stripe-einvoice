@@ -1,26 +1,37 @@
 package com.housedevinci.einvoice.adapter.file;
 
+import com.housedevinci.einvoice.application.ArchiveCapabilityProbe;
+import com.housedevinci.einvoice.application.ArchiveListing;
 import com.housedevinci.einvoice.application.ArchiveStore;
 import com.housedevinci.einvoice.domain.ArchiveKey;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.UncheckedIOException;
 import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.stream.Stream;
+import java.util.TreeSet;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The archive on a local filesystem or a mounted volume.
@@ -36,10 +47,35 @@ import java.util.stream.Stream;
  */
 public final class FilesystemArchiveStore implements ArchiveStore {
 
-  private final Path root;
+  private static final Logger log = LoggerFactory.getLogger(FilesystemArchiveStore.class);
 
+  /** The name {@code Files.createTempFile(dir, ".einvoice-", ".part")} gives, and only that. */
+  private static final Pattern TEMP_NAME = Pattern.compile("^\\.einvoice-[0-9]+\\.part$");
+
+  /** How long this store's own temporary file stays hidden from a listing. */
+  private static final Duration TEMP_HIDDEN_FOR = Duration.ofHours(1);
+
+  private final Path root;
+  private final Optional<Clock> clock;
+
+  /**
+   * A store with no clock: it cannot tell a write in flight from a leftover, so it hides no
+   * temporary file and lists every one (the safe direction). A pass that runs during a write may
+   * then report that write's {@code .einvoice-<digits>.part} file once. The starter uses {@link
+   * #FilesystemArchiveStore(Path, Clock)}; a host that builds this store should too.
+   */
   public FilesystemArchiveStore(Path root) {
     this.root = Objects.requireNonNull(root, "root").toAbsolutePath().normalize();
+    this.clock = Optional.empty();
+  }
+
+  /**
+   * @param clock decides how old a temporary file is: this store's own write in flight is hidden
+   *     for one hour, and a leftover is listed after that
+   */
+  public FilesystemArchiveStore(Path root, Clock clock) {
+    this.root = Objects.requireNonNull(root, "root").toAbsolutePath().normalize();
+    this.clock = Optional.of(Objects.requireNonNull(clock, "clock"));
   }
 
   @Override
@@ -121,11 +157,32 @@ public final class FilesystemArchiveStore implements ArchiveStore {
     }
   }
 
+  /**
+   * Keys after {@code startAfter} under the prefix folder, in UTF-8 byte order (D-PR52-3).
+   *
+   * <p>One walk of the prefix folder per call; its cost grows with the folder, whatever the page.
+   * At most {@code limit + 1} keys are held while it runs, so memory does not.
+   *
+   * <ul>
+   *   <li>Every entry that is not a folder is listed: a file, a link, a FIFO. A folder is never
+   *       hidden, whatever its name.
+   *   <li>The one entry hidden is this store's own write in flight (C2, D2): the last path element
+   *       is {@code .einvoice-<digits>.part}, it is a regular file, and it changed within the last
+   *       hour, never in the future. A leftover from a crash is listed after the hour.
+   *   <li>A name that does not decode losslessly (D1) is listed as {@code <decoded
+   *       path>#inode:<file key>}, unique per file, so two names that decode alike are two keys.
+   *       Example: {@code INV-\xff} and {@code INV-\xfe} both decode to {@code INV-\ufffd}. No name
+   *       a writer chooses can produce a duplicate key or stop the walk.
+   *   <li>{@code endOfFolder} is true when the walk found no key past the last one returned.
+   * </ul>
+   */
   @Override
-  public List<String> list(String prefix, int limit) {
+  public ArchiveListing listAfter(String prefix, String startAfter, int limit) {
+    String after = startAfter == null ? "" : startAfter;
+    int bound = Math.max(0, limit);
     Path start = root.resolve(prefix == null ? "" : prefix).normalize();
     if (!start.startsWith(root)) {
-      return List.of();
+      return new ArchiveListing(List.of(), true);
     }
     try {
       requireRoot();
@@ -140,34 +197,187 @@ public final class FilesystemArchiveStore implements ArchiveStore {
         throw new IOException("archive prefix is not a folder");
       }
     } catch (NoSuchFileException absent) {
-      return List.of();
+      return new ArchiveListing(List.of(), true);
     } catch (IOException e) {
       throw unavailable(e);
     }
-    List<String> keys = new ArrayList<>();
-    // Files.find hands over the attributes of each entry without following links, so a broken
-    // link, a FIFO or an entry that cannot be classified is listed rather than dropped.
-    try (Stream<Path> found = Files.find(start, Integer.MAX_VALUE, (p, a) -> !a.isDirectory())) {
-      found
-          .map(path -> root.relativize(path).toString().replace('\\', '/'))
-          .filter(name -> !name.contains("/.einvoice-"))
-          .sorted(Comparator.naturalOrder())
-          .limit(Math.max(0, limit))
-          .forEach(keys::add);
+    Optional<Instant> now = clock.map(Clock::instant);
+    TreeSet<String> kept = new TreeSet<>(ArchiveListing.UTF8_ORDER);
+    int[] unreadable = {0};
+    byte[] afterBytes = ArchiveListing.utf8(after);
+    try {
+      Files.walkFileTree(
+          start,
+          java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class),
+          Integer.MAX_VALUE,
+          new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path path, BasicFileAttributes entry) {
+              if (entry.isDirectory() || isOwnWriteInFlight(path, entry, now)) {
+                return FileVisitResult.CONTINUE;
+              }
+              String key = keyOf(path, entry, unreadable);
+              if (Arrays.compareUnsigned(ArchiveListing.utf8(key), afterBytes) > 0) {
+                kept.add(key);
+                if (kept.size() > bound + 1) {
+                  kept.pollLast();
+                }
+              }
+              return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFileFailed(Path path, IOException failure)
+                throws IOException {
+              if (failure instanceof NoSuchFileException) {
+                // Gone between the folder read and the visit: a write in flight that finished.
+                return FileVisitResult.CONTINUE;
+              }
+              throw failure;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path folder, IOException failure)
+                throws IOException {
+              if (failure != null) {
+                throw failure;
+              }
+              return FileVisitResult.CONTINUE;
+            }
+          });
       requireRoot();
-    } catch (NoSuchFileException vanished) {
-      try {
-        requireRoot();
-      } catch (IOException e) {
-        throw unavailable(e);
-      }
-      return List.of();
-    } catch (IOException | UncheckedIOException e) {
-      // The walk reports a directory it cannot open while the stream runs, as an unchecked
-      // exception. It is a read failure like any other.
-      throw unavailable(e instanceof UncheckedIOException u ? u.getCause() : (IOException) e);
+    } catch (IOException e) {
+      throw unavailable(e);
     }
-    return List.copyOf(keys);
+    if (unreadable[0] > 0) {
+      log.warn(
+          "einvoice: {} archive entries have names that do not decode and no file key; each is"
+              + " listed once as <path>#unreadable-name",
+          unreadable[0]);
+    }
+    boolean end = kept.size() <= bound;
+    List<String> keys = new ArrayList<>(bound);
+    for (String key : kept) {
+      if (keys.size() == bound) {
+        break;
+      }
+      keys.add(key);
+    }
+    return new ArchiveListing(keys, end);
+  }
+
+  /**
+   * C2 and D2: this store's own temporary file, and nothing else. The exact name {@code
+   * Files.createTempFile(dir, ".einvoice-", ".part")} gives, as the last element, a regular file,
+   * changed within the last hour and not in the future. Residual, stated: a writer who touches a
+   * file of this shape every hour keeps it hidden; that needs live, repeated access, and the module
+   * never reads a {@code .part} file as a document.
+   */
+  private static boolean isOwnWriteInFlight(
+      Path path, BasicFileAttributes entry, Optional<Instant> clockNow) {
+    if (clockNow.isEmpty()) {
+      return false;
+    }
+    Instant now = clockNow.get();
+    Path name = path.getFileName();
+    if (name == null || !entry.isRegularFile() || !TEMP_NAME.matcher(name.toString()).matches()) {
+      return false;
+    }
+    Duration age = Duration.between(entry.lastModifiedTime().toInstant(), now);
+    return !age.isNegative() && age.compareTo(TEMP_HIDDEN_FOR) < 0;
+  }
+
+  /**
+   * D1: the key of one entry. The decoded relative path when it opens the same file again; else the
+   * decoded path with the file key, which is unique per file. Example: {@code
+   * live/acme/2026/INV-\ufffd#inode:(dev=803,ino=1234)}; the operator finds it with {@code find
+   * -inum 1234}. The {@code #} makes it an invalid archive key, so the walk reports it with no
+   * database lookup.
+   */
+  private String keyOf(Path path, BasicFileAttributes entry, int[] unreadable) {
+    String decoded = root.relativize(path).toString().replace('\\', '/');
+    if (opensTheSameFile(decoded, path, entry)) {
+      return decoded;
+    }
+    Object fileKey = entry.fileKey();
+    if (fileKey != null) {
+      return decoded + "#inode:" + fileKey;
+    }
+    unreadable[0]++;
+    return decoded + "#unreadable-name";
+  }
+
+  private boolean opensTheSameFile(String decoded, Path path, BasicFileAttributes entry) {
+    try {
+      Path again = root.resolve(decoded);
+      BasicFileAttributes reread =
+          Files.readAttributes(again, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+      Object fileKey = entry.fileKey();
+      return fileKey != null ? fileKey.equals(reread.fileKey()) : Files.isSameFile(again, path);
+    } catch (IOException | java.nio.file.InvalidPathException notTheSame) {
+      return false;
+    }
+  }
+
+  /**
+   * True when this archive's volume ignores letter case at its root (D-PR52-3, C3). It writes a
+   * scratch file {@code _probe/<uuid>-a} and asks whether {@code _probe/<uuid>-A} exists. A failed
+   * delete of the scratch file never fails the probe (D7): the file stays, like the capability
+   * probe's scratch keys, and a WARN names the code. Out of scope, stated: case folding set by hand
+   * on a folder below the root (ext4 {@code casefold}, the Windows per-folder flag).
+   */
+  public boolean ignoresLetterCase() {
+    String id = UUID.randomUUID().toString();
+    Path folder = root.resolve(ArchiveCapabilityProbe.SCRATCH_PREFIX);
+    Path lower = folder.resolve(id + "-a");
+    try {
+      requireRoot();
+      requireFoldersBelowRoot(folder);
+      Files.createDirectories(folder);
+      requireFoldersBelowRoot(folder);
+      Files.write(lower, new byte[0], StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+      boolean ignores = Files.exists(folder.resolve(id + "-A"), LinkOption.NOFOLLOW_LINKS);
+      try {
+        Files.delete(lower);
+      } catch (IOException e) {
+        log.warn(
+            "einvoice: the archive case probe could not remove its scratch file ({}); it stays"
+                + " under {}",
+            ErrorCodes.ARCHIVE_UNAVAILABLE,
+            ArchiveCapabilityProbe.SCRATCH_PREFIX);
+      }
+      return ignores;
+    } catch (IOException e) {
+      throw unavailable(e);
+    }
+  }
+
+  /**
+   * Refuses at startup a seller id with an upper-case letter on a volume that ignores case: {@code
+   * DEI-285}, no opt-out (D-PR52-3, C3). Two distinct lower-case ids never share a folder on any
+   * volume, so no seller is ever shown a key another seller wrote.
+   */
+  public void requireSellerIdFitsVolume(String sellerId) {
+    requireSellerIdFitsVolume(sellerId, ignoresLetterCase());
+  }
+
+  /** The rule itself, for a known answer about the volume. */
+  public static void requireSellerIdFitsVolume(String sellerId, boolean volumeIgnoresCase) {
+    if (volumeIgnoresCase && !sellerId.equals(sellerId.toLowerCase(Locale.ROOT))) {
+      throw new EInvoiceException(ErrorCodes.ARCHIVE_SELLER_CASE, sellerCaseMessage(sellerId));
+    }
+  }
+
+  /**
+   * D3: never "rename" for a seller with documents. Numbering is per seller id, so {@code Acme}
+   * restarting as {@code acme} would issue {@code INV-2026-000001} a second time.
+   */
+  static String sellerCaseMessage(String sellerId) {
+    return "Seller id "
+        + sellerId
+        + " has upper-case letters and the archive volume ignores letter case. If this seller has"
+        + " issued documents, move the archive to a case-sensitive volume and keep the seller id."
+        + " Only a seller with no issued documents may change its id to lower case.";
   }
 
   @Override

@@ -1,5 +1,6 @@
 package com.housedevinci.einvoice.adapter.s3;
 
+import com.housedevinci.einvoice.application.ArchiveListing;
 import com.housedevinci.einvoice.application.ArchiveStore;
 import com.housedevinci.einvoice.domain.ArchiveKey;
 import com.housedevinci.einvoice.domain.EInvoiceException;
@@ -60,6 +61,17 @@ public final class S3ArchiveStore implements ArchiveStore {
           ErrorCodes.CONFIG, "einvoice.archive.s3.prefix is relative and never traverses upwards");
     }
     this.prefix = normalised;
+    // D-PR52-3, C5 and D5: a directory bucket lists in no order and has no StartAfter, so the
+    // orphan walk could end a "cycle" with keys never examined. Its name says so: "--x-s3" for the
+    // bucket, "--xa--s3" for an access point to one. A convenience, not the control: an alias or a
+    // proxy hides the name, and the walk's per-pass order guard catches what this cannot.
+    if (bucket.endsWith("--x-s3") || bucket.endsWith("--xa--s3")) {
+      throw new EInvoiceException(
+          ErrorCodes.ARCHIVE_LISTING_UNORDERED,
+          "the archive bucket is an S3 directory bucket or an access point to one. Its listing has"
+              + " no key order and no start-after, so the orphan check could not examine every key."
+              + " Use a general purpose bucket.");
+    }
   }
 
   @Override
@@ -130,30 +142,53 @@ public final class S3ArchiveStore implements ArchiveStore {
     }
   }
 
+  /**
+   * Keys after {@code startAfter} under the prefix, in the bucket's UTF-8 byte order (D-PR52-3).
+   *
+   * <p>{@code StartAfter} is the bucket prefix plus the saved position on the first request;
+   * continuation tokens carry the call after that, and never leave it (a token is never saved). The
+   * call loops until it has {@code limit} keys or the bucket says it is done: a response with fewer
+   * keys than asked is not the end (C5). {@code endOfFolder} is {@code IsTruncated=false} on the
+   * last response read.
+   */
   @Override
-  public List<String> list(String keyPrefix, int limit) {
+  public ArchiveListing listAfter(String keyPrefix, String startAfter, int limit) {
+    int bound = Math.max(0, limit);
+    String requestPrefix = prefix + (keyPrefix == null ? "" : keyPrefix);
+    String after = startAfter == null || startAfter.isEmpty() ? null : prefix + startAfter;
     List<String> keys = new ArrayList<>();
     String token = null;
+    boolean truncated = true;
     try {
-      do {
+      while (keys.size() < bound && truncated) {
         ListObjectsV2Response response =
             client.listObjectsV2(
                 ListObjectsV2Request.builder()
                     .bucket(bucket)
-                    .prefix(prefix + (keyPrefix == null ? "" : keyPrefix))
+                    .prefix(requestPrefix)
+                    .startAfter(token == null ? after : null)
                     .continuationToken(token)
-                    .maxKeys(Math.min(1000, Math.max(1, limit)))
+                    .maxKeys(Math.min(1000, bound - keys.size()))
                     .build());
         response.contents().stream()
             .map(object -> object.key().substring(prefix.length()))
             .forEach(keys::add);
-        token =
-            Boolean.TRUE.equals(response.isTruncated()) ? response.nextContinuationToken() : null;
-      } while (token != null && keys.size() < limit);
+        truncated = Boolean.TRUE.equals(response.isTruncated());
+        token = truncated ? response.nextContinuationToken() : null;
+        if (truncated && token == null) {
+          throw new EInvoiceException(
+              ErrorCodes.ARCHIVE_UNAVAILABLE,
+              "the archive listing said there is more and gave no continuation token");
+        }
+      }
     } catch (SdkException e) {
       throw unavailable(e);
     }
-    return keys.size() > limit ? List.copyOf(keys.subList(0, limit)) : List.copyOf(keys);
+    if (keys.size() > bound) {
+      return new ArchiveListing(keys.subList(0, bound), false);
+    }
+    // The loop ended with a full page while the bucket still said "more": not the end.
+    return new ArchiveListing(keys, !truncated);
   }
 
   @Override

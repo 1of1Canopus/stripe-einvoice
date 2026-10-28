@@ -157,8 +157,9 @@ class CipherProbePr52Test {
     }
 
     @Override
-    public List<String> list(String prefix, int limit) {
-      return delegate.list(prefix, limit);
+    public com.housedevinci.einvoice.application.ArchiveListing listAfter(
+        String prefix, String startAfter, int limit) {
+      return delegate.listAfter(prefix, startAfter, limit);
     }
 
     @Override

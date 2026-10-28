@@ -404,8 +404,10 @@ class CipherProbeIssuanceTest {
               }
 
               @Override
-              public List<String> list(String prefix, int limit) {
-                return List.of();
+              public com.housedevinci.einvoice.application.ArchiveListing listAfter(
+                  String prefix, String startAfter, int limit) {
+                return new com.housedevinci.einvoice.application.ArchiveListing(
+                    java.util.List.of(), true);
               }
 
               @Override

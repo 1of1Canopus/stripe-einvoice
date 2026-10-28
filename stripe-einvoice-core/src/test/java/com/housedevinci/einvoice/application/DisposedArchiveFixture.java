@@ -98,9 +98,10 @@ final class DisposedArchiveFixture {
     }
 
     @Override
-    public List<String> list(String prefix, int limit) {
+    public com.housedevinci.einvoice.application.ArchiveListing listAfter(
+        String prefix, String startAfter, int limit) {
       calls.add("list:" + prefix);
-      return delegate.list(prefix, limit);
+      return delegate.listAfter(prefix, startAfter, limit);
     }
 
     @Override

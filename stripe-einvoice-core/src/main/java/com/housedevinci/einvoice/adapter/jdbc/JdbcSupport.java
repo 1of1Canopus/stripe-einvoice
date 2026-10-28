@@ -118,7 +118,11 @@ public final class JdbcSupport {
           + "       to_regclass(quote_ident(current_schema()) || '.einvoice_series_name'))"
           + " AND EXISTS (SELECT 1 FROM pg_constraint"
           + "   WHERE conname = 'einvoice_series_name_fk' AND contype = 'f'"
-          + "     AND conrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_series'))";
+          + "     AND conrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_series'))"
+          // D-PR52-3: a database stamped at format 2 before the orphan walk existed runs the script
+          // again for its table and its lookup index.
+          + " AND to_regclass('einvoice_orphan_cursor') IS NOT NULL"
+          + " AND to_regclass('einvoice_issuance_archive_key') IS NOT NULL";
 
   /**
    * The schema format this version of the module writes and reads: 2 since 0.2.0 (typed series, the

@@ -9,12 +9,12 @@ import com.housedevinci.einvoice.domain.Hashes;
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.Issuance;
 import com.housedevinci.einvoice.domain.IssuanceState;
+import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.SeriesKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -41,7 +41,12 @@ import org.slf4j.LoggerFactory;
  *   <li><b>Us to the archive.</b> Every {@code ISSUED} row must have its object. A bounded sample
  *       of the newest rows is also re-hashed, which is what detects a store that quietly overwrote;
  *       the exhaustive re-hash on a slower cadence is Pro.
- *   <li><b>The archive to us.</b> Objects that no row predicted.
+ *   <li><b>The archive to us.</b> Objects that no row predicted, found by a walk of the seller
+ *       folder that resumes where the last pass stopped (D-PR52-3): one listing of at most {@code
+ *       orphan-pages x page-size} keys after the saved position, each page of keys looked up
+ *       exactly against every row of the seller and mode, in any year and any state. Every key is
+ *       examined within one cycle; {@code DEI-283} says when a cycle takes longer than {@code
+ *       orphan-cycle-alert}.
  *   <li><b>Stuck.</b> Numbers allocated and still open past {@code alert-after}, in any series
  *       year, read before the Stripe call so a refused key or an outage cannot skip them.
  *   <li><b>Disposed numbers with an object</b> (D-RTR-4). A burned or voided row that recorded a
@@ -52,9 +57,10 @@ import org.slf4j.LoggerFactory;
  *       the store afterwards.
  * </ol>
  *
- * <p>The archive checks read the newest {@code page-size} rows of each series the window touches.
- * The disposed-number check reads its own page: the newest {@code page-size} burned or voided rows
- * with a key, in every year (D-PR52-1).
+ * <p>The us-to-archive check reads the newest {@code page-size} rows of each series the window
+ * touches. The disposed-number check reads its own page: the newest {@code page-size} burned or
+ * voided rows with a key, in every year (D-PR52-1). The orphan walk reads no rows in advance: it
+ * asks the database about the keys it listed.
  *
  * <p>It <b>alerts and never repairs</b>: no auto-delete, no auto-void, no overwrite. Every one of
  * these conditions has a human decision behind it that a library must not take.
@@ -74,6 +80,7 @@ public final class ReconciliationSweep {
   private final java.time.Clock clock;
   private final Settings settings;
   private final ReprocessLedger reprocessLedger;
+  private final OrphanCursorStore cursors;
   private final IssuanceUnitOfWork.Configuration configuration;
 
   /**
@@ -82,9 +89,22 @@ public final class ReconciliationSweep {
    * @param driftSample how many of the newest documents to re-hash per sweep. The exhaustive rescan
    *     is Pro; a bounded sample in the free core is what makes a silently overwriting store
    *     detectable at all rather than theoretical
+   * @param orphanPages how many pages of {@code pageSize} keys the orphan walk examines per pass, 1
+   *     to {@value #MAX_ORPHAN_PAGES}
+   * @param orphanCycleAlert how long a walk of the whole seller folder may take before {@code
+   *     DEI-283}
    */
   public record Settings(
-      Duration window, Duration grace, Duration alertAfter, int driftSample, int pageSize) {
+      Duration window,
+      Duration grace,
+      Duration alertAfter,
+      int driftSample,
+      int pageSize,
+      int orphanPages,
+      Duration orphanCycleAlert) {
+
+    /** The largest {@code orphan-pages}: 100 pages of 10,000 keys is a million keys per pass. */
+    public static final int MAX_ORPHAN_PAGES = 100;
 
     public Settings {
       window = window == null ? Duration.ofDays(2) : window;
@@ -92,6 +112,22 @@ public final class ReconciliationSweep {
       alertAfter = alertAfter == null ? Duration.ofHours(6) : alertAfter;
       driftSample = driftSample <= 0 ? 10 : driftSample;
       pageSize = pageSize <= 0 ? 500 : pageSize;
+      orphanPages = orphanPages <= 0 ? 4 : orphanPages;
+      orphanCycleAlert = orphanCycleAlert == null ? Duration.ofDays(7) : orphanCycleAlert;
+      if (orphanPages > MAX_ORPHAN_PAGES) {
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG, "einvoice.reconcile.orphan-pages is at most " + MAX_ORPHAN_PAGES);
+      }
+      if (orphanCycleAlert.isNegative() || orphanCycleAlert.isZero()) {
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG, "einvoice.reconcile.orphan-cycle-alert must be positive");
+      }
+    }
+
+    /** The settings of 0.1.x, with the orphan walk's defaults: 4 pages, a 7-day cycle alert. */
+    public Settings(
+        Duration window, Duration grace, Duration alertAfter, int driftSample, int pageSize) {
+      this(window, grace, alertAfter, driftSample, pageSize, 4, Duration.ofDays(7));
     }
   }
 
@@ -100,7 +136,10 @@ public final class ReconciliationSweep {
    *
    * <p>{@code disposedWithObject} counts burned or voided numbers with an object at their key
    * ({@code DEI-281}); {@code disposedUnverified} counts those whose lookup failed ({@code
-   * DEI-241}). Both are in {@link #total()}. Built only by the sweep.
+   * DEI-241}). Both are in {@link #total()}. {@code orphanCycleStale} is 1 when this pass raised
+   * {@code DEI-283}, and is in {@link #total()}. {@code orphanKeysExamined} counts the keys the
+   * orphan walk examined in this pass: a count of work, not of findings, so not in {@link
+   * #total()}. Built only by the sweep.
    */
   public record Result(
       Instant completedAt,
@@ -115,7 +154,9 @@ public final class ReconciliationSweep {
       int burnedNoDocument,
       int accessRefused,
       int disposedWithObject,
-      int disposedUnverified) {
+      int disposedUnverified,
+      int orphanCycleStale,
+      int orphanKeysExamined) {
 
     public int total() {
       return missingIssuance
@@ -128,7 +169,8 @@ public final class ReconciliationSweep {
           + burnedNoDocument
           + accessRefused
           + disposedWithObject
-          + disposedUnverified;
+          + disposedUnverified
+          + orphanCycleStale;
     }
   }
 
@@ -139,9 +181,11 @@ public final class ReconciliationSweep {
       ArchiveStore archive,
       FindingStore findings,
       ReprocessLedger reprocessLedger,
+      OrphanCursorStore cursors,
       java.time.Clock clock,
       Settings settings,
       IssuanceUnitOfWork.Configuration configuration) {
+    this.cursors = java.util.Objects.requireNonNull(cursors, "cursors");
     this.source = source;
     this.reader = reader;
     this.inbound = inbound;
@@ -187,16 +231,15 @@ public final class ReconciliationSweep {
     if (disposed.isPresent()) {
       failures.run("disposed numbers", () -> disposedNumbers(counts, disposed.get(), now));
     }
-    if (rows.isPresent()) {
-      List<Issuance> known = new ArrayList<>(rows.get());
-      disposed.ifPresent(known::addAll);
-      failures.run("archive to us", () -> archiveToUs(counts, known, now));
-    } else {
-      // Without the rows every object would look like an orphan; the failure above is the report.
-      log.warn(
-          "einvoice: reconciliation checks 'us to archive' and 'archive to us' not run:"
-              + " the series read failed");
+    if (rows.isEmpty()) {
+      log.warn("einvoice: reconciliation check 'us to archive' not run: the series read failed");
     }
+    // D-PR52-3, C10: the walk asks the database about the keys it lists, so it needs no row read
+    // in advance, and a failed series read does not blind it.
+    failures.run("archive to us", () -> archiveToUs(counts, now));
+    // Its own check (C9): a listing that fails on every pass still raises DEI-283 after the alert,
+    // next to its DEI-241.
+    failures.run("orphan cycle", () -> orphanCycle(counts, now));
     failures.run("unfinished reprocess", () -> unfinishedReprocess(counts, now));
 
     Result result =
@@ -213,12 +256,15 @@ public final class ReconciliationSweep {
             counts.burned,
             counts.keyRefused,
             counts.disposedWithObject,
-            counts.disposedUnverified);
+            counts.disposedUnverified,
+            counts.orphanCycleStale,
+            counts.orphanKeysExamined);
     log.info(
         "einvoice: reconciliation checked {} finalised invoices and raised {} findings"
             + " (missing {}, archive missing {}, drift {}, orphan {}, stuck {},"
             + " unfinished reprocess {}, voided {}, burned {}, key refused {},"
-            + " disposed with object {}, disposed unverified {}); failed checks {}",
+            + " disposed with object {}, disposed unverified {}, orphan cycle stale {});"
+            + " orphan walk examined {} keys, {}; failed checks {}",
         counts.checked,
         result.total(),
         counts.missing,
@@ -232,6 +278,9 @@ public final class ReconciliationSweep {
         counts.keyRefused,
         counts.disposedWithObject,
         counts.disposedUnverified,
+        counts.orphanCycleStale,
+        counts.orphanKeysExamined,
+        counts.cycleProgress,
         failures.failed);
     failures.throwFirst();
     return result;
@@ -421,22 +470,161 @@ public final class ReconciliationSweep {
     return same ? DisposedCheck.SAME_BYTES : DisposedCheck.OTHER_BYTES;
   }
 
-  private void archiveToUs(Counts counts, List<Issuance> rows, Instant now) {
-    // Every row's key, whatever its state: an object at a disposed row's key is reported once, by
-    // the disposed-number check, never a second time as an unknown object (D-RTR-4, O8).
-    Set<String> known = new HashSet<>();
-    for (Issuance issuance : rows) {
-      issuance.archiveObjectKey().ifPresent(known::add);
-    }
-    // The trailing slash is the seller boundary: without it "live/acme" also lists "live/acme2".
-    String sellerFolder = configuration.mode().wire() + "/" + configuration.sellerId() + "/";
-    for (String key : archive.list(sellerFolder, settings.pageSize())) {
-      if (!known.contains(key) && !key.startsWith(ArchiveCapabilityProbe.SCRATCH_PREFIX)) {
-        counts.orphans++;
-        // Alerted, never deleted: an object we cannot explain is evidence of something, and a
-        // library that tidies it away has destroyed the only copy of that something.
-        record(ErrorCodes.RECON_ORPHAN_OBJECT, key, now);
+  /**
+   * The orphan walk (D-PR52-3): one listing after the saved position, an exact lookup per page,
+   * findings before the cursor moves.
+   *
+   * <ol>
+   *   <li>Read the cursor of this seller and mode, or insert the first one. A cursor saved on
+   *       another store (root, bucket or prefix) starts a new cycle; its partial cycle never
+   *       counts.
+   *   <li>One {@code listAfter} call for {@code orphan-pages x page-size} keys (C11).
+   *   <li>The order guard (C5): strictly ascending UTF-8 bytes, every key strictly after the
+   *       position and inside the seller folder. Anything else is {@code DEI-284}, and nothing
+   *       moves.
+   *   <li>Per page of {@code page-size} keys: a name that is not a valid archive key is an orphan
+   *       with no lookup, under a bounded subject (C6); the rest go to one lookup. The findings are
+   *       written, then the cursor moves to the page's last key with a compare-and-set (C7).
+   *   <li>On the store's end-of-folder answer the cycle completes, unless it examined no key while
+   *       an issued row recorded one: an empty or unmounted archive is {@code DEI-241}, never a
+   *       complete cycle (C8).
+   * </ol>
+   *
+   * <p>Inside a page the order stays "list, then look up": a row is committed before its object is
+   * written, so a listed key always has its row (L12).
+   */
+  private void archiveToUs(Counts counts, Instant now) {
+    String sellerId = configuration.sellerId();
+    Mode mode = configuration.mode();
+    String folder = ArchiveKey.sellerFolder(mode, sellerId);
+    String identity = Hashes.sha256Hex(archive.describe());
+    Optional<OrphanCursor> stored = cursors.read(sellerId, mode);
+    OrphanCursor cursor;
+    if (stored.isEmpty()) {
+      cursor = OrphanCursor.start(sellerId, mode, identity, now);
+      if (!cursors.insert(cursor)) {
+        lostToAnotherInstance(counts);
+        return;
       }
+    } else if (!stored.get().storeIdentity().equals(identity)) {
+      cursor = stored.get().restartedOn(identity, now);
+      if (!cursors.replace(stored.get(), cursor)) {
+        lostToAnotherInstance(counts);
+        return;
+      }
+      log.warn(
+          "einvoice: the archive store is not the one the orphan walk was on ({}); the walk"
+              + " starts a new cycle from the start of the seller folder",
+          archive.describe());
+    } else {
+      cursor = stored.get();
+    }
+
+    int pageSize = settings.pageSize();
+    int limit = settings.orphanPages() * pageSize;
+    ArchiveListing listing = archive.listAfter(folder, cursor.position(), limit);
+    requireOrdered(listing, folder, cursor.position(), limit);
+    List<String> keys = listing.keys();
+    for (int from = 0; from < keys.size(); from += pageSize) {
+      List<String> page = keys.subList(from, Math.min(keys.size(), from + pageSize));
+      List<String> valid = page.stream().filter(ArchiveKey::isValid).toList();
+      Set<String> known = valid.isEmpty() ? Set.of() : reader.knownKeys(sellerId, mode, valid);
+      for (String key : page) {
+        if (!known.contains(key)) {
+          counts.orphans++;
+          // Alerted, never deleted: an object we cannot explain is evidence of something, and a
+          // library that tidies it away has destroyed the only copy of that something.
+          record(ErrorCodes.RECON_ORPHAN_OBJECT, OrphanSubject.of(key), now);
+        }
+      }
+      OrphanCursor next = cursor.advancedTo(page.get(page.size() - 1), page.size());
+      if (!cursors.replace(cursor, next)) {
+        lostToAnotherInstance(counts);
+        return;
+      }
+      cursor = next;
+      counts.orphanKeysExamined += page.size();
+    }
+    if (!listing.endOfFolder()) {
+      counts.cycleProgress =
+          cursor.percentDone().isPresent()
+              ? "cycle " + cursor.percentDone().getAsInt() + "% done"
+              : "first cycle";
+      return;
+    }
+    if (cursor.keysThisCycle() == 0 && cursors.hasArchivedDocuments(sellerId, mode)) {
+      throw new EInvoiceException(
+          ErrorCodes.ARCHIVE_UNAVAILABLE,
+          "the archive lists nothing for a seller with archived documents: an empty or"
+              + " unmounted archive is never a complete orphan cycle");
+    }
+    OrphanCursor completed = cursor.completed(now);
+    if (!cursors.replace(cursor, completed)) {
+      lostToAnotherInstance(counts);
+      return;
+    }
+    counts.cycleProgress = "cycle complete";
+  }
+
+  /**
+   * C5: the walk moves only on a listing in strict UTF-8 byte order, strictly after the saved
+   * position, inside the seller folder and no longer than asked. A name a writer chose can never
+   * reach this guard: the shipped stores turn every name into a unique key (D1), so this guard
+   * checks the store's own order and nothing else.
+   */
+  private static void requireOrdered(
+      ArchiveListing listing, String folder, String after, int limit) {
+    if (listing.keys().size() > limit) {
+      throw unordered("returned more keys than asked");
+    }
+    byte[] previous = ArchiveListing.utf8(after);
+    for (String key : listing.keys()) {
+      if (key == null || !key.startsWith(folder)) {
+        throw unordered("returned a key outside the seller folder");
+      }
+      byte[] current = ArchiveListing.utf8(key);
+      if (current.length > OrphanCursor.MAX_POSITION_BYTES) {
+        throw unordered(
+            "returned a key longer than " + OrphanCursor.MAX_POSITION_BYTES + " UTF-8 bytes");
+      }
+      if (java.util.Arrays.compareUnsigned(current, previous) <= 0) {
+        throw unordered("returned keys that are not strictly ascending after the saved position");
+      }
+      previous = current;
+    }
+  }
+
+  private static EInvoiceException unordered(String what) {
+    return new EInvoiceException(
+        ErrorCodes.ARCHIVE_LISTING_UNORDERED,
+        "the archive listing "
+            + what
+            + " in UTF-8 byte order. The orphan walk moved nothing and completed no cycle.");
+  }
+
+  private static void lostToAnotherInstance(Counts counts) {
+    // Not a failure: another instance moved the walk first, and its pass records the findings.
+    counts.cycleProgress = "another instance moved the walk first";
+    log.info("einvoice: another instance moved the orphan walk first; this pass stops it here");
+  }
+
+  /**
+   * C9: {@code DEI-283} when the current cycle started more than {@code orphan-cycle-alert} ago and
+   * no complete cycle has ended since. Its own check, so a walk that fails on every pass still
+   * raises it.
+   */
+  private void orphanCycle(Counts counts, Instant now) {
+    Optional<OrphanCursor> cursor = cursors.read(configuration.sellerId(), configuration.mode());
+    if (cursor.isPresent() && cursor.get().stale(now, settings.orphanCycleAlert())) {
+      counts.orphanCycleStale = 1;
+      record(
+          ErrorCodes.RECON_ORPHAN_CYCLE_STALE,
+          ArchiveKey.sellerFolder(configuration.mode(), configuration.sellerId()),
+          now);
+      log.warn(
+          "einvoice: the orphan walk has not completed a cycle in {} (DEI-283): raise"
+              + " einvoice.reconcile.orphan-pages, or find why the archive listing fails",
+          settings.orphanCycleAlert());
     }
   }
 
@@ -470,6 +658,9 @@ public final class ReconciliationSweep {
     int keyRefused;
     int disposedWithObject;
     int disposedUnverified;
+    int orphanCycleStale;
+    int orphanKeysExamined;
+    String cycleProgress = "walk not run";
   }
 
   /**

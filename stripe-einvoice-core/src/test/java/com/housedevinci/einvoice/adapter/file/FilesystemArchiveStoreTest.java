@@ -69,10 +69,16 @@ class FilesystemArchiveStoreTest {
   }
 
   @Test
-  void a_part_file_left_by_a_crash_is_never_listed_as_a_document() throws IOException {
-    FilesystemArchiveStore store = new FilesystemArchiveStore(root);
-    store.putIfAbsent(KEY, BYTES);
-    Files.writeString(root.resolve("live/acme/2026/.einvoice-123.part"), "half");
+  void a_part_file_in_flight_is_never_listed_as_a_document() throws IOException {
+    // D-PR52-3, C2: hidden only while it is this store's write in flight (under an hour old); a
+    // leftover from a crash is listed after that, as an orphan (FilesystemArchiveListingTest).
+    Path part = root.resolve("live/acme/2026/.einvoice-123.part");
+    new FilesystemArchiveStore(root).putIfAbsent(KEY, BYTES);
+    Files.writeString(part, "half");
+    java.time.Instant written = Files.getLastModifiedTime(part).toInstant();
+    FilesystemArchiveStore store =
+        new FilesystemArchiveStore(
+            root, java.time.Clock.fixed(written.plusSeconds(60), java.time.ZoneOffset.UTC));
     assertThat(store.list("live", 100)).containsExactly(KEY.value());
   }
 

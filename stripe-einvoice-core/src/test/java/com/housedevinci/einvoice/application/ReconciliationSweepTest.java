@@ -69,6 +69,10 @@ class ReconciliationSweepTest {
     IssuanceTestHarness harness = IssuanceTestHarness.create();
     harness.source().with(TestInvoices.finalised("in_gone"));
     harness.unitOfWork().process(harness.receive("invoice.finalized", "in_gone"));
+    // A second document stays, so the folder is not empty: an archive that lists nothing for a
+    // seller with documents is an unmounted volume, a check failure of its own (D-PR52-3, C8).
+    harness.source().with(TestInvoices.finalised("in_gone_kept"));
+    harness.unitOfWork().process(harness.receive("invoice.finalized", "in_gone_kept"));
     harness.archive().forget(harness.issuance("in_gone").orElseThrow().archiveKey());
     harness.moveClockForward(Duration.ofHours(1));
 

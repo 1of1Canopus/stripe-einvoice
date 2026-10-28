@@ -43,6 +43,13 @@ public final class EInvoiceTables {
    */
   public static final String SERIES_NAME = "einvoice_series_name";
 
+  /**
+   * The orphan walk's saved position (D-PR52-3), one row per seller and mode. The runtime role
+   * holds {@code SELECT, INSERT, UPDATE}; a host entity mapped over it is refused like every other
+   * table here.
+   */
+  public static final String ORPHAN_CURSOR = "einvoice_orphan_cursor";
+
   public static final List<String> ALL =
       List.of(
           SERIES,
@@ -53,7 +60,8 @@ public final class EInvoiceTables {
           FINDING,
           REPROCESS_REQUEST,
           SCHEMA,
-          SERIES_NAME);
+          SERIES_NAME,
+          ORPHAN_CURSOR);
 
   private EInvoiceTables() {}
 

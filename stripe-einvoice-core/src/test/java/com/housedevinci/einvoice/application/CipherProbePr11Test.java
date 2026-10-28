@@ -345,6 +345,12 @@ class CipherProbePr11Test {
     }
 
     @Override
+    public java.util.Set<String> knownKeys(
+        String sellerId, Mode mode, java.util.Collection<String> keys) {
+      return delegate.knownKeys(sellerId, mode, keys);
+    }
+
+    @Override
     public java.util.Set<com.housedevinci.einvoice.domain.IssuanceState> issuanceStates(
         String stripeInvoiceId) {
       return delegate.issuanceStates(stripeInvoiceId);
@@ -381,8 +387,9 @@ class CipherProbePr11Test {
     }
 
     @Override
-    public java.util.List<String> list(String prefix, int limit) {
-      return java.util.List.of();
+    public com.housedevinci.einvoice.application.ArchiveListing listAfter(
+        String prefix, String startAfter, int limit) {
+      return new com.housedevinci.einvoice.application.ArchiveListing(java.util.List.of(), true);
     }
 
     @Override

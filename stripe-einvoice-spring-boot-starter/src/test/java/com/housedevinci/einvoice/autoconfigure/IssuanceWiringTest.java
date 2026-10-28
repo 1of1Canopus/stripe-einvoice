@@ -11,7 +11,6 @@ import com.housedevinci.einvoice.autoconfigure.issuance.IssuanceTestApp;
 import com.housedevinci.einvoice.domain.ArchiveKey;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
-import java.util.List;
 import java.util.Optional;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
@@ -811,8 +810,10 @@ class IssuanceWiringTest {
         }
 
         @Override
-        public List<String> list(String prefix, int limit) {
-          return List.of();
+        public com.housedevinci.einvoice.application.ArchiveListing listAfter(
+            String prefix, String startAfter, int limit) {
+          return new com.housedevinci.einvoice.application.ArchiveListing(
+              java.util.List.of(), true);
         }
 
         @Override

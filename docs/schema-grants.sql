@@ -51,6 +51,13 @@ GRANT USAGE ON SEQUENCE einvoice_reprocess_request_seq_seq TO einvoice_runtime;
 -- table owner's rights, so the runtime role needs nothing more for it.
 GRANT SELECT, INSERT ON einvoice_series_name TO einvoice_runtime;
 
+-- The orphan walk's saved position (D-PR52-3): one row per seller and mode, read, inserted and
+-- moved by every reconciliation pass. Working state, not evidence, so no DELETE is needed and none
+-- is granted. A role that can write it can make the walk skip keys; that role can also insert an
+-- issuance row naming a stray key, so the walk's adversary is a writer of the archive volume or
+-- bucket who has no database access.
+GRANT SELECT, INSERT, UPDATE ON einvoice_orphan_cursor TO einvoice_runtime;
+
 -- The schema version row (format 2, module 0.2.0). SELECT only: the starter reads it at every boot
 -- to decide whether this version may run against this schema. No UPDATE and no DELETE, so the
 -- role cannot rewrite its own version gate; a trigger also refuses a lowered version and any

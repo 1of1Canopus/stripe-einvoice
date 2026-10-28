@@ -79,8 +79,32 @@ public interface ArchiveStore {
     return get(key).isPresent();
   }
 
-  /** Keys under a prefix, for reconciliation's orphan-object direction. Bounded by the caller. */
-  List<String> list(String prefix, int limit);
+  /**
+   * The first keys under a prefix, in UTF-8 byte order. Bounded by the caller. The default reads
+   * one {@link #listAfter} page from the start of the prefix.
+   */
+  default List<String> list(String prefix, int limit) {
+    return listAfter(prefix, "", limit).keys();
+  }
+
+  /**
+   * Keys under {@code prefix} that sort strictly after {@code startAfter}, in UTF-8 byte order, at
+   * most {@code limit} of them: the orphan walk's one listing per pass (D-PR52-3).
+   *
+   * <p><b>Contract.</b> Every key starts with {@code prefix}. The keys are strictly ascending in
+   * UTF-8 byte order ({@link ArchiveListing#UTF8_ORDER}) and each is strictly after {@code
+   * startAfter}; an empty {@code startAfter} means the start of the prefix. {@link
+   * ArchiveListing#endOfFolder()} is true only when the store has said there is no further key,
+   * never because the page came back short. No key appears twice. A listing that breaks this is
+   * refused by the walk with {@code DEI-284}, and nothing moves.
+   *
+   * <p>No default: a store that can only list from the start would make every pass read the whole
+   * folder into memory, which is the costly design the walk exists to avoid (D-PR52-3, C12).
+   *
+   * @throws com.housedevinci.einvoice.domain.EInvoiceException {@code DEI-241} when the store is
+   *     unreachable
+   */
+  ArchiveListing listAfter(String prefix, String startAfter, int limit);
 
   /** One line for the startup log: the kind of store and its root. Never a credential. */
   String describe();
