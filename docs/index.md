@@ -385,6 +385,27 @@ record, an archive object no row predicted, a number open past `einvoice.issuanc
 an archive object at the key of a burned or voided number (`DEI-281`, plus `DEI-275` when its bytes
 differ from the row's hash). It **alerts and never repairs**.
 
+**The orphan walk.** The check for archive objects no row predicted (`DEI-272`) walks the seller
+folder `<mode>/<seller>/` and saves where it stopped, one position per seller and mode. Each pass
+lists `orphan-pages x page-size` keys after that position (2,000 by default) and asks the database
+which of them a row records, in any year and any state. Every key is examined within one cycle,
+one walk of the whole folder. Example: 100,000 objects, 2,000 keys a pass, a pass every 15 minutes:
+a cycle takes 50 passes, about 12.5 hours, and a new orphan written behind the position waits at
+most that long. `DEI-283` says when no cycle completed within `orphan-cycle-alert`: raise
+`orphan-pages`, or find why the listing fails. A listing out of UTF-8 byte order is `DEI-284`; an
+empty listing for a seller with issued documents is `DEI-241` (an unmounted volume). A name that is
+not a valid archive key is reported under a bounded subject (the name escaped, cut at 200
+characters, then `#sha256:` and its hash).
+
+Cost. On S3 a pass is one `ListObjectsV2` loop of at most `orphan-pages x page-size / 1000` calls.
+On a filesystem a pass walks the whole seller folder once, whatever the page, so its cost grows
+with the folder. The filesystem store hides only its own temporary file of the last hour
+(`.einvoice-<digits>.part`); a name that does not decode is listed as `<path>#inode:<file key>`,
+which `find -inum` locates. A seller id with upper-case letters is refused at startup on a
+filesystem archive that ignores letter case (`DEI-285`); the probe tests the archive root only. An
+S3 directory bucket (`--x-s3`, `--xa--s3`) is refused: its listing has no order. The name check is
+a convenience; the order guard is the control.
+
 Two signals, and the difference matters:
 
 - **Health** (`/actuator/health/einvoice`) carries operational conditions only - a silent sweeper, a
@@ -415,6 +436,8 @@ Two signals, and the difference matters:
 | `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision. A row whose invoice holds an open number (numbered, archiving or failed archive) is kept past it until the number resolves |
 | `einvoice.reconcile.interval` / `.window` / `.grace` | `15m` / `2d` / `15m` | `enabled=false` removes the only watcher there is |
 | `einvoice.reconcile.drift-sample` | `10` | `0` stops re-hashing archived documents |
+| `einvoice.reconcile.orphan-pages` | `4` | 1 to 100; fewer pages make a cycle longer |
+| `einvoice.reconcile.orphan-cycle-alert` | `7d` | a longer alert reports a stalled walk later |
 | `einvoice.numbering.closed-year-cutoff` | unset | setting it refuses invoices whose supply date falls in a year closed longer ago than this |
 | `einvoice.rule-pack-version` | `unversioned` | - |
 
