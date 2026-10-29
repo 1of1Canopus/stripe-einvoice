@@ -513,6 +513,18 @@ class OrphanWalkPathsTest {
     assertThat(late.orphanCycleStale()).isEqualTo(1);
     assertThat(late.total()).isGreaterThanOrEqualTo(1);
     assertThat(codesFor(harness, folder)).containsExactly(ErrorCodes.RECON_ORPHAN_CYCLE_STALE);
+
+    // D-PR57-1: the alert holds for the second cycle too, not only the first.
+    for (int pass = 0; pass < 5 && cursor(harness).lastCompleteCycleAt().isEmpty(); pass++) {
+      harness.sweep(hourAlert).sweep();
+    }
+    assertThat(cursor(harness).lastCompleteCycleAt()).as("the first cycle completed").isPresent();
+    ReconciliationSweep.Result fresh = harness.sweep(hourAlert).sweep();
+    assertThat(fresh.orphanCycleStale()).as("a cycle that just started is not late").isZero();
+    assertThat(cursor(harness).lastCompleteCycleAt()).as("second cycle in progress").isPresent();
+    harness.moveClockForward(Duration.ofHours(2));
+    ReconciliationSweep.Result secondLate = harness.sweep(hourAlert).sweep();
+    assertThat(secondLate.orphanCycleStale()).as("second cycle late").isEqualTo(1);
   }
 
   /** C9. DEI-283 is its own check: a listing that fails on every pass still raises it. */

@@ -609,9 +609,9 @@ public final class ReconciliationSweep {
   }
 
   /**
-   * C9: {@code DEI-283} when the current cycle started more than {@code orphan-cycle-alert} ago and
-   * no complete cycle has ended since. Its own check, so a walk that fails on every pass still
-   * raises it.
+   * C9: {@code DEI-283} when the current cycle started more than {@code orphan-cycle-alert} ago. A
+   * completion starts the next cycle, so the alert holds for every cycle, not only the first
+   * (D-PR57-1). Its own check, so a walk that fails on every pass still raises it.
    */
   private void orphanCycle(Counts counts, Instant now) {
     Optional<OrphanCursor> cursor = cursors.read(configuration.sellerId(), configuration.mode());

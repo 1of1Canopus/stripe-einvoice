@@ -22,7 +22,8 @@ import java.util.OptionalInt;
  * @param position the last key examined, empty at the start of a cycle
  * @param storeIdentity the SHA-256 of the store's {@link ArchiveStore#describe()} line: a cursor
  *     belongs to one store, root, bucket and prefix, and a change starts a new cycle
- * @param cycleStartedAt when the current cycle left the empty position
+ * @param cycleStartedAt when the current cycle started: the first cursor, the last completion, or
+ *     the last restart
  * @param lastCompleteCycleAt when the last complete cycle ended, if any
  * @param lastCycleKeys how many keys the last complete cycle examined, 0 when none completed
  * @param keysThisCycle how many keys the current cycle has examined so far
@@ -108,13 +109,14 @@ public record OrphanCursor(
   }
 
   /**
-   * True when the current cycle started more than {@code alert} ago and no complete cycle has ended
-   * since it started: {@code DEI-283}.
+   * True when the current cycle started more than {@code alert} ago: {@code DEI-283}. The age of
+   * the current cycle is the whole rule. {@link #completed} and {@link #restartedOn} start the next
+   * cycle at their own instant, so "no complete cycle since the start" needs no second term; a
+   * second term on {@code lastCompleteCycleAt} silenced the alert for ever after the first complete
+   * cycle (D-PR57-1).
    */
   public boolean stale(Instant now, Duration alert) {
-    boolean completedSinceStart =
-        lastCompleteCycleAt.map(done -> !done.isBefore(cycleStartedAt)).orElse(false);
-    return Duration.between(cycleStartedAt, now).compareTo(alert) > 0 && !completedSinceStart;
+    return Duration.between(cycleStartedAt, now).compareTo(alert) > 0;
   }
 
   /**
