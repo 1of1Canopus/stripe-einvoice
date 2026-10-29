@@ -554,11 +554,13 @@ public final class ReconciliationSweep {
               : "first cycle";
       return;
     }
-    if (keys.isEmpty() && !cursor.position().isEmpty()) {
+    if (keys.isEmpty() && !cursor.position().isEmpty() && !folderHoldsAKey(folder, limit)) {
       // D-PR57-4: the shipped stores give the end in the same answer as the last keys, and this
       // module never deletes an archive object. An empty end after a position means the keys
       // after it went away, or the volume did: the cycle did not examine them, so it is not
-      // complete. Back to the start, no completion recorded.
+      // complete. Back to the start, no completion recorded. D-PR57-9: a store that reports the
+      // end one call late gives the same answer after a full walk, so the folder is listed once
+      // from the start; a key there means the volume is mounted and the cycle is complete.
       OrphanCursor rewound = cursor.rewound();
       if (!cursors.replace(cursor, rewound)) {
         lostToAnotherInstance(counts);
@@ -582,6 +584,13 @@ public final class ReconciliationSweep {
       return;
     }
     counts.cycleProgress = "cycle complete";
+  }
+
+  /** D-PR57-9: one listing from the start of the seller folder; true when it returns a key. */
+  private boolean folderHoldsAKey(String folder, int limit) {
+    ArchiveListing fromStart = archive.listAfter(folder, "", limit);
+    requireOrdered(fromStart, folder, "", limit);
+    return !fromStart.keys().isEmpty();
   }
 
   /**
