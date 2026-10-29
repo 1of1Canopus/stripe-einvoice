@@ -13,6 +13,7 @@ import java.util.Optional;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.EncodingType;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
@@ -150,6 +151,12 @@ public final class S3ArchiveStore implements ArchiveStore {
    * call loops until it has {@code limit} keys or the bucket says it is done: a response with fewer
    * keys than asked is not the end (C5). {@code endOfFolder} is {@code IsTruncated=false} on the
    * last response read.
+   *
+   * <p>Every request asks for {@code encoding-type=url} (D-PR57-5). XML 1.0 cannot carry every
+   * code point an S3 key may hold: a key with {@code \x01} fails the parse on every pass, and XML
+   * end-of-line handling turns {@code \r} into {@code \n}, so two keys arrive as one. Encoded, the
+   * response carries any key, and the SDK decodes {@code Key}, {@code Prefix} and {@code
+   * StartAfter} before this method sees them.
    */
   @Override
   public ArchiveListing listAfter(String keyPrefix, String startAfter, int limit) {
@@ -165,6 +172,9 @@ public final class S3ArchiveStore implements ArchiveStore {
             client.listObjectsV2(
                 ListObjectsV2Request.builder()
                     .bucket(bucket)
+                    // D-PR57-5: keys come back percent-encoded and the SDK decodes them. Raw, a
+                    // key with a control character fails the XML parse, and CR becomes LF.
+                    .encodingType(EncodingType.URL)
                     .prefix(requestPrefix)
                     .startAfter(token == null ? after : null)
                     .continuationToken(token)

@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Timeout;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.EncodingType;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
@@ -120,6 +121,35 @@ class S3ArchiveListingTest {
     assertThat(sent.get(0).startAfter()).isEqualTo("tenant-a/live/acme/2026/a.xml");
     assertThat(sent.get(1).startAfter()).isNull();
     assertThat(sent.get(1).continuationToken()).isEqualTo("t1");
+    assertThat(sent)
+        .as("D-PR57-5: every request asks for URL-encoded keys")
+        .allMatch(r -> r.encodingType() == EncodingType.URL);
+  }
+
+  /**
+   * D-PR57-5 on the real server: keys with characters that URL encoding and XML both treat
+   * specially come back as they were written, in byte order, and a position holding them resumes
+   * the walk exactly after them.
+   */
+  @Test
+  void keys_with_special_characters_round_trip_through_the_encoded_listing() {
+    S3Client client = S3MockSupport.client();
+    String bucket = "chars-" + System.nanoTime();
+    client.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+    List<String> written =
+        List.of(
+            "live/acme/2026/INV- a.xml",
+            "live/acme/2026/INV-%41.xml",
+            "live/acme/2026/INV-&<>.xml",
+            "live/acme/2026/INV-+b.xml",
+            "live/acme/2026/INV-\u00e9.xml");
+    for (String key : written) {
+      client.putObject(
+          PutObjectRequest.builder().bucket(bucket).key(key).build(), RequestBody.fromString("x"));
+    }
+    S3ArchiveStore store = new S3ArchiveStore(client, bucket, "");
+
+    assertThat(walk(store, 2)).containsExactlyElementsOf(written);
   }
 
   /**

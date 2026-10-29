@@ -403,6 +403,8 @@ with the folder. The filesystem store hides only its own temporary file of the l
 (`.einvoice-<digits>.part`); a name that does not decode is listed as `<path>#inode:<file key>`,
 which `find -inum` locates. A seller id with upper-case letters is refused at startup on a
 filesystem archive that ignores letter case (`DEI-285`); the probe tests the archive root only. An
+S3 listing asks for URL-encoded keys (`encoding-type=url`), so a key with a control character
+or a carriage return is listed as written, never a failed parse or two keys merged into one. An
 S3 directory bucket (`--x-s3`, `--xa--s3`) is refused: its listing has no order. The name check is
 a convenience; the order guard is the control.
 
