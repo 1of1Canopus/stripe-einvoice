@@ -419,3 +419,78 @@ the working tree, then restored it: both new tests green, `CipherProbePr57Test`,
 Design stop: none. The probe file is in the internal probes folder as `CipherProbePr57Pass2Test`
 (core, application package), formatted with the project's formatter. The fixer adds it to the
 suite before changing production code, and shows the probe red, then green, in the PR body.
+
+## Pass 3 (2026-10-29)
+
+Head `b02f880`, after the fix for D-PR57-9 (probe commit `5e1f114`, fix commit `b02f880`). Short
+re-verification pass.
+
+**Verdict: MERGE WITH FIXES.** No HIGH. The code half of D-PR57-9 is closed: the probe is green,
+and it goes red when this review breaks the fix. The D-PR57-4 probes still bite. One item of the
+D-PR57-9 fix list is not done: the docs page still states the old rule. D-PR57-9 stays open on
+that item only.
+
+### Numbers
+
+| Check | Result |
+|---|---|
+| Targeted tests on `b02f880` (`CipherProbePr57*`, `ReconciliationSweep*`, `*Arch*`, core), Docker up | all green. `CipherProbePr57Pass2Test` 2 of 2, `CipherProbePr57Test` 9 run, 1 skipped (the known macOS-only probe), `ReconciliationSweepTest` 17, `ArchitectureTest` 10 |
+| Mutation 1: `&& !folderHoldsAKey(folder, limit)` removed | `probe_a_store_that_reports_the_end_one_call_late_never_completes_a_cycle` red ("every key was examined, three times over; a cycle must have completed"). Restored, tree clean |
+| Mutation 2: `folderHoldsAKey` made to return `true` | `probe_an_archive_that_goes_empty_mid_cycle_completes_the_cycle` (D-PR57-4) and `a_store_gone_empty_everywhere_still_completes_no_cycle` red. Restored, tree clean |
+| Full verify | not run: nothing in the targeted run or the diff called for it |
+| CI on `b02f880` | 6 of 7 green, Build & test included (Linux). Security probes red: 128 fixed, 3 weak. The 3 weak probes (`probe_sources_jar_differs_from_a_test_run`, `probe_pre_sign_scan_cannot_resolve_reactor_modules`, `probe_pre_sign_scan_accepts_an_unrecorded_jar`) say "unverifiable": their clean-clone release build failed one starter test, 162 run, 1 failed, all three times. The failure is an AssertJ `containsAll` on event ids, which matches `CipherProbeIssuanceStarterTest` (the worker burst test, line 264), outside this PR's diff. Not reproduced here: the same clean-clone build (version `99.99.99-probe`) ran the starter 162 of 162 green, twice. Recorded as suspected, see below |
+
+### D-PR57-9, the docs item still open
+
+The fix list asked that "the sweep comment and R8 line say 'empty from the start'". The CHANGELOG
+clause was added. The sweep comment keeps the old reason first ("the shipped stores give the end
+in the same answer as the last keys") and adds the new rule after it. The docs page was not
+changed. `docs/index.md`, the paragraph on the orphan walk, still says: "an empty end after a
+position sends the walk back to the start with no completion". On `b02f880` that is false. The
+pass 2 probe shows it: an empty end after a position, with a key at the start of the folder,
+completes the cycle. An operator who reads the page expects no completion there.
+
+Fix (fix pass, text only, no code):
+
+- `docs/index.md`, orphan walk paragraph: replace the sentence with the rule as built. Example: "An
+  empty end after a position completes the cycle only when a listing from the start of the folder
+  returns a key. When the folder is empty from the start, the walk goes back to the start with no
+  completion, because the volume is gone."
+- `ReconciliationSweep`, the comment above the rewind branch: state the rule ("empty from the
+  start"), not the shipped-store premise that D-PR57-9 showed is not part of the port contract.
+- `CHANGELOG.md`, the D-PR57-9 clause: wrap it to the width of the lines around it.
+
+Done when the three texts are changed and the two pass 2 probes and the D-PR57-4 probe are still
+green.
+
+### Suspected, not counted against this PR: D-PR57-CI-1
+
+`CipherProbeIssuanceStarterTest` checks that every event the worker refused during a burst is
+still due. On the probe job's runner it failed three times out of three on `b02f880`; it passed in
+the same job on `0b08f51` and in Build & test on `b02f880`. A likely cause is a race in the test:
+`due` is read before `rejectedOf`, so an event that the worker still holds when `due` is read, and
+gives back as `RECEIVED` after, would show the same failure. That cause is reasoned from the code,
+not reproduced. This PR does not touch the worker or the inbound store. It still blocks the merge,
+because Security probes is a required check. Done when the probe job is green on the head after
+the docs fix. If it is red again, the race gets its own PR and its own two passes; it is not fixed
+inside this one.
+
+### Attempted, not counted
+
+- **The extra listing.** `folderHoldsAKey` lists with the pass's `limit`, not 1 as the pass 2 fix
+  suggested. Not a finding: the answer is used only for "has a key", it goes through
+  `requireOrdered`, and it runs only on an empty end at a position that is not empty, so at most
+  once a pass. A store that fails that listing fails the pass the same way as any listing.
+- **A volume that comes back between the two listings.** An empty end, then a key at the start,
+  completes the cycle without having examined the keys that came back. Those keys are examined in
+  the next cycle, which starts at the empty position. This is the design's stated bound for a key
+  that appears behind the position. Not a finding.
+
+### Fix list for this PR
+
+| Finding | Severity | Owner | Done when |
+|---|---|---|---|
+| D-PR57-9, docs item | LOW | fix pass | `docs/index.md` orphan walk sentence, the sweep comment and the CHANGELOG clause state "empty from the start"; both pass 2 probes and the D-PR57-4 probe still green |
+| D-PR57-CI-1 (suspected) | - | fix pass | Security probes green on the head after the docs fix; if red again, own PR |
+
+Design stop: none. Text only. The next pass is a short one: the three texts and the CI result.
