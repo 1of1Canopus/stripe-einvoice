@@ -169,8 +169,9 @@ class CipherProbePr41Test {
       if (Files.isReadable(year.resolve(KEY.value().substring(15)))) {
         return; // root, or a filesystem that ignores modes: nothing to observe
       }
-      assertThatThrownBy(() -> store.list("live/acme", 100))
-          .satisfies(CipherProbePr41Test::assertUnavailable);
+      // D-PR57-2 (ruled 2026-10-29, QUESTIONS 65): an entry below the listed folder that cannot
+      // be read is named, never hidden and never "absent"; it no longer fails the whole listing.
+      assertThat(store.list("live/acme", 100)).containsExactly(KEY.value() + "#unlistable");
       assertThatThrownBy(() -> store.get(KEY)).satisfies(CipherProbePr41Test::assertUnavailable);
     } finally {
       Files.setPosixFilePermissions(year, PosixFilePermissions.fromString("rwxr-xr-x"));
