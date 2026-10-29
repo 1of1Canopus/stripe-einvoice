@@ -173,6 +173,12 @@ public final class FilesystemArchiveStore implements ArchiveStore {
    *       path>#inode:<file key>}, unique per file, so two names that decode alike are two keys.
    *       Example: {@code INV-\xff} and {@code INV-\xfe} both decode to {@code INV-\ufffd}. No name
    *       a writer chooses can produce a duplicate key or stop the walk.
+   *   <li>An entry below the prefix folder that cannot be read or entered, such as a folder with
+   *       mode {@code 000} or a tree deeper than the path limit, is listed as {@code
+   *       <path>#unlistable} and the walk carries on (D-PR57-2). Only a failure on the root or on
+   *       the prefix folder itself fails the listing.
+   *   <li>Every key is at most {@link ArchiveListing#MAX_KEY_BYTES} UTF-8 bytes: a longer one is
+   *       cut at a code point boundary and keeps its {@code #} suffix (D-PR57-3).
    *   <li>{@code endOfFolder} is true when the walk found no key past the last one returned.
    * </ul>
    */
@@ -204,6 +210,7 @@ public final class FilesystemArchiveStore implements ArchiveStore {
     Optional<Instant> now = clock.map(Clock::instant);
     TreeSet<String> kept = new TreeSet<>(ArchiveListing.UTF8_ORDER);
     int[] unreadable = {0};
+    int[] unlistableCount = {0};
     byte[] afterBytes = ArchiveListing.utf8(after);
     try {
       Files.walkFileTree(
@@ -216,13 +223,7 @@ public final class FilesystemArchiveStore implements ArchiveStore {
               if (entry.isDirectory() || isOwnWriteInFlight(path, entry, now)) {
                 return FileVisitResult.CONTINUE;
               }
-              String key = keyOf(path, entry, unreadable);
-              if (Arrays.compareUnsigned(ArchiveListing.utf8(key), afterBytes) > 0) {
-                kept.add(key);
-                if (kept.size() > bound + 1) {
-                  kept.pollLast();
-                }
-              }
+              keep(keyOf(path, entry, unreadable));
               return FileVisitResult.CONTINUE;
             }
 
@@ -233,16 +234,41 @@ public final class FilesystemArchiveStore implements ArchiveStore {
                 // Gone between the folder read and the visit: a write in flight that finished.
                 return FileVisitResult.CONTINUE;
               }
-              throw failure;
+              return unlistable(path, failure);
             }
 
             @Override
             public FileVisitResult postVisitDirectory(Path folder, IOException failure)
                 throws IOException {
-              if (failure != null) {
+              if (failure == null || failure instanceof NoSuchFileException) {
+                return FileVisitResult.CONTINUE;
+              }
+              return unlistable(folder, failure);
+            }
+
+            /**
+             * D-PR57-2: an entry below the start folder that cannot be read or entered (a folder
+             * with mode 000, a tree past the path limit) is listed as {@code <path>#unlistable},
+             * an invalid key the walk reports with no lookup, and the walk carries on. A failure on
+             * the start folder itself stays fatal.
+             */
+            private FileVisitResult unlistable(Path entry, IOException failure)
+                throws IOException {
+              if (entry.equals(start) || !entry.startsWith(start)) {
                 throw failure;
               }
+              unlistableCount[0]++;
+              keep(bounded(relativeName(entry), "#unlistable"));
               return FileVisitResult.CONTINUE;
+            }
+
+            private void keep(String key) {
+              if (Arrays.compareUnsigned(ArchiveListing.utf8(key), afterBytes) > 0) {
+                kept.add(key);
+                if (kept.size() > bound + 1) {
+                  kept.pollLast();
+                }
+              }
             }
           });
       requireRoot();
@@ -254,6 +280,13 @@ public final class FilesystemArchiveStore implements ArchiveStore {
           "einvoice: {} archive entries have names that do not decode and no file key; each is"
               + " listed once as <path>#unreadable-name",
           unreadable[0]);
+    }
+    if (unlistableCount[0] > 0) {
+      // The count only: the paths are deployment detail, and the findings name each entry.
+      log.warn(
+          "einvoice: {} archive entries could not be read or entered; each is listed as"
+              + " <path>#unlistable and reported as an orphan",
+          unlistableCount[0]);
     }
     boolean end = kept.size() <= bound;
     List<String> keys = new ArrayList<>(bound);

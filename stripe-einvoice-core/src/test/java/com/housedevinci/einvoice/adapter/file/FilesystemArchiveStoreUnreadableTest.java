@@ -121,6 +121,10 @@ class FilesystemArchiveStoreUnreadableTest {
         .satisfies(FilesystemArchiveStoreUnreadableTest::assertUnavailable);
   }
 
+  /**
+   * The listed folder itself cannot be read: the listing fails, it is never empty. A folder below
+   * it is the next test.
+   */
   @Test
   void list_of_a_mode_000_directory_is_a_failure_not_empty() throws IOException {
     FilesystemArchiveStore store = new FilesystemArchiveStore(root);
@@ -128,8 +132,28 @@ class FilesystemArchiveStoreUnreadableTest {
     Path dir = root.resolve("live/acme/2026");
     try {
       if (mode000(dir)) {
-        assertThatThrownBy(() -> store.list("live", 10))
+        assertThatThrownBy(() -> store.list("live/acme/2026", 10))
             .satisfies(FilesystemArchiveStoreUnreadableTest::assertUnavailable);
+      } else {
+        assertThat(store.list("live/acme/2026", 10)).containsExactly(KEY.value());
+      }
+    } finally {
+      restore(dir, "rwx------");
+    }
+  }
+
+  /**
+   * D-PR57-2: a mode 000 folder below the listed folder is never hidden and never stops the walk.
+   * It is listed as {@code <path>#unlistable}, an invalid key the orphan walk reports.
+   */
+  @Test
+  void list_of_a_mode_000_directory_below_the_prefix_names_it_not_empty() throws IOException {
+    FilesystemArchiveStore store = new FilesystemArchiveStore(root);
+    store.putIfAbsent(KEY, BYTES);
+    Path dir = root.resolve("live/acme/2026");
+    try {
+      if (mode000(dir)) {
+        assertThat(store.list("live", 10)).containsExactly("live/acme/2026#unlistable");
       } else {
         assertThat(store.list("live", 10)).containsExactly(KEY.value());
       }
