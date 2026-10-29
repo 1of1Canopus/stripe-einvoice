@@ -277,3 +277,145 @@ The builder who built the walk applies D-PR57-1 to D-PR57-6. The probes are in t
 folder as `CipherProbePr57Test` (core), `CipherProbePr57S3Test` (core, S3 package) and
 `CipherProbePr57StarterTest` (starter). The fixer adds them to the suite before changing
 production code. For each fix, the PR body shows the probe red, then green.
+
+## Pass 2 (2026-10-29)
+
+Head `0b08f51`, after fix pass 1. Subject: the eight pass 1 findings, the two slips of the fix
+pass, QUESTIONS 64 and 65, and the new surface (the `#unlistable` entry, the `MAX_KEY_BYTES` cut,
+the rewind, the case rule in the store).
+
+**Verdict: MERGE WITH FIXES.** No HIGH. All eight pass 1 findings are closed: each probe is green,
+and each fix goes red again when this review breaks it. One new finding, LOW: D-PR57-9. The rewind
+that closes D-PR57-4 assumes a store says "end of folder" in the same answer as its last keys.
+The port contract does not ask for that. A store that keeps the contract but says "end" one call
+late never completes a cycle. This review prescribed that rule in pass 1; the defect is in the
+rule, not in how the builder applied it.
+
+### Numbers
+
+| Check | Result |
+|---|---|
+| `CIPHER_PROBE_MAVEN=1 ./mvnw -B clean verify`, Docker up | BUILD SUCCESS. core 1142 run, 0 failed, 3 skipped; starter 162, 0 failed; sample 9, 0 failed. Line coverage core 91.2%, starter 89.7%; branch 76.7% and 79.2% |
+| The 3 skipped tests (macOS) | the two Linux-only D1 tests and `probe_an_undecodable_name_longer_than_the_cursor_bound_stops_the_walk_for_ever`. Run by this review in a Linux container (Temurin 21, Maven 3.9, `C.UTF-8`, uid 1000, not root): 43 of 43 green across `FilesystemArchiveListingTest`, `FilesystemArchiveStoreUnreadableTest`, `CipherProbePr41Test` and the three filesystem probes of `CipherProbePr57Test` |
+| Review probes (`CipherProbe*`), unchanged | 76 classes, 367 tests, all green. The three PR 57 probe files differ from the internal originals only in whitespace and comment wrapping (compared with whitespace and comment stars removed) |
+| CI on `0b08f51` | 7 of 7 checks green. Build & test on Linux: core 1142 run, 2 skipped (the two macOS-only tests of `CipherProbePr57Test`), so the D-PR57-3 probe ran there and is green, which closes D-PR57-3 as the fix list asked |
+
+### The pass 1 findings, closed by probe and by mutation
+
+Each fix was broken in the working tree, its tests run, then restored. The tree was clean after
+each one.
+
+| Finding | Fix commit | Mutation re-run here | Red output |
+|---|---|---|---|
+| D-PR57-1 | `3205250` | the old second term on `lastCompleteCycleAt` put back in `OrphanCursor.stale` | both D-PR57-1 probes, and T18 (`a_cycle_not_completed_within_the_alert_is_a_finding`, now over two cycles) |
+| D-PR57-2 | `b43d7f7` | `unlistable` made fatal for every entry | both D-PR57-2 probes, `CipherProbePr41Test` (the QUESTIONS 65 line) and the new below-the-prefix test |
+| D-PR57-2, other side | `b43d7f7` | the start folder made non-fatal (`entry.equals(start)` dropped) | `list_of_a_mode_000_directory_is_a_failure_not_empty` |
+| D-PR57-3 | `02ac8c1` | `bounded` returns the name and suffix uncut (Linux container) | the D-PR57-3 probe: "every emitted key fits the cursor and the order guard" |
+| D-PR57-4 | `314571b` | the rewind branch disabled | the D-PR57-4 probe and `an_empty_end_in_mid_cycle_goes_back_to_the_start_and_completes_nothing` |
+| D-PR57-5 | `1557fb9` | `encodingType(EncodingType.URL)` removed | both S3 probes and `start_after_carries_the_bucket_prefix_and_only_on_the_first_request` |
+| D-PR57-6, store | `c7ef708` | the case check removed from `listAfter`, then from `putIfAbsent` | the core probe and `the_store_refuses_an_upper_case_seller_on_a_case_insensitive_volume` (list); the same test (put) |
+| D-PR57-6, starter | `c7ef708` | the startup `listAfter` removed | `probe_a_wrapped_filesystem_store_skips_the_seller_case_refusal` |
+| D-PR57-7 | `af2405b` | M7 (cut by source characters, then escape) | `probe_a_key_of_four_byte_characters_keeps_its_subject_bound_and_the_walk_moves`, `DEI-102` |
+| D-PR57-8 | `af2405b` | M8 (the scratch file catch rethrows) | `probe_a_case_probe_that_cannot_remove_its_scratch_file_still_answers` |
+| order guard, with the fixes in | - | M1 again | 2 tests of `OrphanWalkPathsTest` |
+| compare-and-set, with the fixes in | - | M10 again (`revision = ?` made always true) | `a_second_first_cursor_is_a_lost_compare_and_set`, `two_instances_never_skip_a_page` |
+
+The docs items of the fix list hold: SECURITY-NOTES no longer carries the path-limit residual, the
+D1 sentence on S3 is corrected, the R8 condition is in the docs page, and the bound is named in the
+`listAfter` port contract with one constant shared by `OrphanCursor.MAX_POSITION_BYTES`.
+
+### The two slips of the fix pass
+
+- **D-PR57-FP-1** (an earlier probe red on four pushed commits): closed by `916c0b9`. The full
+  verify of this pass is green on the head, and the changed line is ruled below.
+- **D-PR57-FP-2** (formatter): closed by `399d8be`. Compared with whitespace and comment stars
+  removed, every file of that commit is identical before and after: no code or assertion changed.
+  `spotless:check` passes in the verify.
+
+### Rulings on the builder's questions
+
+- **QUESTIONS 65, `CipherProbePr41Test`: accepted, not weaker.** The probe proved that an entry the
+  service cannot read is never "absent". Before, the proof was a failed listing. Now the listing
+  names the entry (`<key>#unlistable`), and the `get` of the same key still fails with `DEI-241`.
+  Neither call answers "absent" or "empty". The line now also pins the D-PR57-2 rule: making
+  `unlistable` fatal again turns it red. On Linux, as a non-root user, it is green.
+- **QUESTIONS 65, `FilesystemArchiveStoreUnreadableTest`: accepted, not weaker.** The old test
+  listed `live` with a mode `000` folder below it and expected a failure. That case is now the new
+  test, which expects the named entry (red when `unlistable` is fatal). The old name now lists the
+  `000` folder itself and still expects a failure. It goes red when the start folder is made
+  non-fatal. Both halves of the rule are pinned, which is one more than before.
+- **QUESTIONS 64: accepted.** Startup now lists the seller folder once, so it needs list
+  permission even with `einvoice.reconcile.enabled=false`. Three reasons. The walk needs that
+  permission on every pass, and the disabled sweep is already a weaker mode that WARNs. The
+  capability probe already needs the store up at startup, so a startup failure on an unavailable
+  store is not new. A narrower port method (for example "check this seller") would be a default a
+  wrapper can leave unforwarded, which is the hole D-PR57-6 closed. The cost (one walk of the
+  seller folder per start on a filesystem archive) and the permission are stated in the CHANGELOG
+  upgrade note.
+
+### D-PR57-9 (LOW): a store that says "end" one call late never completes a cycle
+
+The D-PR57-4 rewind treats "no key, end of folder" at a position that is not empty as a gone
+volume. The comment in `ReconciliationSweep` gives the reason: "the shipped stores give the end in
+the same answer as the last keys". The port contract asks less. It says `endOfFolder` is true only
+when the store has said there is no further key, never because the page came back short. A store
+that pages and learns the end only on the next call keeps that contract. So does a host wrapper
+that splits or caches pages. With such a store, every cycle ends on an empty answer. The walk
+rewinds, walks the whole folder again, and rewinds again. No cycle completes, and `DEI-283` fires
+once the alert passes, on an archive whose every key was examined. Before the fix pass, the same
+store completed its cycles.
+
+The shipped stores are not affected. This review checked the S3 store at the exact page boundary
+on the suite's S3 server: three keys, a page of three, `endOfFolder` true. The filesystem store
+keeps one key more than the page, so it knows. Real AWS S3 documents `IsTruncated` as "more keys
+are available"; not checked against AWS here.
+
+Repro: `probe_a_store_that_reports_the_end_one_call_late_never_completes_a_cycle`. One document,
+one key a pass, a store that delegates to the harness archive and clears `endOfFolder` on any
+answer with keys. After six passes, `lastCompleteCycleAt` is empty. A second test in the same file,
+`a_store_gone_empty_everywhere_still_completes_no_cycle`, is green on the head and must stay green:
+it keeps D-PR57-4 closed.
+
+Fix (builder, one condition in the existing branch, no new mechanism): in
+`ReconciliationSweep`, on an empty end at a position that is not empty, list the seller folder
+from the empty position once (`archive.listAfter(folder, "", 1)`, through `requireOrdered`). If
+that answer has a key, the archive is there and nothing exists after the position: complete the
+cycle as usual (the empty-archive rule cannot apply, the count is not 0). If it has no key, rewind
+as now. Correct the comment and the R8 line in the docs: the rule is "the volume answers empty from
+the start", not "the shipped stores answer in one call". This review tried that one condition in
+the working tree, then restored it: both new tests green, `CipherProbePr57Test`,
+`OrphanWalkPathsTest` and `ReconciliationSweepTest` green.
+
+### Attempted, not counted
+
+- **A real file named like a marked entry.** With `live/acme/2026` at mode `000` and a regular file
+  `live/acme/2026#unlistable` beside it, the listing holds one key, `live/acme/2026#unlistable`,
+  not two. Reproduced on macOS. Not a finding: the key is reported with no lookup, the WARN still
+  counts one unlistable entry, nothing stops, and once the file is removed the next cycle reports
+  the folder under the same name. The same holds for a file a writer names after another entry's
+  `#inode:` key, and for two cut keys with the same first bytes and a suffix with no file key.
+  The listing is a sorted set, so none of them reaches the order guard as a duplicate.
+- **A folder made unreadable behind the cursor.** `#` sorts before `/`, so the entry
+  `<folder>#unlistable` sorts before the keys inside the folder. If the position is already inside
+  the folder when it turns unreadable, the entry is first reported in the next cycle. That is the
+  design's stated bound for any key that appears behind the position. Reasoned from the order, not
+  a separate repro.
+- **The case rule on `get` and `exists`.** The store checks the seller element on `putIfAbsent` and
+  `listAfter` only. A read reaches the store only with a key taken from a row, and a row key with
+  an upper-case seller needs a write the store now refuses. Rows from an older version on a volume
+  that ignores case are refused at startup by the starter, and without it the walk fails with
+  `DEI-285` on every pass. Not a finding.
+- **The order guard and the compare-and-set with the new keys.** The filesystem store filters and
+  sorts on the key it emits, cut or not, so a cut key is ordered like any other across passes. The
+  rewind and the startup listing go through the same compare-and-set and the same store call. M1
+  and M10, re-run with the fixes in, are red.
+
+### Fix list for this PR
+
+| Finding | Severity | Owner | Done when |
+|---|---|---|---|
+| D-PR57-9 | LOW | builder | `probe_a_store_that_reports_the_end_one_call_late_never_completes_a_cycle` and `a_store_gone_empty_everywhere_still_completes_no_cycle` in the suite and green; the D-PR57-4 probe and test still green; the sweep comment and R8 line say "empty from the start" |
+
+Design stop: none. The probe file is in the internal probes folder as `CipherProbePr57Pass2Test`
+(core, application package), formatted with the project's formatter. The fixer adds it to the
+suite before changing production code, and shows the probe red, then green, in the PR body.
