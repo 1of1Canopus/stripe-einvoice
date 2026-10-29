@@ -487,7 +487,9 @@ public final class ReconciliationSweep {
    *       written, then the cursor moves to the page's last key with a compare-and-set (C7).
    *   <li>On the store's end-of-folder answer the cycle completes, unless it examined no key while
    *       an issued row recorded one: an empty or unmounted archive is {@code DEI-241}, never a
-   *       complete cycle (C8).
+   *       complete cycle (C8). A cycle completes only on a listing that holds at least one key,
+   *       or on one at the empty position: an empty end after a position puts the walk back at
+   *       the start with no completion (D-PR57-4).
    * </ol>
    *
    * <p>Inside a page the order stays "list, then look up": a row is committed before its object is
@@ -550,6 +552,22 @@ public final class ReconciliationSweep {
           cursor.percentDone().isPresent()
               ? "cycle " + cursor.percentDone().getAsInt() + "% done"
               : "first cycle";
+      return;
+    }
+    if (keys.isEmpty() && !cursor.position().isEmpty()) {
+      // D-PR57-4: the shipped stores give the end in the same answer as the last keys, and this
+      // module never deletes an archive object. An empty end after a position means the keys
+      // after it went away, or the volume did: the cycle did not examine them, so it is not
+      // complete. Back to the start, no completion recorded.
+      OrphanCursor rewound = cursor.rewound();
+      if (!cursors.replace(cursor, rewound)) {
+        lostToAnotherInstance(counts);
+        return;
+      }
+      counts.cycleProgress = "listing ended before the cycle did; walking again from the start";
+      log.warn(
+          "einvoice: the archive listing ended with no key after the walk's position; the cycle"
+              + " is not complete and the walk starts again from the start of the seller folder");
       return;
     }
     if (cursor.keysThisCycle() == 0 && cursors.hasArchivedDocuments(sellerId, mode)) {

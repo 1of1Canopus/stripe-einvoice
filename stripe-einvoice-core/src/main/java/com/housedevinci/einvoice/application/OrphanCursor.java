@@ -91,6 +91,26 @@ public record OrphanCursor(
   }
 
   /**
+   * The store answered "no key, end of folder" after a position that is not empty: keys the cycle
+   * had not reached are gone, or the volume is. Never a completion (D-PR57-4). Back to the empty
+   * position, the cycle's start and the last completion kept, the cycle's count back to 0, so the
+   * next pass meets the empty-archive rule or walks again from the start, and the cycle alert keeps
+   * counting from the real start.
+   */
+  public OrphanCursor rewound() {
+    return new OrphanCursor(
+        sellerId,
+        mode,
+        "",
+        storeIdentity,
+        cycleStartedAt,
+        lastCompleteCycleAt,
+        lastCycleKeys,
+        0,
+        revision + 1);
+  }
+
+  /**
    * Another store, root, bucket or prefix: the partial cycle is dropped, never completed, and a new
    * one starts now at the empty position (D-PR52-3, C9).
    */

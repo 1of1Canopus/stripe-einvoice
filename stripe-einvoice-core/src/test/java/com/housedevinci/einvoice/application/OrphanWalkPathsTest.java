@@ -669,6 +669,45 @@ class OrphanWalkPathsTest {
     assertThat(cursor(harness).lastCompleteCycleAt()).isEmpty();
   }
 
+  /**
+   * D-PR57-4, R8 fourth condition. An empty end after a position is never a completion: the walk
+   * goes back to the start with the cycle's start kept, the next pass meets the empty-archive rule
+   * (DEI-241), and once the volume is back the cycle completes on a walk from the start.
+   */
+  @Test
+  void an_empty_end_in_mid_cycle_goes_back_to_the_start_and_completes_nothing() {
+    IssuanceTestHarness harness = IssuanceTestHarness.create();
+    issue(harness, "in_r8_a");
+    issue(harness, "in_r8_b");
+    harness.sweep(ONE_KEY).sweep();
+    OrphanCursor mid = cursor(harness);
+    Scripted unmounted =
+        new Scripted(harness.archive()) {
+          @Override
+          ArchiveListing listing(String prefix, String startAfter, int limit) {
+            return new ArchiveListing(List.of(), true);
+          }
+        };
+
+    harness.sweepWith(ONE_KEY, unmounted).sweep();
+    OrphanCursor rewound = cursor(harness);
+    assertThat(rewound.position()).isEmpty();
+    assertThat(rewound.keysThisCycle()).isZero();
+    assertThat(rewound.cycleStartedAt()).isEqualTo(mid.cycleStartedAt());
+    assertThat(rewound.lastCompleteCycleAt()).isEmpty();
+
+    assertThatThrownBy(() -> harness.sweepWith(ONE_KEY, unmounted).sweep())
+        .isInstanceOf(EInvoiceException.class)
+        .extracting("code")
+        .isEqualTo(ErrorCodes.ARCHIVE_UNAVAILABLE);
+
+    for (int pass = 0; pass < 4 && cursor(harness).lastCompleteCycleAt().isEmpty(); pass++) {
+      harness.sweep(ONE_KEY).sweep();
+    }
+    assertThat(cursor(harness).lastCompleteCycleAt()).as("volume back, cycle done").isPresent();
+    assertThat(cursor(harness).lastCycleKeys()).isEqualTo(2);
+  }
+
   /** C8, Q2. A seller with no documents yet walks anyway, and completes an empty cycle. */
   @Test
   void a_seller_with_no_documents_completes_an_empty_cycle() {
