@@ -256,7 +256,7 @@ public final class FilesystemArchiveStore implements ArchiveStore {
               return unlistable(folder, failure);
             }
 
-            /**
+            /*
              * D-PR57-2: an entry below the start folder that cannot be read or entered (a folder
              * with mode 000, a tree past the path limit) is listed as {@code <path>#unlistable}, an
              * invalid key the walk reports with no lookup, and the walk carries on. A failure on
