@@ -395,9 +395,10 @@ most that long. `DEI-283` says when no cycle completed within `orphan-cycle-aler
 `orphan-pages`, or find why the listing fails; it holds for every cycle, since each completion
 starts the next one. A listing out of UTF-8 byte order is `DEI-284`; an empty listing for a seller
 with issued documents is `DEI-241` (an unmounted volume). A cycle completes only on a listing that
-holds a key, or at the start of the folder: an empty end after a position sends the walk back to
-the start with no completion, because keys it had not reached are gone or the volume is. A name that is
-not a valid archive key is reported under a bounded subject (the name escaped, cut at 200
+holds a key, or at the start of the folder. On an empty end at a non-empty position, the walk lists
+the seller folder once from the start. If that listing holds a key, the cycle completes. If it holds
+none, the walk rewinds to the start with no completion, because keys it had not reached are gone or
+the volume is. A name that is not a valid archive key is reported under a bounded subject (the name escaped, cut at 200
 characters, then `#sha256:` and its hash).
 
 Cost. On S3 a pass is one `ListObjectsV2` loop of at most `orphan-pages x page-size / 1000` calls.

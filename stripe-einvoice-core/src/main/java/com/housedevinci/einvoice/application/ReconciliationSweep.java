@@ -555,12 +555,13 @@ public final class ReconciliationSweep {
       return;
     }
     if (keys.isEmpty() && !cursor.position().isEmpty() && !folderHoldsAKey(folder, limit)) {
-      // D-PR57-4: the shipped stores give the end in the same answer as the last keys, and this
-      // module never deletes an archive object. An empty end after a position means the keys
-      // after it went away, or the volume did: the cycle did not examine them, so it is not
-      // complete. Back to the start, no completion recorded. D-PR57-9: a store that reports the
-      // end one call late gives the same answer after a full walk, so the folder is listed once
-      // from the start; a key there means the volume is mounted and the cycle is complete.
+      // D-PR57-9: a store that reports the end one call late gives an empty end after a full
+      // walk, so the folder is listed once from the start; a key there means the volume is
+      // mounted and the cycle is complete. D-PR57-4: only when that listing holds no key is the
+      // cycle not complete. The shipped stores give the end in the same answer as the last keys,
+      // and this module never deletes an archive object, so the keys after the position went
+      // away, or the volume did, and the cycle did not examine them. Back to the start, no
+      // completion recorded.
       OrphanCursor rewound = cursor.rewound();
       if (!cursors.replace(cursor, rewound)) {
         lostToAnotherInstance(counts);

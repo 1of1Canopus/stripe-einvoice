@@ -292,10 +292,11 @@ All notable changes to this project are documented here. The format follows
     arrived as one key; both are now listed as written.
   - A cycle completes only on the store's own end-of-folder answer, on the same store. An empty
     listing while an issued row recorded a key is `DEI-241` (an unmounted volume), never a complete
-    cycle. An empty end after a position that is not empty is never a completion either: the walk
-    goes back to the start, and the cycle keeps its start time (D-PR57-4), unless one listing from the start of the folder returns a
-    key: a store that reports the end one call late then completes the cycle (D-PR57-9). A changed store, root,
-    bucket or prefix starts a new cycle.
+    cycle. An empty end after a position that is not empty is never a completion on its own: the
+    folder is listed once from the start. A key there completes the cycle, because a store that
+    reports the end one call late gives that answer (D-PR57-9). No key there rewinds the walk to the
+    start, and the cycle keeps its start time (D-PR57-4). A changed store, root, bucket or prefix
+    starts a new cycle.
   - The orphan check no longer waits for the series read: a failed series read does not stop it.
   - `DEI-283` (`RECON_ORPHAN_CYCLE_STALE`) when no cycle completed within `orphan-cycle-alert`
     (7 days by default), counted from the start of the cycle, so at the earliest 7 days after the
