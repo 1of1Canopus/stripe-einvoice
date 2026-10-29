@@ -24,6 +24,13 @@ import java.util.List;
 public record ArchiveListing(List<String> keys, boolean endOfFolder) {
 
   /**
+   * The longest key a store may list, in UTF-8 bytes: the bound of {@link ArchiveStore#listAfter}
+   * and of the orphan cursor's saved position. S3 keys stop at 1,024 bytes. A filesystem store cuts
+   * a longer name and marks it, so a name a writer chooses never reaches this bound (D-PR57-3).
+   */
+  public static final int MAX_KEY_BYTES = 4096;
+
+  /**
    * UTF-8 byte order, unsigned: the order S3 lists in, and the order every store of this module
    * sorts and filters with. Java's {@code String.compareTo} compares UTF-16 units and disagrees
    * with it on characters outside the basic plane. Example: U+FF61 sorts after U+1F600 in UTF-16

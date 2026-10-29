@@ -41,11 +41,10 @@ public record OrphanCursor(
     long revision) {
 
   /**
-   * The longest position, in UTF-8 bytes. S3 keys reach 1,024 bytes and filesystem paths 4,096
-   * (Linux {@code PATH_MAX}), so this holds a key of either shipped store; the column has the same
-   * bound.
+   * The longest position, in UTF-8 bytes: {@link ArchiveListing#MAX_KEY_BYTES}, the bound every
+   * store's listing keeps. The column has the same bound.
    */
-  public static final int MAX_POSITION_BYTES = 4096;
+  public static final int MAX_POSITION_BYTES = ArchiveListing.MAX_KEY_BYTES;
 
   public OrphanCursor {
     Identifiers.validate("seller id", sellerId, 64);

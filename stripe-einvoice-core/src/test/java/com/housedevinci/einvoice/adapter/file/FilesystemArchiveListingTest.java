@@ -285,4 +285,31 @@ class FilesystemArchiveListingTest {
 
     assertThat(store().list(FOLDER, 1)).containsExactly("live/acme/2026/a.xml");
   }
+
+  /**
+   * D-PR57-3, the cut itself on every system: a name past the bound is cut at a code point
+   * boundary and keeps its suffix whole, so the key fits the cursor, stays unique and stays
+   * invalid. Two names that differ only past the cut stay two keys through their file keys.
+   */
+  @Test
+  void a_key_past_the_bound_is_cut_at_a_code_point_and_keeps_its_suffix() {
+    String wide = "live/acme/" + "�".repeat(1400) + "😀".repeat(10);
+    String suffix = "#inode:(dev=d0,ino=3407929)";
+
+    String key = FilesystemArchiveStore.bounded(wide, suffix);
+    String other = FilesystemArchiveStore.bounded(wide, "#inode:(dev=d0,ino=3407930)");
+
+    assertThat(ArchiveListing.utf8(key).length)
+        .isLessThanOrEqualTo(ArchiveListing.MAX_KEY_BYTES)
+        .isGreaterThan(ArchiveListing.MAX_KEY_BYTES - 4);
+    assertThat(key).endsWith(suffix).startsWith("live/acme/�");
+    assertThat(Character.isHighSurrogate(key.charAt(key.length() - suffix.length() - 1)))
+        .as("never half a surrogate pair before the suffix")
+        .isFalse();
+    assertThat(ArchiveKey.isValid(key)).isFalse();
+    assertThat(other).isNotEqualTo(key);
+    assertThat(FilesystemArchiveStore.bounded("live/acme/a", "#unreadable-name"))
+        .as("a short name is not cut")
+        .isEqualTo("live/acme/a#unreadable-name");
+  }
 }

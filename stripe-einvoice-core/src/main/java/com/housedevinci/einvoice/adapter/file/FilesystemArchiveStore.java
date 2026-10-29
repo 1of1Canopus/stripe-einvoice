@@ -295,16 +295,53 @@ public final class FilesystemArchiveStore implements ArchiveStore {
    * database lookup.
    */
   private String keyOf(Path path, BasicFileAttributes entry, int[] unreadable) {
-    String decoded = root.relativize(path).toString().replace('\\', '/');
-    if (opensTheSameFile(decoded, path, entry)) {
+    String decoded = relativeName(path);
+    boolean fits = ArchiveListing.utf8(decoded).length <= ArchiveListing.MAX_KEY_BYTES;
+    if (fits && opensTheSameFile(decoded, path, entry)) {
       return decoded;
     }
     Object fileKey = entry.fileKey();
     if (fileKey != null) {
-      return decoded + "#inode:" + fileKey;
+      return bounded(decoded, "#inode:" + fileKey);
     }
     unreadable[0]++;
-    return decoded + "#unreadable-name";
+    return bounded(decoded, "#unreadable-name");
+  }
+
+  private String relativeName(Path path) {
+    return root.relativize(path).toString().replace('\\', '/');
+  }
+
+  /**
+   * D-PR57-3: {@code name + suffix}, with {@code name} cut at a code point boundary so that the
+   * whole is at most {@link ArchiveListing#MAX_KEY_BYTES} UTF-8 bytes. A name that does not decode
+   * grows three bytes (U+FFFD) per raw byte, so a path well under the system limit can decode past
+   * the bound; cut, it still ends in its suffix, which keeps it unique (the file key) and invalid
+   * as an archive key (the {@code #}). Example: six 255-byte names of {@code \xff} decode to about
+   * 4.6 KB and are listed as the first 4 KB or so, then {@code #inode:(dev=..,ino=..)}.
+   */
+  static String bounded(String name, String suffix) {
+    int budget = ArchiveListing.MAX_KEY_BYTES - ArchiveListing.utf8(suffix).length;
+    if (budget < 0) {
+      return cut(name + suffix, ArchiveListing.MAX_KEY_BYTES);
+    }
+    return cut(name, budget) + suffix;
+  }
+
+  /** The longest start of {@code text}, whole code points only, that fits {@code bytes}. */
+  private static String cut(String text, int bytes) {
+    int used = 0;
+    int end = 0;
+    while (end < text.length()) {
+      int codePoint = text.codePointAt(end);
+      int width = ArchiveListing.utf8(new String(Character.toChars(codePoint))).length;
+      if (used + width > bytes) {
+        break;
+      }
+      used += width;
+      end += Character.charCount(codePoint);
+    }
+    return text.substring(0, end);
   }
 
   private boolean opensTheSameFile(String decoded, Path path, BasicFileAttributes entry) {

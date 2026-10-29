@@ -95,7 +95,9 @@ public interface ArchiveStore {
    * UTF-8 byte order ({@link ArchiveListing#UTF8_ORDER}) and each is strictly after {@code
    * startAfter}; an empty {@code startAfter} means the start of the prefix. {@link
    * ArchiveListing#endOfFolder()} is true only when the store has said there is no further key,
-   * never because the page came back short. No key appears twice. A listing that breaks this is
+   * never because the page came back short. No key appears twice. No key is longer than {@link
+   * ArchiveListing#MAX_KEY_BYTES} UTF-8 bytes: a store that can hold a longer name lists it cut and
+   * marked, never whole (D-PR57-3). A listing that breaks this is
    * refused by the walk with {@code DEI-284}, and nothing moves.
    *
    * <p>No default: a store that can only list from the start would make every pass read the whole
