@@ -152,8 +152,8 @@ public final class S3ArchiveStore implements ArchiveStore {
    * keys than asked is not the end (C5). {@code endOfFolder} is {@code IsTruncated=false} on the
    * last response read.
    *
-   * <p>Every request asks for {@code encoding-type=url} (D-PR57-5). XML 1.0 cannot carry every
-   * code point an S3 key may hold: a key with {@code \x01} fails the parse on every pass, and XML
+   * <p>Every request asks for {@code encoding-type=url} (D-PR57-5). XML 1.0 cannot carry every code
+   * point an S3 key may hold: a key with {@code \x01} fails the parse on every pass, and XML
    * end-of-line handling turns {@code \r} into {@code \n}, so two keys arrive as one. Encoded, the
    * response carries any key, and the SDK decodes {@code Key}, {@code Prefix} and {@code
    * StartAfter} before this method sees them.

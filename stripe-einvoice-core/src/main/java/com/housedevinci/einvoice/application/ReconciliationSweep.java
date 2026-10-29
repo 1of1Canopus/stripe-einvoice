@@ -487,9 +487,9 @@ public final class ReconciliationSweep {
    *       written, then the cursor moves to the page's last key with a compare-and-set (C7).
    *   <li>On the store's end-of-folder answer the cycle completes, unless it examined no key while
    *       an issued row recorded one: an empty or unmounted archive is {@code DEI-241}, never a
-   *       complete cycle (C8). A cycle completes only on a listing that holds at least one key,
-   *       or on one at the empty position: an empty end after a position puts the walk back at
-   *       the start with no completion (D-PR57-4).
+   *       complete cycle (C8). A cycle completes only on a listing that holds at least one key, or
+   *       on one at the empty position: an empty end after a position puts the walk back at the
+   *       start with no completion (D-PR57-4).
    * </ol>
    *
    * <p>Inside a page the order stays "list, then look up": a row is committed before its object is

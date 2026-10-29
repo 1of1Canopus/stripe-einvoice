@@ -63,15 +63,17 @@ class CipherProbePr57Test {
    * D-PR57-1. {@code OrphanCursor.completed(now)} sets {@code cycleStartedAt} and {@code
    * lastCompleteCycleAt} to the same instant, and {@code stale} treats a completion at the start
    * instant as "completed since the start". So once one cycle has completed, DEI-283 never fires
-   * again on that store: a listing that fails on every pass, or a cycle that takes months, is
-   * never raised.
+   * again on that store: a listing that fails on every pass, or a cycle that takes months, is never
+   * raised.
    */
   @Test
   void probe_the_cycle_alert_never_fires_after_the_first_complete_cycle() {
     IssuanceTestHarness harness = IssuanceTestHarness.create();
     issue(harness, "in_pr57_alert");
     harness.sweep(ONE_KEY_HOUR_ALERT).sweep();
-    assertThat(cursor(harness).lastCompleteCycleAt()).as("precondition: one cycle done").isPresent();
+    assertThat(cursor(harness).lastCompleteCycleAt())
+        .as("precondition: one cycle done")
+        .isPresent();
 
     OrphanWalkPathsTest.Scripted broken =
         new OrphanWalkPathsTest.Scripted(harness.archive()) {
@@ -109,9 +111,9 @@ class CipherProbePr57Test {
    * D-PR57-2. One folder the service cannot read, anywhere under the seller folder, makes {@code
    * visitFileFailed} throw: the whole listing fails on every pass ({@code DEI-241}), and no key of
    * the seller is examined again until someone finds the folder. The message carries no path by
-   * design, so the operator sees "the document archive is unavailable" while every read works.
-   * The D1 invariant, applied to entries: what a volume writer creates can produce a reported
-   * orphan, never a stopped walk.
+   * design, so the operator sees "the document archive is unavailable" while every read works. The
+   * D1 invariant, applied to entries: what a volume writer creates can produce a reported orphan,
+   * never a stopped walk.
    */
   @Test
   void probe_an_unreadable_folder_stops_the_filesystem_walk_for_ever() throws Exception {
@@ -135,9 +137,9 @@ class CipherProbePr57Test {
   }
 
   /**
-   * D-PR57-2, second door (QUESTIONS 63, refused as a residual). A tree deeper than the path
-   * limit, built with relative mkdir, makes the walk's absolute stat fail with "File name too
-   * long": the same throw, the same stopped walk. The same correction closes it.
+   * D-PR57-2, second door (QUESTIONS 63, refused as a residual). A tree deeper than the path limit,
+   * built with relative mkdir, makes the walk's absolute stat fail with "File name too long": the
+   * same throw, the same stopped walk. The same correction closes it.
    */
   @Test
   void probe_a_tree_deeper_than_the_path_limit_stops_the_filesystem_walk_for_ever()
@@ -147,7 +149,11 @@ class CipherProbePr57Test {
     String level = "d".repeat(100);
     sh(
         root.resolve("live/acme"),
-        "i=0; while [ $i -lt 50 ]; do mkdir " + level + " && cd -P " + level + " || exit 1;"
+        "i=0; while [ $i -lt 50 ]; do mkdir "
+            + level
+            + " && cd -P "
+            + level
+            + " || exit 1;"
             + " i=$((i+1)); done; : > deep.xml");
     try {
       ArchiveListing listing = store().listAfter("live/acme/", "", 10);
@@ -160,8 +166,11 @@ class CipherProbePr57Test {
       // Removed bottom-up with relative names, which works past the path limit.
       sh(
           root.resolve("live/acme"),
-          "i=0; while [ $i -lt 50 ]; do cd -P " + level + " || exit 1; i=$((i+1)); done;"
-              + " rm -f deep.xml; i=0; while [ $i -lt 50 ]; do cd -P .. && rmdir " + level
+          "i=0; while [ $i -lt 50 ]; do cd -P "
+              + level
+              + " || exit 1; i=$((i+1)); done;"
+              + " rm -f deep.xml; i=0; while [ $i -lt 50 ]; do cd -P .. && rmdir "
+              + level
               + " || exit 1; i=$((i+1)); done");
     }
   }
@@ -171,9 +180,9 @@ class CipherProbePr57Test {
   /**
    * D-PR57-3. A name that does not decode becomes U+FFFD per byte: three UTF-8 bytes for one. Six
    * 255-byte names of {@code \xff} are a 1.5 KB path, well under PATH_MAX, but a 4.6 KB key. The
-   * store emits it as {@code <decoded>#inode:...}; the order guard refuses any key over 4,096
-   * bytes with {@code DEI-284}, on every pass. A name a writer chose reaches the guard, which D1
-   * says can never happen. Linux only: macOS refuses such names.
+   * store emits it as {@code <decoded>#inode:...}; the order guard refuses any key over 4,096 bytes
+   * with {@code DEI-284}, on every pass. A name a writer chose reaches the guard, which D1 says can
+   * never happen. Linux only: macOS refuses such names.
    */
   @Test
   @EnabledOnOs(OS.LINUX)
@@ -197,9 +206,9 @@ class CipherProbePr57Test {
   // ---------------------------------------------------------------- D-PR57-4 (LOW)
 
   /**
-   * D-PR57-4. The empty-mount rule tests the cycle's key count, not the listing. A volume that
-   * goes away in the middle of a cycle answers "empty, end of folder" after a non-empty position:
-   * the cycle is stamped complete although the keys after the position were never examined.
+   * D-PR57-4. The empty-mount rule tests the cycle's key count, not the listing. A volume that goes
+   * away in the middle of a cycle answers "empty, end of folder" after a non-empty position: the
+   * cycle is stamped complete although the keys after the position were never examined.
    */
   @Test
   void probe_an_archive_that_goes_empty_mid_cycle_completes_the_cycle() {
@@ -282,8 +291,8 @@ class CipherProbePr57Test {
   /**
    * D-PR57-6. The DEI-285 rule lives only in the starter's startup bean, behind {@code instanceof
    * FilesystemArchiveStore}. A host that builds the store and the sweep itself, or decorates the
-   * store, walks {@code live/Acme/} on a volume that ignores case with no refusal. The store is
-   * the one place every path goes through. Runs where the temporary folder ignores letter case.
+   * store, walks {@code live/Acme/} on a volume that ignores case with no refusal. The store is the
+   * one place every path goes through. Runs where the temporary folder ignores letter case.
    */
   @Test
   void probe_the_filesystem_store_walks_a_mixed_case_seller_on_a_case_insensitive_volume() {

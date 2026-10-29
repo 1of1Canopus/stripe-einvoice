@@ -19,11 +19,11 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * Security review of PR 57, pass 1 on 1ef0995: D-PR57-6. The DEI-285 case rule runs only when the
  * starter's archive bean is the filesystem store itself ({@code store instanceof
- * FilesystemArchiveStore}). A host that decorates the store (metrics, tracing, a retry wrapper),
- * or builds the sweep without the starter, gets no refusal: on a case-insensitive volume seller
- * {@code Acme} starts, shares a folder with {@code acme}, and each walk reports the other's
- * documents. Runs where the temporary folder ignores letter case (macOS, Windows defaults); named
- * as skipped elsewhere.
+ * FilesystemArchiveStore}). A host that decorates the store (metrics, tracing, a retry wrapper), or
+ * builds the sweep without the starter, gets no refusal: on a case-insensitive volume seller {@code
+ * Acme} starts, shares a folder with {@code acme}, and each walk reports the other's documents.
+ * Runs where the temporary folder ignores letter case (macOS, Windows defaults); named as skipped
+ * elsewhere.
  */
 class CipherProbePr57StarterTest {
 
@@ -62,17 +62,20 @@ class CipherProbePr57StarterTest {
     FilesystemArchiveStore filesystem = new FilesystemArchiveStore(root, Clock.systemUTC());
     assumeThat(filesystem.ignoresLetterCase()).as("needs a case-insensitive volume").isTrue();
     assertThatThrownBy(
-            () -> new ArchiveStoreStartupProbe(filesystem, false, "Acme", Mode.LIVE)
-                .afterPropertiesSet())
+            () ->
+                new ArchiveStoreStartupProbe(filesystem, false, "Acme", Mode.LIVE)
+                    .afterPropertiesSet())
         .as("precondition: the bare store is refused")
         .isInstanceOf(EInvoiceException.class);
 
     assertThatThrownBy(
-            () -> new ArchiveStoreStartupProbe(new Counting(filesystem), false, "Acme", Mode.LIVE)
-                .afterPropertiesSet())
+            () ->
+                new ArchiveStoreStartupProbe(new Counting(filesystem), false, "Acme", Mode.LIVE)
+                    .afterPropertiesSet())
         .isInstanceOfSatisfying(
             EInvoiceException.class,
-            e -> org.assertj.core.api.Assertions.assertThat(e.code())
-                .isEqualTo(ErrorCodes.ARCHIVE_SELLER_CASE));
+            e ->
+                org.assertj.core.api.Assertions.assertThat(e.code())
+                    .isEqualTo(ErrorCodes.ARCHIVE_SELLER_CASE));
   }
 }

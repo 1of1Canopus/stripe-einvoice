@@ -20,13 +20,13 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 /**
  * Security review of PR 57, pass 1 on 1ef0995: D-PR57-5. The S3 store lists without {@code
- * encoding-type=url}. AWS states that a {@code ListObjectsV2} "200 OK response can contain valid
- * or invalid XML" and that "the XML 1.0 parser can't parse certain characters, such as characters
- * with an ASCII value from 0 to 10"; {@code encoding-type=url} is the documented way to receive
- * such keys. Without it, a bucket writer's key name either fails the parse on every pass ({@code
- * DEI-241}, the walk stopped for ever) or loses a character (XML end-of-line handling turns CR
- * into LF, so {@code INV-\r} and {@code INV-\n} become one key and the order guard refuses the
- * listing with {@code DEI-284} on every pass). The D1 invariant says no name can stop the walk.
+ * encoding-type=url}. AWS states that a {@code ListObjectsV2} "200 OK response can contain valid or
+ * invalid XML" and that "the XML 1.0 parser can't parse certain characters, such as characters with
+ * an ASCII value from 0 to 10"; {@code encoding-type=url} is the documented way to receive such
+ * keys. Without it, a bucket writer's key name either fails the parse on every pass ({@code
+ * DEI-241}, the walk stopped for ever) or loses a character (XML end-of-line handling turns CR into
+ * LF, so {@code INV-\r} and {@code INV-\n} become one key and the order guard refuses the listing
+ * with {@code DEI-284} on every pass). The D1 invariant says no name can stop the walk.
  */
 class CipherProbePr57S3Test {
 
@@ -102,8 +102,7 @@ class CipherProbePr57S3Test {
     S3Client client = S3MockSupport.client();
     String bucket = "names-" + System.nanoTime();
     client.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
-    for (String key :
-        new String[] {"live/acme/2026/INV-\u0001.xml", "live/acme/2026/later.xml"}) {
+    for (String key : new String[] {"live/acme/2026/INV-\u0001.xml", "live/acme/2026/later.xml"}) {
       client.putObject(
           PutObjectRequest.builder().bucket(bucket).key(key).build(), RequestBody.fromString("x"));
     }
