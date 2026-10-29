@@ -137,7 +137,10 @@ All notable changes to this project are documented here. The format follows
   this seller has issued documents, move the archive to a case-sensitive volume and keep the seller
   id. Only a seller with no issued documents may change its id to lower case: numbering is per
   seller id, so `Acme` restarting as `acme` would issue `INV-2026-000001` a second time. The probe
-  tests the archive root only; case folding set on a folder below it is not detected.
+  tests the archive root only; case folding set on a folder below it is not detected. The rule is
+  in `FilesystemArchiveStore` itself: `putIfAbsent` and `listAfter` refuse such a seller, so a store
+  wrapped by the host, or built without the starter, is refused too (D-PR57-6). At startup the
+  starter lists the seller folder once, with a limit of 1, through whatever wraps the store.
 - **BREAKING CHANGE: an S3 directory bucket is refused** when `S3ArchiveStore` is built
   (`DEI-284`): a name ending in `--x-s3`, or `--xa--s3` for an access point. Its listing has no
   order and no start-after. The name check is a convenience; the walk's order guard is the control.
@@ -276,13 +279,26 @@ All notable changes to this project are documented here. The format follows
     `.einvoice-<digits>.part`, a regular file, changed within the last hour and not in the future.
     Up to 0.1.x any path with a `/.einvoice-` element was hidden. A name that does not decode (Linux
     accepts any bytes) is listed as `<path>#inode:<file key>`, so two such names are two orphans.
+  - No entry a volume writer creates stops the filesystem walk (D-PR57-2). An entry below the
+    seller folder that cannot be read or entered (a folder with mode `000`, a tree deeper than the
+    path limit) is listed as `<path>#unlistable` and reported as an orphan; one WARN gives the
+    count. Only a failure on the archive root or the seller folder fails the listing.
+  - No listed key is longer than 4,096 UTF-8 bytes (`ArchiveListing.MAX_KEY_BYTES`, the cursor's
+    bound too). The filesystem store cuts a longer name at a code point boundary and keeps its
+    `#inode:` or `#unreadable-name` suffix (D-PR57-3). Example: six 255-byte names of `\xff`
+    decode to about 4.6 KB and used to stop the walk with `DEI-284`.
+  - The S3 store asks for `encoding-type=url` on every listing (D-PR57-5). A key with a control
+    character such as `\x01` failed the XML parse on every pass, and `INV-\r.xml` and `INV-\n.xml`
+    arrived as one key; both are now listed as written.
   - A cycle completes only on the store's own end-of-folder answer, on the same store. An empty
     listing while an issued row recorded a key is `DEI-241` (an unmounted volume), never a complete
-    cycle. A changed store, root, bucket or prefix starts a new cycle.
+    cycle. An empty end after a position that is not empty is never a completion either: the walk
+    goes back to the start, and the cycle keeps its start time (D-PR57-4). A changed store, root,
+    bucket or prefix starts a new cycle.
   - The orphan check no longer waits for the series read: a failed series read does not stop it.
   - `DEI-283` (`RECON_ORPHAN_CYCLE_STALE`) when no cycle completed within `orphan-cycle-alert`
     (7 days by default), counted from the start of the cycle, so at the earliest 7 days after the
-    upgrade.
+    upgrade. It holds for every cycle: each completion starts the next one (D-PR57-1).
 
   **Upgrade note.** 0.1.x left false `DEI-272` findings open (example 1), and findings never close by
   themselves. This lists the open ones whose subject a row now records:
@@ -299,6 +315,14 @@ All notable changes to this project are documented here. The format follows
   automatically. The schema upgrade builds the index `einvoice_issuance_archive_key` inside its
   transaction, which blocks writes to `einvoice_issuance` while it runs; on a large table, upgrade
   in a quiet window.
+
+  **Upgrade note, archive listing.** (1) The S3 store now sends `encoding-type=url` on every
+  `ListObjectsV2` request. AWS S3 supports it; an S3-compatible server that does not will fail the
+  listing (`DEI-241`) rather than return keys it cannot carry. (2) Startup lists the seller folder
+  once, so the archive credentials need list permission (`s3:ListBucket` on the prefix) even with
+  `einvoice.reconcile.enabled=false`; on a filesystem archive that is one walk of the seller folder
+  per start. (3) Entries the filesystem walk cannot read now appear as `DEI-272` findings with a
+  subject ending in `#unlistable`; they no longer fail the check with `DEI-241`.
 
 - **An archive object at a burned or voided number is reported (D-RTR-4).** A PUT can time out on
   the client and complete on the store after the number was burned by a resumed run or voided by an

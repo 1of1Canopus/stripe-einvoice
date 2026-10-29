@@ -178,9 +178,11 @@ module is where that is set out.
   document. (3) Case folding set on a folder below the archive root (ext4 `casefold`, the Windows
   per-folder flag) is not detected; the startup probe tests the root. (4) The S3 directory bucket
   refusal reads the bucket name; an alias or a proxy hides it, and the per-pass order guard
-  (`DEI-284`) is what catches such a store. (5) A folder tree deeper than the operating system's
-  path limit makes the filesystem walk fail on every pass (`DEI-241`, then `DEI-283`): loud, not
-  silent, and the keys after it wait until the tree is removed.
+  (`DEI-284`) is what catches such a store. No name or entry a volume or bucket writer creates
+  stops the walk: an entry the filesystem walk cannot read or enter (a folder with mode `000`, a
+  tree deeper than the path limit) is listed as `<path>#unlistable` and reported; a key longer
+  than 4,096 UTF-8 bytes is cut and marked; S3 keys are listed URL-encoded, so a control
+  character cannot break the XML answer. `DEI-283` holds for every cycle, not only the first.
 - **Invoice dates ran backwards inside a series in 0.1.x.** Up to 0.1.x an invoice was dated by
   Stripe's finalisation time and numbered when its work reached the allocator, so a late webhook,
   a retry, a park, a reprocess or the reconciliation sweep could give an older date to a later
