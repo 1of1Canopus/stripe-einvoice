@@ -35,6 +35,7 @@ public final class ReservedErrorCodes {
   private static final String MARKER = "design: archive root marker (D-PR49-3)";
   private static final String DISPOSED = "design: burned number archive orphan (D-RTR-4)";
   private static final String RUNNING_LIMIT = "design: running row time limit (QUESTIONS 29)";
+  private static final String ORPHAN_WINDOW = "design: orphan check window (D-PR52-3)";
 
   /** Code to reservation. */
   public static final Map<String, Reservation> RESERVED =
@@ -60,6 +61,9 @@ public final class ReservedErrorCodes {
           entry("DEI-266", new Reservation("INBOUND_CEILING_REACHED", RUNNING_LIMIT)),
           entry("DEI-281", new Reservation("RECON_OBJECT_FOR_DISPOSED_NUMBER", DISPOSED)),
           entry("DEI-282", new Reservation("RECON_STUCK_INBOUND", RUNNING_LIMIT)),
+          entry("DEI-283", new Reservation("RECON_ORPHAN_CYCLE_STALE", ORPHAN_WINDOW)),
+          entry("DEI-284", new Reservation("ARCHIVE_LISTING_UNORDERED", ORPHAN_WINDOW)),
+          entry("DEI-285", new Reservation("ARCHIVE_SELLER_CASE", ORPHAN_WINDOW)),
           pro("DEI-600", "CREDIT_TARGET_NOT_ISSUED"),
           pro("DEI-601", "CREDIT_TARGET_UNKNOWN"),
           pro("DEI-602", "CREDIT_TARGET_TAMPERED"),

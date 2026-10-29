@@ -998,6 +998,35 @@ public class EInvoiceProperties {
     @Max(10_000)
     private int pageSize = 500;
 
+    /**
+     * How many pages of {@code page-size} archive keys the orphan walk examines per pass
+     * (D-PR52-3). With the defaults, 2,000 keys per pass, 192,000 a day at a 15-minute interval. A
+     * larger archive raises it; {@code DEI-283} says when a cycle takes longer than {@link
+     * #orphanCycleAlert}.
+     */
+    @Min(1)
+    @Max(100)
+    private int orphanPages = 4;
+
+    /** How long one walk of the whole seller folder may take before {@code DEI-283}. */
+    @NotNull private Duration orphanCycleAlert = Duration.ofDays(7);
+
+    public int getOrphanPages() {
+      return orphanPages;
+    }
+
+    public void setOrphanPages(int orphanPages) {
+      this.orphanPages = orphanPages;
+    }
+
+    public Duration getOrphanCycleAlert() {
+      return orphanCycleAlert;
+    }
+
+    public void setOrphanCycleAlert(Duration orphanCycleAlert) {
+      this.orphanCycleAlert = orphanCycleAlert;
+    }
+
     public boolean isEnabled() {
       return enabled;
     }

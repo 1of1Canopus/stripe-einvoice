@@ -241,8 +241,9 @@ final class ArchiveRetryFixture {
       }
 
       @Override
-      public java.util.List<String> list(String prefix, int limit) {
-        return inner.list(prefix, limit);
+      public com.housedevinci.einvoice.application.ArchiveListing listAfter(
+          String prefix, String startAfter, int limit) {
+        return inner.listAfter(prefix, startAfter, limit);
       }
 
       @Override
@@ -287,8 +288,9 @@ final class ArchiveRetryFixture {
       }
 
       @Override
-      public java.util.List<String> list(String prefix, int limit) {
-        return inner.list(prefix, limit);
+      public com.housedevinci.einvoice.application.ArchiveListing listAfter(
+          String prefix, String startAfter, int limit) {
+        return inner.listAfter(prefix, startAfter, limit);
       }
 
       @Override

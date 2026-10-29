@@ -6,6 +6,7 @@ import com.housedevinci.einvoice.domain.Mode;
 import com.housedevinci.einvoice.domain.SeriesKey;
 import com.housedevinci.einvoice.domain.SeriesReport;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -69,4 +70,18 @@ public interface IssuanceReader {
    * {@code VOID_UNUSED}: the number will never carry a document.
    */
   List<Issuance> disposedWithKey(String sellerId, Mode mode, int limit);
+
+  /**
+   * Which of {@code keys} a row of this seller and mode records as its archive key, in any series,
+   * any year and any state (D-PR52-3). The orphan walk asks this once per page of listed keys: a
+   * listed key no row records is an orphan.
+   *
+   * <p>Exact by construction: the archive key of a row is write-once, so a row never stops naming a
+   * key it once named. Example: a document issued in January 2026 is still recorded when the pass
+   * of March 2027 lists it, however many newer rows came after it.
+   *
+   * @param keys at most one page of valid archive keys
+   * @return the subset of {@code keys} some row records; empty when none
+   */
+  Set<String> knownKeys(String sellerId, Mode mode, Collection<String> keys);
 }

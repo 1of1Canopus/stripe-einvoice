@@ -165,6 +165,11 @@ the series report. The finding repeats on every pass while the row is among the 
 `page-size` burned or voided numbers that recorded a key (500 by default), in any year. Issued
 numbers do not push it out: only 500 burned or voided numbers with a key, numbered after it, do.
 
+The check for archive objects that no row predicted (`DEI-272`) walks the seller folder a page at a
+time and saves where it stopped, so every key is examined within one cycle, in any year. With the
+defaults a pass examines 2,000 keys; `DEI-283` reports a cycle that takes longer than 7 days. See
+the docs page, "Reconciliation, health and findings", for the cost on a filesystem and on S3.
+
 ### Database connections: one session per connection
 
 Each issuance row is held under a session-level PostgreSQL advisory lock from the moment its

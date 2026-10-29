@@ -2144,6 +2144,44 @@ public final class JdbcIssuanceStore
         });
   }
 
+  /**
+   * D-PR52-3: the orphan walk's exact lookup. Seller and mode in the predicate, any series, any
+   * year, any state. The {@code archive_key <> ''} term is load-bearing (C1): it lets the planner
+   * prove the condition of the partial index {@code einvoice_issuance_archive_key}, so a page of
+   * keys is an index-only scan in the generic plan and a bitmap index scan in a custom one. Without
+   * it, PostgreSQL proves a partial-index condition from {@code = ANY(array)} only for constant
+   * arrays of at most 100 elements, and every page reads the whole table.
+   */
+  static final String KNOWN_KEYS =
+      "SELECT archive_key FROM einvoice_issuance"
+          + " WHERE seller_id = ? AND mode = ? AND archive_key <> '' AND archive_key = ANY(?)";
+
+  @Override
+  public java.util.Set<String> knownKeys(
+      String sellerId, Mode mode, java.util.Collection<String> keys) {
+    Objects.requireNonNull(sellerId, "sellerId");
+    Objects.requireNonNull(mode, "mode");
+    Objects.requireNonNull(keys, "keys");
+    if (keys.isEmpty()) {
+      return java.util.Set.of();
+    }
+    return unitOfWork.inReadUnit(
+        unit -> {
+          java.util.Set<String> known = new java.util.HashSet<>();
+          try (PreparedStatement ps = unit.connection().prepareStatement(KNOWN_KEYS)) {
+            ps.setString(1, sellerId);
+            ps.setString(2, mode.wire());
+            ps.setArray(3, unit.connection().createArrayOf("text", keys.toArray(new String[0])));
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                known.add(rs.getString(1));
+              }
+            }
+          }
+          return java.util.Set.copyOf(known);
+        });
+  }
+
   @Override
   public SeriesReport seriesReport(SeriesKey key) {
     return unitOfWork.inReadUnit(

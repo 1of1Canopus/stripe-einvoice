@@ -13,7 +13,6 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.ZoneOffset;
-import java.util.List;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -93,6 +92,7 @@ class CipherProbePr51eTest {
             new DownArchive(),
             harness.findings(),
             harness.reprocessLedger(),
+            harness.orphanCursors(),
             Clock.fixed(harness.now(), ZoneOffset.UTC),
             SETTINGS,
             harness.unitOfWork().configuration());
@@ -155,7 +155,8 @@ class CipherProbePr51eTest {
     }
 
     @Override
-    public List<String> list(String prefix, int limit) {
+    public com.housedevinci.einvoice.application.ArchiveListing listAfter(
+        String prefix, String startAfter, int limit) {
       throw down();
     }
 

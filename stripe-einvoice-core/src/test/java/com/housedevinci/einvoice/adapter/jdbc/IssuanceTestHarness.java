@@ -70,6 +70,7 @@ public final class IssuanceTestHarness {
     this.dataSource = dataSource;
     this.findings = new JdbcFindingStore(JdbcUnitOfWork.ownConnection(dataSource));
     this.reprocessLedger = new JdbcReprocessLedger(JdbcUnitOfWork.ownConnection(dataSource));
+    this.orphanCursors = new JdbcOrphanCursorStore(JdbcUnitOfWork.ownConnection(dataSource));
     this.preflightSupport =
         new com.housedevinci.einvoice.application.PreflightSupport(findings, clock);
     this.validator = validator;
@@ -489,6 +490,7 @@ public final class IssuanceTestHarness {
   private final JdbcFindingStore findings;
 
   private final JdbcReprocessLedger reprocessLedger;
+  private final JdbcOrphanCursorStore orphanCursors;
 
   /** The durable record of every privileged re-open, over this harness's own database. */
   public JdbcReprocessLedger reprocessLedger() {
@@ -525,6 +527,11 @@ public final class IssuanceTestHarness {
     return preflightSupport;
   }
 
+  /** The orphan walk's saved positions, on this harness's database. */
+  public JdbcOrphanCursorStore orphanCursors() {
+    return orphanCursors;
+  }
+
   public JdbcFindingStore findings() {
     return findings;
   }
@@ -539,6 +546,7 @@ public final class IssuanceTestHarness {
         archive,
         findings,
         reprocessLedger,
+        orphanCursors,
         clock,
         settings,
         unitOfWork().configuration());
@@ -555,6 +563,7 @@ public final class IssuanceTestHarness {
         archiveStore,
         findings,
         reprocessLedger,
+        orphanCursors,
         clock,
         settings,
         unitOfWork().configuration());
@@ -572,6 +581,7 @@ public final class IssuanceTestHarness {
         archiveStore,
         findings,
         reprocessLedger,
+        orphanCursors,
         clock,
         settings,
         unitOfWork().configuration());

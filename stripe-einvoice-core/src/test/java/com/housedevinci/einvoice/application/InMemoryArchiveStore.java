@@ -106,15 +106,25 @@ public final class InMemoryArchiveStore implements ArchiveStore {
     return bytes == null ? Optional.empty() : Optional.of(bytes.clone());
   }
 
+  /**
+   * Byte-prefix listing in UTF-8 byte order, as ListObjectsV2 does without a delimiter: {@code
+   * live/acme} also matches {@code live/acme2/...}, which is why the walk lists {@code live/acme/}.
+   */
   @Override
-  public List<String> list(String prefix, int limit) {
-    List<String> keys = new ArrayList<>();
+  public ArchiveListing listAfter(String prefix, String startAfter, int limit) {
+    String from = prefix == null ? "" : prefix;
+    String after = startAfter == null ? "" : startAfter;
+    List<String> matching = new ArrayList<>();
     for (String key : objects.keySet()) {
-      if (key.startsWith(prefix == null ? "" : prefix) && keys.size() < limit) {
-        keys.add(key);
+      if (key.startsWith(from) && ArchiveListing.UTF8_ORDER.compare(key, after) > 0) {
+        matching.add(key);
       }
     }
-    return keys;
+    matching.sort(ArchiveListing.UTF8_ORDER);
+    int bound = Math.max(0, limit);
+    return matching.size() <= bound
+        ? new ArchiveListing(matching, true)
+        : new ArchiveListing(matching.subList(0, bound), false);
   }
 
   @Override

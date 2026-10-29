@@ -385,6 +385,36 @@ record, an archive object no row predicted, a number open past `einvoice.issuanc
 an archive object at the key of a burned or voided number (`DEI-281`, plus `DEI-275` when its bytes
 differ from the row's hash). It **alerts and never repairs**.
 
+**The orphan walk.** The check for archive objects no row predicted (`DEI-272`) walks the seller
+folder `<mode>/<seller>/` and saves where it stopped, one position per seller and mode. Each pass
+lists `orphan-pages x page-size` keys after that position (2,000 by default) and asks the database
+which of them a row records, in any year and any state. Every key is examined within one cycle,
+one walk of the whole folder. Example: 100,000 objects, 2,000 keys a pass, a pass every 15 minutes:
+a cycle takes 50 passes, about 12.5 hours, and a new orphan written behind the position waits at
+most that long. `DEI-283` says when no cycle completed within `orphan-cycle-alert`: raise
+`orphan-pages`, or find why the listing fails; it holds for every cycle, since each completion
+starts the next one. A listing out of UTF-8 byte order is `DEI-284`; an empty listing for a seller
+with issued documents is `DEI-241` (an unmounted volume). A cycle completes only on a listing that
+holds a key, or at the start of the folder. On an empty end at a non-empty position, the walk lists
+the seller folder once from the start. If that listing holds a key, the cycle completes. If it holds
+none, the walk rewinds to the start with no completion, because keys it had not reached are gone or
+the volume is. A name that is not a valid archive key is reported under a bounded subject (the name escaped, cut at 200
+characters, then `#sha256:` and its hash).
+
+Cost. On S3 a pass is one `ListObjectsV2` loop of at most `orphan-pages x page-size / 1000` calls.
+On a filesystem a pass walks the whole seller folder once, whatever the page, so its cost grows
+with the folder. The filesystem store hides only its own temporary file of the last hour
+(`.einvoice-<digits>.part`); a name that does not decode is listed as `<path>#inode:<file key>`,
+which `find -inum` locates. An entry the walk cannot read or enter (a folder with mode `000`, a
+tree deeper than the path limit) is listed as `<path>#unlistable` and reported, and the walk goes
+on. No listed key is longer than 4,096 UTF-8 bytes: a longer name is cut and keeps its suffix. A seller id with upper-case letters is refused at startup on a
+filesystem archive that ignores letter case (`DEI-285`), by the store itself, so a wrapped store is
+refused too; the probe tests the archive root only. An
+S3 listing asks for URL-encoded keys (`encoding-type=url`), so a key with a control character
+or a carriage return is listed as written, never a failed parse or two keys merged into one. An
+S3 directory bucket (`--x-s3`, `--xa--s3`) is refused: its listing has no order. The name check is
+a convenience; the order guard is the control.
+
 Two signals, and the difference matters:
 
 - **Health** (`/actuator/health/einvoice`) carries operational conditions only - a silent sweeper, a
@@ -415,6 +445,8 @@ Two signals, and the difference matters:
 | `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision. A row whose invoice holds an open number (numbered, archiving or failed archive) is kept past it until the number resolves |
 | `einvoice.reconcile.interval` / `.window` / `.grace` | `15m` / `2d` / `15m` | `enabled=false` removes the only watcher there is |
 | `einvoice.reconcile.drift-sample` | `10` | `0` stops re-hashing archived documents |
+| `einvoice.reconcile.orphan-pages` | `4` | 1 to 100; fewer pages make a cycle longer |
+| `einvoice.reconcile.orphan-cycle-alert` | `7d` | a longer alert reports a stalled walk later |
 | `einvoice.numbering.closed-year-cutoff` | unset | setting it refuses invoices whose supply date falls in a year closed longer ago than this |
 | `einvoice.rule-pack-version` | `unversioned` | - |
 

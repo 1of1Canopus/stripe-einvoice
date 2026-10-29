@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The orphan walk's properties and codes (D-PR52-3).** `einvoice.reconcile.orphan-pages`
+  (default `4`, from 1 to 100) and `einvoice.reconcile.orphan-cycle-alert` (default `P7D`). New codes
+  `DEI-283 RECON_ORPHAN_CYCLE_STALE`, `DEI-284 ARCHIVE_LISTING_UNORDERED`, `DEI-285
+  ARCHIVE_SELLER_CASE`. New table `einvoice_orphan_cursor` (the runtime role needs `SELECT, INSERT,
+  UPDATE`, see `docs/schema-grants.sql`) and partial index `einvoice_issuance_archive_key`.
 - **No inbound event is due for ever (QUESTIONS 29).** A row that stays running without progress
   past a limit stops being due. It is moved to the new terminal state `EXPIRED` with `DEI-266`
   (`INBOUND_CEILING_REACHED`), and the finding `DEI-282` (`RECON_STUCK_INBOUND`) is raised once on
@@ -114,6 +119,37 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **BREAKING CHANGE: `ArchiveStore.listAfter` and `IssuanceReader.knownKeys` (D-PR52-3).** Two new
+  abstract methods for implementers. `listAfter(prefix, startAfter, limit)` returns an
+  `ArchiveListing(keys, endOfFolder)`: keys strictly after `startAfter`, in UTF-8 byte order, and
+  `endOfFolder` only when the store says there are no more. It has no default on purpose: a
+  default that reads the whole folder on every pass is the cost the walk exists to avoid. `list`
+  becomes a default method that reads one `listAfter` page. `knownKeys(seller, mode, keys)` returns
+  which of the keys a row of that seller and mode records.
+- **BREAKING CHANGE: `ReconciliationSweep` takes an `OrphanCursorStore`** (the starter wires
+  `JdbcOrphanCursorStore`), after the reprocess ledger. `ReconciliationSweep.Settings` gains
+  `orphanPages` and `orphanCycleAlert` (the five-argument constructor is kept, with the defaults).
+  `ReconciliationSweep.Result` gains `orphanCycleStale` (in `total()`) and `orphanKeysExamined`
+  (not in `total()`: a count of work).
+- **BREAKING CHANGE: a seller id with upper-case letters on a filesystem archive that ignores
+  letter case is refused at startup** (`DEI-285`, no opt-out). On macOS and Windows volumes,
+  sellers `Acme` and `acme` share one folder, and each would be shown the other's documents. If
+  this seller has issued documents, move the archive to a case-sensitive volume and keep the seller
+  id. Only a seller with no issued documents may change its id to lower case: numbering is per
+  seller id, so `Acme` restarting as `acme` would issue `INV-2026-000001` a second time. The probe
+  tests the archive root only; case folding set on a folder below it is not detected. The rule is
+  in `FilesystemArchiveStore` itself: `putIfAbsent` and `listAfter` refuse such a seller, so a store
+  wrapped by the host, or built without the starter, is refused too (D-PR57-6). At startup the
+  starter lists the seller folder once, with a limit of 1, through whatever wraps the store.
+- **BREAKING CHANGE: an S3 directory bucket is refused** when `S3ArchiveStore` is built
+  (`DEI-284`): a name ending in `--x-s3`, or `--xa--s3` for an access point. Its listing has no
+  order and no start-after. The name check is a convenience; the walk's order guard is the control.
+- **A seller id `.` is refused** by `ArchiveKey`, which now refuses any element equal to `.`
+  (`ArchiveKey.sellerFolder` builds the walk's folder from the same checks), and at startup.
+- **`FilesystemArchiveStore(Path, Clock)`.** The starter passes its clock. The one-argument
+  constructor is kept and hides no temporary file, since it cannot tell a write in flight from a
+  leftover.
+
 - **`InboundEventStore.due` takes the running-row limit (QUESTIONS 29).** The port gains
   `stranded(now, limit, pageSize)` and `expire(row, finding, now)`, and `due` gains a
   `RunningLimit` argument; `IssuanceUnitOfWork.due` and the `IssuanceSweeper` constructor change to
@@ -218,6 +254,77 @@ All notable changes to this project are documented here. The format follows
   remain and mean an invoice.
 
 ### Fixed
+
+- **The orphan check examines every key, against every row (D-PR52-3, D-PR51-5).** Up to 0.1.x
+  the check compared the newest `page-size` rows of the window's series years with the first
+  `page-size` keys of the seller folder, which are the oldest ones. Three examples of what went
+  wrong. (1) One invoice issued in January 2026: on 10 March 2027 the pass read the 2027 series
+  only, and reported the 2026 document as an orphan (`DEI-272`) on every pass, for ever. (2) A seller
+  with 800 documents: an object written as `live/acme/2026/INV-2026-999999-...xml` sorted after the
+  first 500 keys and was never reported. (3) The listing had no trailing slash: seller `acme` also
+  listed `live/acme2/...` and reported another seller's number and hash as its own orphan.
+  Now the check walks the seller folder (`<mode>/<seller>/`, with the slash) and saves where it
+  stopped, one position per seller and mode (`einvoice_orphan_cursor`). Each pass makes one
+  listing of `orphan-pages x page-size` keys after the saved position (2,000 by default) and asks
+  the database, once per page, which of those keys a row records, in any year and any state. A key
+  no row records is `DEI-272`. The findings are written before the position moves. Every key is
+  examined within one cycle (one walk of the whole folder); with the defaults and a 15-minute
+  interval that is 192,000 keys a day. Rules that come with it:
+  - The listing must be in strict UTF-8 byte order, after the saved position and inside the
+    folder; otherwise the check fails with the new code `DEI-284` and nothing moves.
+  - A listed name that is not a valid archive key (other characters, over 512 characters) is an
+    orphan with no lookup, under a bounded subject: the name escaped, cut at 200 characters, then
+    `#sha256:` and the hash of the full name. It never stops the walk.
+  - The filesystem store hides only its own write in flight: the last element
+    `.einvoice-<digits>.part`, a regular file, changed within the last hour and not in the future.
+    Up to 0.1.x any path with a `/.einvoice-` element was hidden. A name that does not decode (Linux
+    accepts any bytes) is listed as `<path>#inode:<file key>`, so two such names are two orphans.
+  - No entry a volume writer creates stops the filesystem walk (D-PR57-2). An entry below the
+    seller folder that cannot be read or entered (a folder with mode `000`, a tree deeper than the
+    path limit) is listed as `<path>#unlistable` and reported as an orphan; one WARN gives the
+    count. Only a failure on the archive root or the seller folder fails the listing.
+  - No listed key is longer than 4,096 UTF-8 bytes (`ArchiveListing.MAX_KEY_BYTES`, the cursor's
+    bound too). The filesystem store cuts a longer name at a code point boundary and keeps its
+    `#inode:` or `#unreadable-name` suffix (D-PR57-3). Example: six 255-byte names of `\xff`
+    decode to about 4.6 KB and used to stop the walk with `DEI-284`.
+  - The S3 store asks for `encoding-type=url` on every listing (D-PR57-5). A key with a control
+    character such as `\x01` failed the XML parse on every pass, and `INV-\r.xml` and `INV-\n.xml`
+    arrived as one key; both are now listed as written.
+  - A cycle completes only on the store's own end-of-folder answer, on the same store. An empty
+    listing while an issued row recorded a key is `DEI-241` (an unmounted volume), never a complete
+    cycle. An empty end after a position that is not empty is never a completion on its own: the
+    folder is listed once from the start. A key there completes the cycle, because a store that
+    reports the end one call late gives that answer (D-PR57-9). No key there rewinds the walk to the
+    start, and the cycle keeps its start time (D-PR57-4). A changed store, root, bucket or prefix
+    starts a new cycle.
+  - The orphan check no longer waits for the series read: a failed series read does not stop it.
+  - `DEI-283` (`RECON_ORPHAN_CYCLE_STALE`) when no cycle completed within `orphan-cycle-alert`
+    (7 days by default), counted from the start of the cycle, so at the earliest 7 days after the
+    upgrade. It holds for every cycle: each completion starts the next one (D-PR57-1).
+
+  **Upgrade note.** 0.1.x left false `DEI-272` findings open (example 1), and findings never close by
+  themselves. This lists the open ones whose subject a row now records:
+
+  ```sql
+  SELECT f.subject_id FROM einvoice_finding f
+   WHERE f.code = 'DEI-272' AND f.acknowledged_at IS NULL
+     AND EXISTS (SELECT 1 FROM einvoice_issuance i
+                  WHERE i.seller_id = f.seller_id AND i.mode = f.mode
+                    AND i.archive_key = f.subject_id);
+  ```
+
+  Acknowledge them with `IssuanceFindingService`, with a reason. Nothing is acknowledged
+  automatically. The schema upgrade builds the index `einvoice_issuance_archive_key` inside its
+  transaction, which blocks writes to `einvoice_issuance` while it runs; on a large table, upgrade
+  in a quiet window.
+
+  **Upgrade note, archive listing.** (1) The S3 store now sends `encoding-type=url` on every
+  `ListObjectsV2` request. AWS S3 supports it; an S3-compatible server that does not will fail the
+  listing (`DEI-241`) rather than return keys it cannot carry. (2) Startup lists the seller folder
+  once, so the archive credentials need list permission (`s3:ListBucket` on the prefix) even with
+  `einvoice.reconcile.enabled=false`; on a filesystem archive that is one walk of the seller folder
+  per start. (3) Entries the filesystem walk cannot read now appear as `DEI-272` findings with a
+  subject ending in `#unlistable`; they no longer fail the check with `DEI-241`.
 
 - **An archive object at a burned or voided number is reported (D-RTR-4).** A PUT can time out on
   the client and complete on the store after the number was burned by a resumed run or voided by an

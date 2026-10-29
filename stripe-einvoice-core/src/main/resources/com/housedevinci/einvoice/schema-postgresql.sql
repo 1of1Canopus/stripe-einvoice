@@ -818,6 +818,40 @@ END $$;
 
 
 -- ---------------------------------------------------------------------------
+-- The orphan walk (D-PR52-3). The reconciliation's archive-to-us check walks the seller folder a
+-- bounded page at a time and saves where it stopped, one row per seller and mode, so every key is
+-- examined within one cycle instead of only the first page. Working state, not evidence: the
+-- runtime role reads, inserts and updates it. A role that can write it can make the walk skip
+-- keys; the same role can insert an issuance row that names a stray key, which hides it more
+-- simply, so the check's adversary is a writer of the volume or bucket with no database access.
+--
+-- cursor_key holds the raw UTF-8 bytes of the last key examined ('' = start of the folder): text
+-- refuses a NUL, and an S3 key may carry any code point. 4096 bytes covers an S3 key (1024) and a
+-- filesystem path (PATH_MAX). store_prefix is the SHA-256 of the store's describe() line: another
+-- root, bucket or prefix starts a new cycle. revision is the compare-and-set value.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS einvoice_orphan_cursor (
+  seller_id              varchar(64) NOT NULL,
+  mode                   varchar(4)  NOT NULL,
+  cursor_key             bytea       NOT NULL,
+  store_prefix           char(64)    NOT NULL,
+  cycle_started_at       timestamptz NOT NULL,
+  last_complete_cycle_at timestamptz,
+  last_cycle_keys        bigint      NOT NULL DEFAULT 0,
+  keys_this_cycle        bigint      NOT NULL DEFAULT 0,
+  revision               bigint      NOT NULL DEFAULT 0,
+  PRIMARY KEY (seller_id, mode),
+  CONSTRAINT einvoice_orphan_cursor_key_bound CHECK (octet_length(cursor_key) <= 4096)
+);
+
+-- The orphan walk's exact lookup: "which of these listed keys does a row of this seller and mode
+-- record", any year, any state. Partial on archive_key <> '' so it holds only rows with a key; the
+-- query repeats that term so the planner can use it (C1). Built inside the upgrade transaction,
+-- which blocks writes to einvoice_issuance while it runs (the CHANGELOG says so).
+CREATE INDEX IF NOT EXISTS einvoice_issuance_archive_key
+  ON einvoice_issuance (seller_id, mode, archive_key) WHERE archive_key <> '';
+
+-- ---------------------------------------------------------------------------
 -- Backfill of last_issue_date on an upgraded installation. A series that already numbered rows
 -- gets the latest BT-2 of its rows, as a calendar date in the seller's tax zone. Only the caller
 -- knows that zone: the starter sets the session setting einvoice.tax_zone from
@@ -980,6 +1014,23 @@ BEGIN
         missing := format('the unique index %s', c.name);
       END IF;
     END LOOP;
+  END IF;
+
+  -- the orphan walk's table, its key bound and its lookup index (D-PR52-3)
+  IF missing IS NULL AND to_regclass(quote_ident(current_schema()) || '.einvoice_orphan_cursor') IS NULL THEN
+    missing := 'the table einvoice_orphan_cursor';
+  END IF;
+  IF missing IS NULL AND NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+       WHERE conname = 'einvoice_orphan_cursor_key_bound' AND contype = 'c' AND convalidated
+         AND conrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_orphan_cursor')) THEN
+    missing := 'the constraint einvoice_orphan_cursor_key_bound';
+  END IF;
+  IF missing IS NULL AND NOT EXISTS (
+      SELECT 1 FROM pg_index x
+       WHERE x.indexrelid = to_regclass(quote_ident(current_schema()) || '.einvoice_issuance_archive_key')
+         AND x.indisvalid) THEN
+    missing := 'the index einvoice_issuance_archive_key';
   END IF;
 
   -- every guard trigger exists, is on, and calls a function that pins its search path (D-A1-C01,

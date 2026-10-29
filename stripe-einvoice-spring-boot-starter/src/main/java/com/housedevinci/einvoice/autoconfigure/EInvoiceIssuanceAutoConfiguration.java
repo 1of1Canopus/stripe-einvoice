@@ -5,6 +5,7 @@ import com.housedevinci.einvoice.adapter.jdbc.JdbcFindingStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcInboundEventStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcInboundRunLock;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcIssuanceStore;
+import com.housedevinci.einvoice.adapter.jdbc.JdbcOrphanCursorStore;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcReprocessLedger;
 import com.housedevinci.einvoice.adapter.jdbc.JdbcUnitOfWork;
 import com.housedevinci.einvoice.adapter.validation.UblDocumentDates;
@@ -17,6 +18,7 @@ import com.housedevinci.einvoice.application.InboundRunLock;
 import com.housedevinci.einvoice.application.IssuanceChainVerifier;
 import com.housedevinci.einvoice.application.IssuanceReprocess;
 import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
+import com.housedevinci.einvoice.application.OrphanCursorStore;
 import com.housedevinci.einvoice.application.PreflightSupport;
 import com.housedevinci.einvoice.application.ReconciliationSweep;
 import com.housedevinci.einvoice.application.ReprocessLedger;
@@ -255,7 +257,7 @@ public class EInvoiceIssuanceAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
-  public ArchiveStore einvoiceArchiveStore(EInvoiceProperties properties) {
+  public ArchiveStore einvoiceArchiveStore(EInvoiceProperties properties, Clock clock) {
     EInvoiceProperties.Archive archive = properties.getArchive();
     ArchiveStore store;
     if ("filesystem".equalsIgnoreCase(archive.getType())) {
@@ -265,7 +267,7 @@ public class EInvoiceIssuanceAutoConfiguration {
             "einvoice.archive.root is required for einvoice.archive.type=filesystem: the legal"
                 + " originals have to live somewhere the operator chose deliberately.");
       }
-      store = new FilesystemArchiveStore(Path.of(archive.getRoot()));
+      store = new FilesystemArchiveStore(Path.of(archive.getRoot()), clock);
     } else {
       throw new EInvoiceException(
           ErrorCodes.CONFIG,
@@ -286,7 +288,11 @@ public class EInvoiceIssuanceAutoConfiguration {
   @ConditionalOnMissingBean
   public ArchiveStoreStartupProbe einvoiceArchiveStoreProbe(
       ArchiveStore archive, EInvoiceProperties properties) {
-    return new ArchiveStoreStartupProbe(archive, properties.getArchive().isAllowNonAtomicStore());
+    return new ArchiveStoreStartupProbe(
+        archive,
+        properties.getArchive().isAllowNonAtomicStore(),
+        properties.getSeller().getId(),
+        Mode.of(properties.getMode()));
   }
 
   /**
@@ -427,6 +433,13 @@ public class EInvoiceIssuanceAutoConfiguration {
         properties.getIssuance().getQueueCapacity());
   }
 
+  /** The orphan walk's saved position, one row per seller and mode (D-PR52-3). */
+  @Bean
+  @ConditionalOnMissingBean
+  public OrphanCursorStore einvoiceOrphanCursorStore(JdbcUnitOfWork unitOfWork) {
+    return new JdbcOrphanCursorStore(unitOfWork);
+  }
+
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnBean(IssuanceUnitOfWork.class)
@@ -437,6 +450,7 @@ public class EInvoiceIssuanceAutoConfiguration {
       ArchiveStore archive,
       FindingStore findings,
       ReprocessLedger reprocessLedger,
+      OrphanCursorStore orphanCursors,
       Clock clock,
       EInvoiceProperties properties) {
     // The unit of work's own source: a successful list call counts as an accepted key and re-arms
@@ -448,13 +462,16 @@ public class EInvoiceIssuanceAutoConfiguration {
         archive,
         findings,
         reprocessLedger,
+        orphanCursors,
         clock,
         new ReconciliationSweep.Settings(
             properties.getReconcile().getWindow(),
             properties.getReconcile().getGrace(),
             properties.getIssuance().getAlertAfter(),
             properties.getReconcile().getDriftSample(),
-            properties.getReconcile().getPageSize()),
+            properties.getReconcile().getPageSize(),
+            properties.getReconcile().getOrphanPages(),
+            properties.getReconcile().getOrphanCycleAlert()),
         unitOfWork.configuration());
   }
 

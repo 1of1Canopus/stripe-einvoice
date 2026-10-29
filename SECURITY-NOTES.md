@@ -168,6 +168,21 @@ module is where that is set out.
   WARN. Such rows are rare: a burn after a resumed run, or a void while a PUT was in flight.
   Example: a seller would have to burn or void 500 keyed numbers before an older one stops being
   looked up.
+- **The orphan walk (D-PR52-3).** The check for archive objects no row predicted examines every
+  key within one cycle, against every row of the seller and mode. What it does not cover, stated:
+  (1) the walk's saved position is writable by the runtime role, which can make it skip keys; the
+  same role can insert an issuance row naming a stray key, which hides it more simply, so the
+  check is against a writer of the volume or bucket with no database access. (2) A writer who
+  touches a file named like this store's temporary file (`.einvoice-<digits>.part`) every hour
+  keeps it hidden; that needs live, repeated access, and the module never reads such a file as a
+  document. (3) Case folding set on a folder below the archive root (ext4 `casefold`, the Windows
+  per-folder flag) is not detected; the startup probe tests the root. (4) The S3 directory bucket
+  refusal reads the bucket name; an alias or a proxy hides it, and the per-pass order guard
+  (`DEI-284`) is what catches such a store. No name or entry a volume or bucket writer creates
+  stops the walk: an entry the filesystem walk cannot read or enter (a folder with mode `000`, a
+  tree deeper than the path limit) is listed as `<path>#unlistable` and reported; a key longer
+  than 4,096 UTF-8 bytes is cut and marked; S3 keys are listed URL-encoded, so a control
+  character cannot break the XML answer. `DEI-283` holds for every cycle, not only the first.
 - **Invoice dates ran backwards inside a series in 0.1.x.** Up to 0.1.x an invoice was dated by
   Stripe's finalisation time and numbered when its work reached the allocator, so a late webhook,
   a retry, a park, a reprocess or the reconciliation sweep could give an older date to a later

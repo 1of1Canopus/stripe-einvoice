@@ -6,7 +6,6 @@ import com.housedevinci.einvoice.adapter.jdbc.IssuanceTestHarness;
 import com.housedevinci.einvoice.domain.ArchiveKey;
 import com.housedevinci.einvoice.domain.Issuance;
 import com.housedevinci.einvoice.domain.IssuanceState;
-import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -56,8 +55,9 @@ class CipherProbeArchiveRetryRaceTest {
       }
 
       @Override
-      public List<String> list(String prefix, int limit) {
-        return inner.list(prefix, limit);
+      public com.housedevinci.einvoice.application.ArchiveListing listAfter(
+          String prefix, String startAfter, int limit) {
+        return inner.listAfter(prefix, startAfter, limit);
       }
 
       @Override

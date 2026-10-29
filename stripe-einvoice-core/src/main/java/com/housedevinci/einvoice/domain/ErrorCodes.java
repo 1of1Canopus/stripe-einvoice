@@ -459,6 +459,30 @@ public final class ErrorCodes {
   /** Reconciliation has not completed within two intervals. No result is never "healthy". */
   public static final String RECON_STALE = "DEI-274";
 
+  /**
+   * The orphan walk has not completed a cycle within {@code einvoice.reconcile.orphan-cycle-alert}
+   * (D-PR52-3). A cycle is one walk of the whole seller folder, from the first key to the last. The
+   * clock starts when a cycle starts, so the first finding can come one alert period after the
+   * upgrade, not before. Example: an archive that grows faster than the walk reads it never
+   * completes a cycle; this code says so within a week instead of never. Raise {@code
+   * einvoice.reconcile.orphan-pages}, or find why the listing fails.
+   */
+  public static final String RECON_ORPHAN_CYCLE_STALE = "DEI-283";
+
+  /**
+   * The archive listing is not in strict UTF-8 byte order, starts at or before the saved position,
+   * or holds a key outside the requested folder (D-PR52-3, C5). The orphan walk moves nothing and
+   * completes no cycle. Also the startup refusal of an S3 directory bucket, whose listing has no
+   * order and no start-after.
+   */
+  public static final String ARCHIVE_LISTING_UNORDERED = "DEI-284";
+
+  /**
+   * The seller id has upper-case letters and the filesystem archive ignores letter case (D-PR52-3,
+   * C3). Two seller ids that differ only by case would share one folder. Startup is refused.
+   */
+  public static final String ARCHIVE_SELLER_CASE = "DEI-285";
+
   // -------------------------------------------------------------------------------------------
   // DEI-3xx - the EN 16931 semantic model, the mapper, the UBL writers and the validators.
   // -------------------------------------------------------------------------------------------

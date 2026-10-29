@@ -12,7 +12,6 @@ import java.lang.reflect.Proxy;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.ZoneOffset;
-import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -124,8 +123,10 @@ class CipherProbePr51fTest {
       System.setErr(original);
     }
     String log = captured.toString(java.nio.charset.StandardCharsets.UTF_8);
-    assertThat(log).contains("'archive to us'");
-    assertThat(log).as("the skipped us-to-archive check is named too").contains("'us to archive'");
+    // D-PR52-3, C10: the orphan walk no longer needs the series rows, so it runs; only the
+    // us-to-archive check is skipped, and it is the one the log names (QUESTIONS 61).
+    assertThat(log).as("the skipped us-to-archive check is named").contains("'us to archive'");
+    assertThat(called).as("the orphan walk ran its lookup").contains("knownKeys");
   }
 
   /**
@@ -164,6 +165,7 @@ class CipherProbePr51fTest {
         archive,
         harness.findings(),
         spy(ReprocessLedger.class, harness.reprocessLedger(), called, null),
+        harness.orphanCursors(),
         Clock.fixed(harness.now(), ZoneOffset.UTC),
         SETTINGS,
         harness.unitOfWork().configuration());
@@ -220,7 +222,8 @@ class CipherProbePr51fTest {
     }
 
     @Override
-    public List<String> list(String prefix, int limit) {
+    public com.housedevinci.einvoice.application.ArchiveListing listAfter(
+        String prefix, String startAfter, int limit) {
       throw down();
     }
 
