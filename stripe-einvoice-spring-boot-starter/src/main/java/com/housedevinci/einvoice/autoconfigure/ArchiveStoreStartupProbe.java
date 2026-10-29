@@ -1,6 +1,5 @@
 package com.housedevinci.einvoice.autoconfigure;
 
-import com.housedevinci.einvoice.adapter.file.FilesystemArchiveStore;
 import com.housedevinci.einvoice.application.ArchiveCapabilityProbe;
 import com.housedevinci.einvoice.application.ArchiveStore;
 import com.housedevinci.einvoice.domain.ArchiveKey;
@@ -35,8 +34,9 @@ public class ArchiveStoreStartupProbe implements InitializingBean {
 
   /**
    * @param sellerId the seller whose folder this application writes: refused at startup when it
-   *     cannot be a folder ({@code .}), or when it has upper-case letters on a filesystem archive
-   *     that ignores letter case ({@code DEI-285}, D-PR52-3)
+   *     cannot be a folder ({@code .}), or when the store refuses to list its folder: upper-case
+   *     letters on a filesystem archive that ignores letter case are {@code DEI-285} (D-PR52-3,
+   *     D-PR57-6), whatever wraps the store
    */
   public ArchiveStoreStartupProbe(
       ArchiveStore store, boolean allowNonAtomic, String sellerId, Mode mode) {
@@ -50,11 +50,11 @@ public class ArchiveStoreStartupProbe implements InitializingBean {
   public void afterPropertiesSet() {
     ArchiveCapabilityProbe.probe(store, UUID.randomUUID().toString(), allowNonAtomic);
     // Fails fast on a seller id that cannot name its own folder (C4), before the first pass.
-    ArchiveKey.sellerFolder(mode, sellerId);
-    if (store instanceof FilesystemArchiveStore filesystem) {
-      // C3: on a volume that ignores case, "Acme" and "acme" would share one folder. No opt-out.
-      filesystem.requireSellerIdFitsVolume(sellerId);
-    }
+    String folder = ArchiveKey.sellerFolder(mode, sellerId);
+    // C3, D-PR57-6: one listing of the seller folder, through whatever wraps the store. A store
+    // that refuses the folder (DEI-285 for "Acme" on a filesystem volume that ignores case) stops
+    // startup here, not at the first pass. No opt-out.
+    store.listAfter(folder, "", 1);
     log.info("einvoice: archiving to {}", store.describe());
   }
 }

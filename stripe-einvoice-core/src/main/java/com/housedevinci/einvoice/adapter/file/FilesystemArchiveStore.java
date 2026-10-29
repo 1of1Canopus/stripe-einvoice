@@ -6,6 +6,7 @@ import com.housedevinci.einvoice.application.ArchiveStore;
 import com.housedevinci.einvoice.domain.ArchiveKey;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
+import com.housedevinci.einvoice.domain.Mode;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.FileAlreadyExistsException;
@@ -59,6 +60,13 @@ public final class FilesystemArchiveStore implements ArchiveStore {
   private final Optional<Clock> clock;
 
   /**
+   * The volume's answer to "does it ignore letter case", asked once per store and kept (D-PR57-6).
+   * Null until a key or prefix with an upper-case seller element needs it; a failed probe is not
+   * kept, so the next call asks again.
+   */
+  private volatile Boolean ignoresCase;
+
+  /**
    * A store with no clock: it cannot tell a write in flight from a leftover, so it hides no
    * temporary file and lists every one (the safe direction). A pass that runs during a write may
    * then report that write's {@code .einvoice-<digits>.part} file once. The starter uses {@link
@@ -85,6 +93,7 @@ public final class FilesystemArchiveStore implements ArchiveStore {
 
   @Override
   public WriteResult putIfAbsent(ArchiveKey key, byte[] bytes) {
+    requireSellerElementFitsVolume(key.value());
     Path target = resolve(key);
     try {
       requireFoldersBelowRoot(target.getParent());
@@ -184,6 +193,7 @@ public final class FilesystemArchiveStore implements ArchiveStore {
    */
   @Override
   public ArchiveListing listAfter(String prefix, String startAfter, int limit) {
+    requireSellerElementFitsVolume(prefix == null ? "" : prefix);
     String after = startAfter == null ? "" : startAfter;
     int bound = Math.max(0, limit);
     Path start = root.resolve(prefix == null ? "" : prefix).normalize();
@@ -248,12 +258,11 @@ public final class FilesystemArchiveStore implements ArchiveStore {
 
             /**
              * D-PR57-2: an entry below the start folder that cannot be read or entered (a folder
-             * with mode 000, a tree past the path limit) is listed as {@code <path>#unlistable},
-             * an invalid key the walk reports with no lookup, and the walk carries on. A failure on
+             * with mode 000, a tree past the path limit) is listed as {@code <path>#unlistable}, an
+             * invalid key the walk reports with no lookup, and the walk carries on. A failure on
              * the start folder itself stays fatal.
              */
-            private FileVisitResult unlistable(Path entry, IOException failure)
-                throws IOException {
+            private FileVisitResult unlistable(Path entry, IOException failure) throws IOException {
               if (entry.equals(start) || !entry.startsWith(start)) {
                 throw failure;
               }
@@ -423,12 +432,47 @@ public final class FilesystemArchiveStore implements ArchiveStore {
   }
 
   /**
-   * Refuses at startup a seller id with an upper-case letter on a volume that ignores case: {@code
-   * DEI-285}, no opt-out (D-PR52-3, C3). Two distinct lower-case ids never share a folder on any
-   * volume, so no seller is ever shown a key another seller wrote.
+   * Refuses a seller id with an upper-case letter on a volume that ignores case: {@code DEI-285},
+   * no opt-out (D-PR52-3, C3). Two distinct lower-case ids never share a folder on any volume, so
+   * no seller is ever shown a key another seller wrote. Uses the answer this store keeps.
    */
   public void requireSellerIdFitsVolume(String sellerId) {
-    requireSellerIdFitsVolume(sellerId, ignoresLetterCase());
+    if (!sellerId.equals(sellerId.toLowerCase(Locale.ROOT))) {
+      requireSellerIdFitsVolume(sellerId, volumeIgnoresCase());
+    }
+  }
+
+  /**
+   * D-PR57-6: the case rule lives in the store, the one place every path goes through: a host that
+   * decorates this store, or builds the sweep without the starter, is refused too. Applied to the
+   * seller element of a key or prefix ({@code live/Acme/...}): {@code putIfAbsent} and {@code
+   * listAfter} refuse it with {@code DEI-285} on a volume that ignores case. A key or prefix of
+   * another shape ({@code _probe/...}, {@code live/}) has no seller element and is not checked.
+   */
+  private void requireSellerElementFitsVolume(String keyOrPrefix) {
+    String[] elements = keyOrPrefix.split("/", 3);
+    if (elements.length < 2 || elements[1].isEmpty() || !isModeElement(elements[0])) {
+      return;
+    }
+    requireSellerIdFitsVolume(elements[1]);
+  }
+
+  private static boolean isModeElement(String element) {
+    for (Mode mode : Mode.values()) {
+      if (mode.wire().equals(element)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean volumeIgnoresCase() {
+    Boolean known = ignoresCase;
+    if (known == null) {
+      known = ignoresLetterCase();
+      ignoresCase = known;
+    }
+    return known;
   }
 
   /** The rule itself, for a known answer about the volume. */

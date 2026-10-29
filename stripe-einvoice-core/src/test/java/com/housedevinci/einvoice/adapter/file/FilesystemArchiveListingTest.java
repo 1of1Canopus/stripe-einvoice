@@ -225,6 +225,31 @@ class FilesystemArchiveListingTest {
   }
 
   /**
+   * D-PR57-6. The store itself refuses an upper-case seller element on a volume that ignores case,
+   * for a write and for a listing; a lower-case seller and a key with no seller element pass. On a
+   * case-sensitive volume nothing is refused.
+   */
+  @Test
+  void the_store_refuses_an_upper_case_seller_on_a_case_insensitive_volume() throws IOException {
+    FilesystemArchiveStore store = store();
+    ArchiveKey mixed = new ArchiveKey("live/Acme/2026/INV-1.xml");
+    if (store.ignoresLetterCase()) {
+      assertThatThrownBy(() -> store.putIfAbsent(mixed, new byte[] {1}))
+          .extracting("code")
+          .isEqualTo(ErrorCodes.ARCHIVE_SELLER_CASE);
+      assertThat(root.resolve("live")).doesNotExist();
+      assertThatThrownBy(() -> store.listAfter("live/Acme", "", 1))
+          .extracting("code")
+          .isEqualTo(ErrorCodes.ARCHIVE_SELLER_CASE);
+    } else {
+      store.putIfAbsent(mixed, new byte[] {1});
+      assertThat(store.listAfter("live/Acme/", "", 1).keys()).containsExactly(mixed.value());
+    }
+    store.putIfAbsent(new ArchiveKey("live/acme/2026/INV-1.xml"), new byte[] {1});
+    assertThat(store.listAfter("live/", "", 10).keys()).contains("live/acme/2026/INV-1.xml");
+  }
+
+  /**
    * Review probe, D1, L27. Linux takes any bytes in a name. {@code INV-\xff} and {@code INV-\xfe}
    * decode to one string; listed as that string twice, the order guard would stop the walk on every
    * pass. Each is listed once, as a distinct key with its file key, and the walk moves on. Skipped
@@ -287,9 +312,9 @@ class FilesystemArchiveListingTest {
   }
 
   /**
-   * D-PR57-3, the cut itself on every system: a name past the bound is cut at a code point
-   * boundary and keeps its suffix whole, so the key fits the cursor, stays unique and stays
-   * invalid. Two names that differ only past the cut stay two keys through their file keys.
+   * D-PR57-3, the cut itself on every system: a name past the bound is cut at a code point boundary
+   * and keeps its suffix whole, so the key fits the cursor, stays unique and stays invalid. Two
+   * names that differ only past the cut stay two keys through their file keys.
    */
   @Test
   void a_key_past_the_bound_is_cut_at_a_code_point_and_keeps_its_suffix() {
