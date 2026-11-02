@@ -222,7 +222,8 @@ class CipherProbeIssuanceStarterTest {
     runnerWith(
             SlowSource.class,
             "einvoice.issuance.queue-capacity=1",
-            "einvoice.issuance.concurrency=1")
+            "einvoice.issuance.concurrency=1",
+            "einvoice.issuance.sweep-interval=24h")
         .run(
             context -> {
               InboundEventStore inbound = context.getBean(InboundEventStore.class);
@@ -286,6 +287,7 @@ class CipherProbeIssuanceStarterTest {
                       .stream()
                       .map(InboundEvent::eventId)
                       .toList();
+              assertThat(rejectedOf(events, inbound)).hasSize((int) worker.rejectedCount());
               assertThat(due).containsAll(rejectedOf(events, inbound));
             });
   }
