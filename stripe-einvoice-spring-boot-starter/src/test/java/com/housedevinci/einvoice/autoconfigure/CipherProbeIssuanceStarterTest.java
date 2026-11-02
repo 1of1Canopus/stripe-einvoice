@@ -1,9 +1,11 @@
 package com.housedevinci.einvoice.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import com.housedevinci.einvoice.application.DocumentRenderer;
 import com.housedevinci.einvoice.application.InboundEventStore;
+import com.housedevinci.einvoice.application.SourceInvoice;
 import com.housedevinci.einvoice.application.StripeInvoiceSource;
 import com.housedevinci.einvoice.autoconfigure.issuance.IssuanceTestApp;
 import com.housedevinci.einvoice.domain.EInvoiceException;
@@ -20,6 +22,8 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import javax.sql.DataSource;
@@ -215,7 +219,11 @@ class CipherProbeIssuanceStarterTest {
     // I-10. The queue is one deep and the pool is one thread, so most of this burst is rejected.
     // A rejected event stays RECEIVED and the sweeper picks it up: back-pressure costs latency and
     // never an event.
-    runner("einvoice.issuance.queue-capacity=1", "einvoice.issuance.concurrency=1")
+    runnerWith(
+            SlowSource.class,
+            "einvoice.issuance.queue-capacity=1",
+            "einvoice.issuance.concurrency=1",
+            "einvoice.issuance.sweep-interval=24h")
         .run(
             context -> {
               InboundEventStore inbound = context.getBean(InboundEventStore.class);
@@ -246,10 +254,28 @@ class CipherProbeIssuanceStarterTest {
                       .toList();
 
               events.forEach(worker::submit);
+              assertThat(worker.rejectedCount()).isPositive();
+
+              // D-PR57-CI-1. A run stamps its row (next attempt = now + backoff) before it moves
+              // it, so while the worker runs, its row is RECEIVED and not due. Reading the rows
+              // then compares two moments of a moving table. The slow source holds a run in that
+              // window; the test waits until every submitted event is either refused or has
+              // finished its run, so both reads below see the same, settled rows.
+              SlowStripeSource source = context.getBean(SlowStripeSource.class);
+              assertThat(source.awaitFirstRead(Duration.ofSeconds(30)))
+                  .as("the worker started a run")
+                  .isTrue();
+              await()
+                  .atMost(Duration.ofSeconds(30))
+                  .pollInterval(Duration.ofMillis(50))
+                  .untilAsserted(
+                      () ->
+                          assertThat(worker.rejectedCount() + worker.processedCount())
+                              .as("refused plus finished runs, out of %d submitted", events.size())
+                              .isEqualTo(events.size()));
 
               // Whatever the worker refused is still there to be found, in a state a sweeper picks
               // up. Nothing was dropped on the floor.
-              assertThat(worker.rejectedCount()).isPositive();
               List<String> due =
                   inbound
                       .due(
@@ -261,6 +287,7 @@ class CipherProbeIssuanceStarterTest {
                       .stream()
                       .map(InboundEvent::eventId)
                       .toList();
+              assertThat(rejectedOf(events, inbound)).hasSize((int) worker.rejectedCount());
               assertThat(due).containsAll(rejectedOf(events, inbound));
             });
   }
@@ -329,11 +356,15 @@ class CipherProbeIssuanceStarterTest {
   }
 
   private ApplicationContextRunner runner(String... properties) {
+    return runnerWith(IssuanceWiringTest.Ports.class, properties);
+  }
+
+  private ApplicationContextRunner runnerWith(Class<?> ports, String... properties) {
     return new ApplicationContextRunner()
         .withConfiguration(
             AutoConfigurations.of(
                 EInvoiceAutoConfiguration.class, EInvoiceIssuanceAutoConfiguration.class))
-        .withUserConfiguration(IssuanceWiringTest.Ports.class)
+        .withUserConfiguration(ports)
         .withPropertyValues(base())
         .withPropertyValues(properties);
   }
@@ -353,6 +384,60 @@ class CipherProbeIssuanceStarterTest {
       "einvoice.stripe.webhook-secrets.primary=" + SECRET,
       "einvoice.reconcile.enabled=false"
     };
+  }
+
+  /**
+   * The test ports with a Stripe read that takes a while. A run stamps its row and only then reads
+   * Stripe, so during the read the row is RECEIVED with a next attempt in the future: not due, and
+   * not finished. With the fast test source that window is too short to hit on a quiet machine,
+   * which is why the burst probe failed only on a loaded runner (D-PR57-CI-1). Here it is open for
+   * a known time, and the test can wait until a run is inside it.
+   */
+  @Configuration
+  static class SlowSource extends IssuanceWiringTest.Ports {
+
+    @Bean
+    @Override
+    SlowStripeSource source() {
+      return new SlowStripeSource(Duration.ofMillis(300));
+    }
+  }
+
+  static final class SlowStripeSource implements StripeInvoiceSource {
+
+    private final StripeInvoiceSource fast = new IssuanceTestApp.RecordingStripeSource();
+    private final Duration readTime;
+    private final CountDownLatch firstRead = new CountDownLatch(1);
+
+    SlowStripeSource(Duration readTime) {
+      this.readTime = readTime;
+    }
+
+    /** True once a run has stamped its row and is reading Stripe. */
+    boolean awaitFirstRead(Duration timeout) throws InterruptedException {
+      return firstRead.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    @Override
+    public SourceInvoice fetchInvoice(String invoiceId) {
+      firstRead.countDown();
+      try {
+        Thread.sleep(readTime);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      return fast.fetchInvoice(invoiceId);
+    }
+
+    @Override
+    public List<String> finalisedInvoiceIds(Instant from, Instant to) {
+      return fast.finalisedInvoiceIds(from, to);
+    }
+
+    @Override
+    public String pinnedApiVersion() {
+      return fast.pinnedApiVersion();
+    }
   }
 
   @Configuration
