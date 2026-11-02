@@ -96,3 +96,17 @@ Checked on the review copy: with both changes, mutation M2 is red
 | D-PR58-1 | LOW | Burst test passes on an empty set when refused rows leave RECEIVED (scheduled sweep in the window, or a regression); sweep interval not pinned | Pin `sweep-interval=24h`; assert refused rows still RECEIVED equal `rejectedCount()` | Mutation M2 (one `sweepOnce()` after the wait): green on 28a0715, must be red after the fix |
 
 Re-verification: the fix pass shows M2 red and the test green in a loop of 20 in the PR body.
+
+## Re-verification (2026-11-02, head c6f116d)
+
+The fix pass applied both parts of the D-PR58-1 fix in one test file: `sweep-interval=24h` is
+pinned, and the test now checks that the refused rows still RECEIVED equal `rejectedCount()`.
+
+| Run | Result |
+|---|---|
+| `CipherProbeIssuanceStarterTest`, unmutated, Docker up | 8 tests, 0 failed, green |
+| Mutation M2 (one `IssuanceSweeper.sweepOnce()` after the wait) | red: "Expected size: 48 but was: 0" |
+
+The test no longer passes on an empty set. D-PR58-1 is closed. The fix adds no new surface.
+
+**Verdict: MERGE.**
