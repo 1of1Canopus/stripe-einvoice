@@ -342,7 +342,7 @@ exact bytes received is its authentication:
 ```
 
 stripe-java is an optional dependency: your application declares it. Declare exactly stripe-java
-`34.0.0`, the version this release is built for. The module checks the SDK on the classpath at
+`34.1.0`, the version this release is built for. The module checks the SDK on the classpath at
 start-up and refuses to start with any other version, because the SDK decides which Stripe API
 version is sent and read.
 
@@ -350,7 +350,7 @@ version is sent and read.
 <dependency>
   <groupId>com.stripe</groupId>
   <artifactId>stripe-java</artifactId>
-  <version>34.0.0</version>
+  <version>34.1.0</version>
 </dependency>
 ```
 
