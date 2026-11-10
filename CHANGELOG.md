@@ -119,6 +119,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Upgrade note: stripe-java 34.0.0 moves the pinned Stripe API version.** The module now expects
+  Stripe API version `2026-09-30.endive` (it was `2026-08-26.dahlia`). A webhook endpoint still on
+  `2026-08-26.dahlia` has its invoice events recorded as version skew (`DEI-201`, state
+  `REFUSED_VERSION_SKEW`) until the endpoint is re-pinned. Nothing is lost: the events keep their
+  bodies and replay once the versions match. A property `einvoice.stripe.api-version=2026-08-26.dahlia`
+  now refuses at start-up. Remove it or set it to `2026-09-30.endive`. The steps are in the README,
+  "Operating it", row "Stripe moved its API version". Tests now take the pin from the SDK, and two
+  webhook tests (one accepted, one `DEI-201`) show the next SDK bump that moves it.
+
 - **BREAKING CHANGE: `ArchiveStore.listAfter` and `IssuanceReader.knownKeys` (D-PR52-3).** Two new
   abstract methods for implementers. `listAfter(prefix, startAfter, limit)` returns an
   `ArchiveListing(keys, endOfFolder)`: keys strictly after `startAfter`, in UTF-8 byte order, and

@@ -268,7 +268,7 @@ class SampleEndToEndTest {
   @org.springframework.boot.test.context.TestConfiguration(proxyBeanMethods = false)
   static class FakeStripe {
 
-    static final String PINNED = "2026-08-26.dahlia";
+    static final String PINNED = com.stripe.Stripe.API_VERSION;
 
     @org.springframework.context.annotation.Bean
     com.housedevinci.einvoice.application.StripeInvoiceSource source() {
