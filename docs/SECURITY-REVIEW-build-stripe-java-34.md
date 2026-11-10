@@ -211,3 +211,208 @@ document.
   diff of the models.
 - The webhook-secret hardening in 34.1.0 (whitespace-only secrets refused). The module checks
   signatures with its own code, which was not re-attacked here.
+
+## 2026-11-10, pass 2 on f3f5a1a
+
+**Verdict: MERGE WITH FIXES.** No HIGH. The six findings of pass 1 are closed on this branch,
+except D-PR60-2, which is in its own PR (design stop). Four new LOW findings (D-PR60-7 to
+D-PR60-10) must be fixed on this branch before merge. Their probes are listed below. D-PR60-2
+must merge in its own PR before the next release tag.
+
+This is the last pass under the two-pass cap. The fix pass adds the pass 2 probes first, then
+fixes. The verifier's numbers on the probes flipping green close the four findings. No third
+security pass is needed unless a fix adds a mechanism.
+
+### Build and probes
+
+`./mvnw -B clean verify` on f3f5a1a, Docker up, run once: BUILD SUCCESS, coverage gates met.
+
+| Module | Tests | Failed | Errors | Skipped |
+|---|---|---|---|---|
+| core | 1148 | 0 | 0 | 3 |
+| starter | 167 | 0 | 0 | 0 |
+| sample | 9 | 0 | 0 | 0 |
+
+The three skipped tests are the known Linux-only filename tests. They run on the Linux CI
+runner. A skipped test is not a passing test.
+
+`CIPHER_PROBE_MAVEN=1 tools/cipher-probe-release-pipeline.sh`: 131 fixed, 0 still weak, exit 0.
+
+### Pass 1 findings
+
+| Id | Sev | Fix | Verified by | Status |
+|---|---|---|---|---|
+| D-PR60-1 | LOW | df803db, text | CHANGELOG, README case 2 and `docs/index.md` read against the due query. The safe order is right: rows recorded at the new version during the change are re-picked after the deploy (core `probe_a_version_skewed_event_is_re_picked_by_the_sweeper_after_the_pin_moves`, green). README case 1 is now wrong: D-PR60-7 | closed |
+| D-PR60-2 | LOW | design reviewed (D-SKEW-1 to 4), in build on its own branch | not in this PR | open, release-blocking, own PR |
+| D-PR60-3 | LOW | 7082f90 | Mutant M5b: pom at 34.0.0 with a clean recompile. `the_sdk_pin_is_the_one_the_upgrade_note_names` red, expected `2026-10-28.endive`, was `2026-09-30.endive`. Dependabot exclude checked below | closed |
+| D-PR60-4 | LOW | 937d564 | `stripe-java-34.1.0` resolved in the build. No `2026-09-30` left outside probe comments. Model signatures of 34.0.0 and 34.1.0 for the classes the adapter reads compared with `javap`: identical | closed |
+| D-PR60-5 | LOW | 817b8cf | `probe_switching_reconciliation_off_is_silent_at_start_up` green. Mutant MD (WARN branch off): red | closed. A window that covers nothing bypasses it: D-PR60-10 |
+| D-PR60-6 | MEDIUM | 746b8d7 | Mismatch run MA: compiled at 34.1.0, `surefire:test -Dstripe-java.version=34.0.0`. `probe_a_source_whose_sdk_speaks_another_version_is_built_rather_than_refused` green: CONFIG, message names both versions. The ten source tests that build a source go red, as they must | closed. The wiring has no test on the CI classpath: D-PR60-9 |
+
+### Rulings on the fix pass deviations
+
+1. **D-PR60-1 replay probe not added.** Accepted. That probe asserted the replay the old note
+   promised. The fix makes the text say that replay does not happen, so the probe could never
+   turn green. The finding closes on the text.
+2. **D-PR60-2 probe not added.** Accepted. It belongs to the design stop and lands with that PR.
+3. **Second core probe rewritten to pass in both classpath states.** Accepted. In the mismatch
+   run it takes the refusal branch and is green. The first probe stays red in the mismatch
+   state. That is correct: it records that an inlined constant is the build's. The fix does not
+   change that fact. It refuses the mismatch.
+4. **Forced recompile.** Confirmed. `Stripe.API_VERSION` and `Stripe.VERSION` are inlined. A
+   mutant that only overrides the pom version keeps the stale classes. M5b used `clean`. Pass 1
+   M5 had the same flaw, which explains its one stale-class failure.
+5. **f3f5a1a.** Whitespace, line wrapping and import order only (`git diff -w`).
+
+### Dependabot exclude
+
+`exclude-patterns: ["com.stripe:stripe-java"]` matches. Dependabot names this artifact
+`com.stripe:stripe-java` (its own PR 30 title). That is the `groupId:artifactId` form the docs
+give for Maven, and the form this file already uses in `ignore`. The group has no `patterns`, so
+it still takes every other minor and patch update. GitHub's docs say an outdated dependency that
+matches no group "is updated in individual pull requests". The file is read from the default
+branch, so the effect can only be observed after merge. Not observed here.
+
+What the exclude does not cover: a stripe-java patch that keeps the API version passes every
+test, so it auto-merges under the studio rule. The README would then name the old release.
+That is part of D-PR60-8.
+
+### Attacks on the reflection read
+
+A harness built a source with `new StripeApiInvoiceSource(null, pin)`. The check runs before the
+null check, so "NullPointerException: client" means the check passed. A fake `com.stripe.Stripe`
+was put first on the classpath, with the real jar behind it.
+
+| Shape of `Stripe.API_VERSION` | Result |
+|---|---|
+| no field | refused, `unreadable (NoSuchFieldException)` |
+| `Integer` field | refused, `unreadable (ClassCastException)` |
+| instance field, right value | refused, `unreadable (NullPointerException)` |
+| private static field | refused, `unreadable (NoSuchFieldException)` |
+| `null` | refused, `speaks null` |
+| static initialiser throws | refused, `unreadable (ExceptionInInitializerError)` |
+| right value plus a trailing space | refused |
+| another version | refused |
+| right value, not final | passed (correct) |
+| no stripe-java on the classpath | `NoClassDefFoundError` while loading the source class: nothing is built |
+| core and stripe-java 34.1.0 as named automatic modules on the JDK 21 module path | passed |
+| same, stripe-java 34.0.0 | refused, CONFIG |
+
+Every unreadable shape fails closed. JDK 21 has no SecurityManager by default, and an automatic
+module exports every package, so the read crosses the module boundary. A stripe-java relocated
+by a shading host without relocating this module is the "no stripe-java" row. A host that shades
+both together relocates both references the same way; the field name is not a class name and is
+not rewritten. That case was reasoned, not run.
+
+A two-jar classpath (34.0.0 before 34.1.0) is read correctly: the read and the SDK use the same
+loaded class.
+
+### D-PR60-7 (LOW, docs vs code): the README says skew rows stay refused when the module catches up
+
+Probe, starter, `CipherProbePr60PassTwoTest`:
+`probe_the_readme_says_skew_rows_stay_refused_after_the_module_catches_up`. Red.
+
+df803db wrote, for "Stripe is ahead of the module": "The refused rows stay refused;
+reconciliation issues their invoices". The due query re-picks a `REFUSED_VERSION_SKEW` row whose
+recorded version equals the pin (`JdbcInboundEventStore`, the `D2-03` clause). After the upgrade
+the pin is the rows' version, so they replay. Core
+`probe_a_version_skewed_event_is_re_picked_by_the_sweeper_after_the_pin_moves` proves it, green.
+`docs/index.md` says the same as the code. An operator who believes the README may reprocess
+these rows by hand, or wait for a reconciliation window that has already passed.
+
+Fix (text): README, "Operating it", row "Stripe moved its API version", first case. Replace
+"The refused rows stay refused; reconciliation issues their invoices if it is on and they are
+inside its window" with: "The sweeper then re-picks the refused rows whose recorded version
+equals the new pin and replays them."
+
+### D-PR60-8 (LOW, docs vs code): "any other version is refused" is not what the check does
+
+Probe, starter, `CipherProbePr60PassTwoTest`:
+`probe_the_install_text_promises_a_refusal_for_any_other_stripe_java_release`. Red.
+
+The README says "Declare exactly stripe-java `34.1.0` ... refuses to start with any other
+version". The CHANGELOG says "any other version is refused at start-up". The check compares
+Stripe API versions, not releases. stripe-java 33.4.0, 33.4.1 and 33.4.2 all speak
+`2026-08-26.dahlia` (read with `javap` from Central). So a later 34.1.x patch at
+`2026-10-28.endive` starts. The harness row "right value, not final" shows it. Comparing the API
+version is the right design: an exact release match would refuse stripe-java security patches.
+The text is what is wrong.
+
+Second part: a stripe-java patch that keeps the API version passes every test, so it can
+auto-merge. The README then names the old release.
+
+Fix:
+
+1. README install section and CHANGELOG note. Say: this release is built and tested with
+   stripe-java `34.1.0`. The module refuses, at start-up, a stripe-java that speaks another Stripe
+   API version than `2026-10-28.endive`.
+2. Add the check from the probe file as a starter test:
+   `the_readme_names_the_stripe_java_release_the_build_resolves`. It asserts the README's
+   stripe-java dependency snippet carries `com.stripe.Stripe.VERSION`. Green now. Red under any
+   stripe-java bump until the README is updated, so no stripe-java bump auto-merges.
+
+### D-PR60-9 (LOW, false completion): the classpath check is wired with no test on the CI classpath
+
+Probes, core, `CipherProbePr60PassTwoSdkTest`. Both red (`NoSuchMethodException`: the seams do
+not exist yet).
+
+- Mutant MB: the `requireClasspathSdk(...)` call removed from the constructor. Full core suite:
+  1148 run, 0 failed. Only the mismatch run sees it, and CI never runs that.
+- Mutant MC: the catch returns `SDK_API_VERSION` (an unreadable SDK accepted). The source tests
+  and both PR 60 probes: 20 run, 0 failed. No other test reaches that path.
+
+The tests pass 1 prescribed test the static method alone. That prescription was incomplete.
+
+Fix, `StripeApiInvoiceSource`:
+
+1. Replace `runtimeSdkApiVersion()` with package-private static
+   `String sdkApiVersionOf(Class<?> stripeClass)`. Same body, the class as a parameter.
+2. Add a package-private constructor
+   `StripeApiInvoiceSource(StripeClient, String, Duration, String runtimeSdkApiVersion)` that
+   calls `requireClasspathSdk(SDK_API_VERSION, runtimeSdkApiVersion)` first. The public
+   three-argument constructor delegates with `sdkApiVersionOf(Stripe.class)`.
+3. Tests in `StripeApiInvoiceSourceTest`:
+   `a_source_over_another_classpath_sdk_is_refused_at_construction` (through the new
+   constructor) and `an_unreadable_classpath_sdk_is_refused` (no field, `Integer` field,
+   instance field, `null`, each through `sdkApiVersionOf` then `requireClasspathSdk`). MB and MC
+   must each turn one of them red.
+
+### D-PR60-10 (LOW, boundary validation): a reconciliation window that covers nothing starts silently
+
+Probe, starter, `CipherProbePr60PassTwoWindowTest`:
+`probe_a_reconciliation_window_shorter_than_its_interval_starts`. Red on the first case,
+`einvoice.reconcile.window=0s`.
+
+Each pass lists invoices finalised in `[now - grace - window, now - grace]`. The real source
+filters on both ends (`StripeApiInvoiceSource.finalisedInvoiceIds`). A zero or negative window
+covers nothing. A window shorter than the interval leaves gaps between passes, and the schedule
+is fixed-delay, so each gap also grows by the pass time. `ReconciliationSweep.Settings` accepts
+any window. That is reconciliation switched off without the WARN that D-PR60-5 added. It is on
+main. It is reported here because it bypasses the new control.
+
+Fix:
+
+1. `ReconciliationSweep.Settings`: refuse a zero or negative window with `ErrorCodes.CONFIG`,
+   for users of core without the starter.
+2. `IssuanceSweeper.afterPropertiesSet`: when reconciliation is on, refuse with
+   `ErrorCodes.CONFIG` a window shorter than twice the interval. The message names
+   `einvoice.reconcile.window` and `einvoice.reconcile.interval` and says why: invoices finalised
+   between two passes would never be checked. Defaults (2d, 15m) pass.
+3. The probe becomes a starter test. `docs/index.md`, the reconcile row of the property table:
+   add the rule.
+
+### Public text
+
+The CHANGELOG, README and `docs/index.md` changes carry no names and no paths. The reference
+guard (`tools/check-private-references.sh --tree`) passes on this document.
+
+### Not tried in this pass
+
+- Stripe itself: two endpoints at two versions and the event id they carry; a Dashboard resend.
+- A shading host that relocates both this module and stripe-java: reasoned, not run.
+- Dependabot's handling of the exclude: only observable once the file is on the default branch.
+- stripe-java 33.x or 35.x as the host SDK: covered by the check in principle. Only 34.0.0 and
+  fake classes were run.
+- The 34.1.0 changes inside the models (field names in annotations, deserialisers): signatures
+  only.
+- The webhook signature code against 34.1.0's secret hardening: not re-attacked.
