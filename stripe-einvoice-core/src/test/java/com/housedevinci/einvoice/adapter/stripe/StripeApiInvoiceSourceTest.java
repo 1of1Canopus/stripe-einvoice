@@ -238,6 +238,21 @@ class StripeApiInvoiceSourceTest {
   }
 
   @Test
+  void a_classpath_sdk_that_speaks_another_version_is_refused_at_construction() {
+    assertThatThrownBy(
+            () -> StripeApiInvoiceSource.requireClasspathSdk("2026-10-28.endive", "2026-11-30.fig"))
+        .isInstanceOf(EInvoiceException.class)
+        .extracting("code")
+        .isEqualTo(ErrorCodes.CONFIG);
+  }
+
+  @Test
+  void the_classpath_sdk_is_the_compiled_one() throws Exception {
+    assertThat(com.stripe.Stripe.class.getField("API_VERSION").get(null))
+        .isEqualTo(StripeApiInvoiceSource.SDK_API_VERSION);
+  }
+
+  @Test
   void a_line_with_no_tax_rate_is_refused_by_name_rather_than_issued_untaxed() {
     try (StripeStub stub = new StripeStub()) {
       stub.answer("/v1/invoices/in_1", INVOICE)

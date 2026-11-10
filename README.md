@@ -341,6 +341,19 @@ exact bytes received is its authentication:
 </dependency>
 ```
 
+stripe-java is an optional dependency: your application declares it. Declare exactly stripe-java
+`34.0.0`, the version this release is built for. The module checks the SDK on the classpath at
+start-up and refuses to start with any other version, because the SDK decides which Stripe API
+version is sent and read.
+
+```xml
+<dependency>
+  <groupId>com.stripe</groupId>
+  <artifactId>stripe-java</artifactId>
+  <version>34.0.0</version>
+</dependency>
+```
+
 ```yaml
 einvoice:
   mode: live                    # 'test' WARNs at every startup and uses a separate series
