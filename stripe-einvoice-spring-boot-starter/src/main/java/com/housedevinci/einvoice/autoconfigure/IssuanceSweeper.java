@@ -91,6 +91,14 @@ public final class IssuanceSweeper
   @Override
   public void afterPropertiesSet() {
     warnAboutWeakLimits(stranded.runningLimit());
+    if (!properties.getReconcile().isEnabled()) {
+      log.warn(
+          "einvoice: einvoice.reconcile.enabled=false. Reconciliation is switched off, so sales"
+              + " with no document are no longer found, and events refused at a previous Stripe"
+              + " API version are no longer re-enqueued. After a Stripe API version move,"
+              + " reconciliation is the only path that issues those invoices. Keep it on unless"
+              + " another control finds missing documents.");
+    }
     Duration sweep = properties.getIssuance().getSweepInterval();
     scheduler.scheduleWithFixedDelay(
         this::sweepOnce, sweep.toMillis(), sweep.toMillis(), TimeUnit.MILLISECONDS);
