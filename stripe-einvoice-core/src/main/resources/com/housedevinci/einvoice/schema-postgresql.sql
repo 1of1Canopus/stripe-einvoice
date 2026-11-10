@@ -338,6 +338,18 @@ BEGIN
     ALTER TABLE einvoice_inbound_event ALTER COLUMN due_since SET NOT NULL;
   END IF;
 END $$;
+-- D-PR60-2: a copy of an event at the pinned API version cures the row an earlier copy at another
+-- version left behind (RECEIVED or REFUSED_VERSION_SKEW only). cure_generation goes up by one on
+-- every cure and is never written otherwise, so a run that read the row before a cure loses its
+-- next compare. The cured_from_* columns keep what was replaced: the version, the SHA-256 of the
+-- body and the first arrival; the old body itself is not kept. Purged with the row. No backfill:
+-- an existing row was never cured.
+ALTER TABLE einvoice_inbound_event ADD COLUMN IF NOT EXISTS cure_generation integer NOT NULL DEFAULT 0;
+ALTER TABLE einvoice_inbound_event ADD COLUMN IF NOT EXISTS cured_from_api_version varchar(64);
+ALTER TABLE einvoice_inbound_event ADD COLUMN IF NOT EXISTS cured_from_body_sha256 char(64);
+ALTER TABLE einvoice_inbound_event ADD COLUMN IF NOT EXISTS cured_from_received_at timestamptz;
+ALTER TABLE einvoice_inbound_event ADD COLUMN IF NOT EXISTS cured_at timestamptz;
+
 -- The sweep's stranded query reads running rows by their clock.
 CREATE INDEX IF NOT EXISTS einvoice_inbound_running_clock
   ON einvoice_inbound_event (due_since)
@@ -954,7 +966,12 @@ BEGIN
       ('einvoice_issuance_event', 'date_gap_cause', false),
       ('einvoice_inbound_event', 'parked_at', false),
       ('einvoice_inbound_event', 'retried_at', false),
-      ('einvoice_inbound_event', 'due_since', false)
+      ('einvoice_inbound_event', 'due_since', false),
+      ('einvoice_inbound_event', 'cure_generation', false),
+      ('einvoice_inbound_event', 'cured_from_api_version', false),
+      ('einvoice_inbound_event', 'cured_from_body_sha256', false),
+      ('einvoice_inbound_event', 'cured_from_received_at', false),
+      ('einvoice_inbound_event', 'cured_at', false)
     ) AS t(tbl, col, no_default)
   LOOP
     IF missing IS NULL AND NOT EXISTS (

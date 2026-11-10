@@ -220,14 +220,16 @@ class RunningLimitPathsTest {
     InboundEvent first =
         InboundEvent.received(
             identity, Mode.LIVE, ReconciliationSweep.RECONCILIATION_SOURCE, new byte[0], h.now());
-    assertThat(h.inbound().record(first, null)).isTrue();
+    assertThat(h.inbound().record(first, null, "2026-03-31.clover"))
+        .isEqualTo(InboundEventStore.Recorded.FIRST);
     h.moveClockForward(Duration.ofDays(4));
     assertThat(sweep(h).expire(h.now())).isEqualTo(1);
 
     InboundEvent again =
         InboundEvent.received(
             identity, Mode.LIVE, ReconciliationSweep.RECONCILIATION_SOURCE, new byte[0], h.now());
-    assertThat(h.inbound().record(again, null)).isFalse();
+    assertThat(h.inbound().record(again, null, "2026-03-31.clover"))
+        .isEqualTo(InboundEventStore.Recorded.DUPLICATE);
     assertThat(h.inbound().find(identity.eventId()).orElseThrow().state())
         .isEqualTo(InboundState.EXPIRED);
     assertThat(IssuanceReprocess.eligible(h.inbound().find(identity.eventId()).orElseThrow()))
@@ -245,7 +247,9 @@ class RunningLimitPathsTest {
             "evt_q29_void", "invoice.finalized", "2026-03-31.clover", true, "", "in_v");
     h.inbound()
         .record(
-            InboundEvent.received(identity, Mode.LIVE, "primary", new byte[] {1}, h.now()), null);
+            InboundEvent.received(identity, Mode.LIVE, "primary", new byte[] {1}, h.now()),
+            null,
+            "2026-03-31.clover");
     h.inbound().transition("evt_q29_void", InboundState.FETCHED, "", h.now(), null);
     h.inbound().transition("evt_q29_void", InboundState.MAPPED, "", h.now(), null);
     h.inbound()

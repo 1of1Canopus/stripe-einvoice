@@ -71,12 +71,14 @@ class CipherProbePr49Test {
                             .stampAttempt(
                                 eventId,
                                 InboundState.RECEIVED,
+                                0,
                                 harness.now(),
                                 Duration.ofMinutes(1));
                         return held.inbound()
                             .transitionFrom(
                                 eventId,
                                 InboundState.RECEIVED,
+                                0,
                                 InboundState.FETCHED,
                                 "",
                                 "",
@@ -124,7 +126,7 @@ class CipherProbePr49Test {
             held ->
                 held.inbound()
                     .stampAttempt(
-                        eventId, InboundState.RECEIVED, harness.now(), Duration.ofMinutes(1)));
+                        eventId, InboundState.RECEIVED, 0, harness.now(), Duration.ofMinutes(1)));
       } catch (RuntimeException e) {
         thrown = e;
       }

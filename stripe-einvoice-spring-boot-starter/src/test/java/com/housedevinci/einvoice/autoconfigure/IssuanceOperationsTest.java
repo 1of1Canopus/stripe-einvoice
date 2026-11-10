@@ -91,7 +91,8 @@ class IssuanceOperationsTest {
                       // The context's own clock: a row recorded months before it is past the
                       // running-row time limit (QUESTIONS 29) and is expired, not due.
                       context.getBean(Clock.class).instant()),
-                  body);
+                  body,
+                  com.housedevinci.einvoice.autoconfigure.issuance.IssuanceTestApp.PINNED_VERSION);
 
               assertThat(sweeper.sweepOnce()).isPositive();
               assertThat(sweeper.lastSweepAt()).isPresent();
@@ -138,7 +139,8 @@ class IssuanceOperationsTest {
                       "primary",
                       body,
                       Instant.now().minus(Duration.ofDays(2))),
-                  body);
+                  body,
+                  com.housedevinci.einvoice.autoconfigure.issuance.IssuanceTestApp.PINNED_VERSION);
               TestPostgres.execute(
                   "UPDATE einvoice_inbound_event SET received_at = now() - interval '2 days'"
                       + " WHERE event_id = '"
@@ -410,7 +412,8 @@ class IssuanceOperationsTest {
                       "primary",
                       body,
                       Instant.now()),
-                  body);
+                  body,
+                  com.housedevinci.einvoice.autoconfigure.issuance.IssuanceTestApp.PINNED_VERSION);
 
               assertThat(context.getBean(IssuanceSweeper.class).sweepOnce()).isPositive();
               org.awaitility.Awaitility.await()

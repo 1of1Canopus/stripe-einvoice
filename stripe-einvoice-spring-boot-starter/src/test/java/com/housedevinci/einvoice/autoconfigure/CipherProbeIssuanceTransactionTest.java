@@ -144,7 +144,8 @@ class CipherProbeIssuanceTransactionTest {
               String rolledBack = "evt_" + UUID.randomUUID().toString().replace("-", "");
 
               host.recordAndTransition(committed);
-              inbound.record(received(rolledBack), body(rolledBack));
+              inbound.record(
+                  received(rolledBack), body(rolledBack), IssuanceTestApp.PINNED_VERSION);
               assertThatThrownBy(() -> host.transitionThenFail(rolledBack))
                   .isInstanceOf(IllegalStateException.class);
 
@@ -190,19 +191,19 @@ class CipherProbeIssuanceTransactionTest {
 
     @Transactional
     public void recordThenFail(String eventId) {
-      inbound.record(received(eventId), body(eventId));
+      inbound.record(received(eventId), body(eventId), IssuanceTestApp.PINNED_VERSION);
       throw new IllegalStateException("the host's own failure, after our write");
     }
 
     @Transactional
     public boolean recordThenReadBack(String eventId) {
-      inbound.record(received(eventId), body(eventId));
+      inbound.record(received(eventId), body(eventId), IssuanceTestApp.PINNED_VERSION);
       return inbound.find(eventId).isPresent();
     }
 
     @Transactional
     public void recordAndTransition(String eventId) {
-      inbound.record(received(eventId), body(eventId));
+      inbound.record(received(eventId), body(eventId), IssuanceTestApp.PINNED_VERSION);
       inbound.transition(eventId, InboundState.FETCHED, "", NOW, null);
     }
 

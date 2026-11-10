@@ -19,8 +19,8 @@ class DelegatingInboundEventStore implements InboundEventStore {
   }
 
   @Override
-  public boolean record(InboundEvent event, byte[] body) {
-    return delegate.record(event, body);
+  public Recorded record(InboundEvent event, byte[] body, String pinnedApiVersion) {
+    return delegate.record(event, body, pinnedApiVersion);
   }
 
   @Override
@@ -48,18 +48,24 @@ class DelegatingInboundEventStore implements InboundEventStore {
   public Optional<InboundEvent> transitionFrom(
       String eventId,
       InboundState expected,
+      int expectedGeneration,
       InboundState next,
       String code,
       String ruleId,
       Instant now,
       Duration retryIn) {
-    return delegate.transitionFrom(eventId, expected, next, code, ruleId, now, retryIn);
+    return delegate.transitionFrom(
+        eventId, expected, expectedGeneration, next, code, ruleId, now, retryIn);
   }
 
   @Override
   public Optional<InboundEvent> stampAttempt(
-      String eventId, InboundState expected, Instant now, Duration retryIn) {
-    return delegate.stampAttempt(eventId, expected, now, retryIn);
+      String eventId,
+      InboundState expected,
+      int expectedGeneration,
+      Instant now,
+      Duration retryIn) {
+    return delegate.stampAttempt(eventId, expected, expectedGeneration, now, retryIn);
   }
 
   @Override

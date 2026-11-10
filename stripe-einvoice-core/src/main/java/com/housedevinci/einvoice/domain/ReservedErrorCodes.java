@@ -36,6 +36,7 @@ public final class ReservedErrorCodes {
   private static final String DISPOSED = "design: burned number archive orphan (D-RTR-4)";
   private static final String RUNNING_LIMIT = "design: running row time limit (QUESTIONS 29)";
   private static final String ORPHAN_WINDOW = "design: orphan check window (D-PR52-3)";
+  private static final String SKEW_CURE = "design: skew duplicate cure (D-PR60-2)";
 
   /** Code to reservation. */
   public static final Map<String, Reservation> RESERVED =
@@ -57,6 +58,7 @@ public final class ReservedErrorCodes {
           entry("DEI-246", new Reservation("ARCHIVE_UNMARKED", MARKER)),
           // Not DEI-247: that is ROW_LOCK_RELEASE_FAILED since PR 42. DEI-24x is full and DEI-25x
           // is validation, so the foreign-archive refusal joins DEI-230, the archived-bytes code.
+          entry("DEI-223", new Reservation("INBOUND_IDENTITY_MISMATCH", SKEW_CURE)),
           entry("DEI-232", new Reservation("ARCHIVE_FOREIGN", MARKER)),
           entry("DEI-266", new Reservation("INBOUND_CEILING_REACHED", RUNNING_LIMIT)),
           entry("DEI-281", new Reservation("RECON_OBJECT_FOR_DISPOSED_NUMBER", DISPOSED)),

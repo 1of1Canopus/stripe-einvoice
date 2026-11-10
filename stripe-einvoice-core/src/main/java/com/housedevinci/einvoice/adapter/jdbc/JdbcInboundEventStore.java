@@ -25,6 +25,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The durable inbound record in PostgreSQL: plain JDBC, no JPA mapping, every statement through the
@@ -37,17 +39,62 @@ import java.util.Optional;
  */
 public final class JdbcInboundEventStore implements InboundEventStore {
 
+  private static final Logger log = LoggerFactory.getLogger(JdbcInboundEventStore.class);
+
   static final String COLUMNS =
       "event_id, event_type, object_id, api_version, livemode, stripe_account_id, seller_id,"
           + " mode, signature_key_id, received_at, updated_at, state, attempts, next_attempt_at,"
-          + " last_code, last_rule_id, body_sha256, (body IS NOT NULL) AS body_present, due_since";
+          + " last_code, last_rule_id, body_sha256, (body IS NOT NULL) AS body_present, due_since,"
+          + " cure_generation";
 
+  /**
+   * The record, and the cure of a skew row (D-PR60-2, skew duplicate design section 9).
+   *
+   * <p>A fresh event inserts with {@code cure_generation} 0. On a conflict the row is cured only
+   * when rule A holds on the stored row: {@code RECEIVED} or {@code REFUSED_VERSION_SKEW}, stored
+   * at another version than the pin, this copy at the pin, and the same four identity columns.
+   * Neither state ever holds a number. Rule B then makes the row what a fresh insert of the copy
+   * is, except {@code mode}, {@code parked_at} and {@code retried_at} (kept) and the trace. On the
+   * right of a {@code SET}, {@code e.} is the row before this statement. No row is returned when
+   * rule A is false: a duplicate or an identity mismatch, which the caller tells apart.
+   *
+   * <p>{@code ON CONFLICT DO UPDATE} locks the conflicting row, so two copies at the pin at once
+   * give one cure: the second re-checks rule A on the cured row, at the pin, and gets no row.
+   *
+   * <p>Parameters: the 19 values, then the pin twice.
+   */
   static final String INSERT =
-      "INSERT INTO einvoice_inbound_event (event_id, event_type, object_id, api_version, livemode,"
-          + " stripe_account_id, seller_id, mode, signature_key_id, received_at, updated_at,"
-          + " state, attempts, next_attempt_at, last_code, last_rule_id, body, body_sha256,"
-          + " due_since) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
-          + " ON CONFLICT (event_id) DO NOTHING";
+      "INSERT INTO einvoice_inbound_event AS e (event_id, event_type, object_id, api_version,"
+          + " livemode, stripe_account_id, seller_id, mode, signature_key_id, received_at,"
+          + " updated_at, state, attempts, next_attempt_at, last_code, last_rule_id, body,"
+          + " body_sha256, due_since) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+          + " ON CONFLICT (event_id) DO UPDATE SET"
+          + " cure_generation = e.cure_generation + 1,"
+          + " cured_from_api_version = e.api_version, cured_from_body_sha256 = e.body_sha256,"
+          + " cured_from_received_at = e.received_at, cured_at = EXCLUDED.received_at,"
+          + " api_version = EXCLUDED.api_version, body = EXCLUDED.body,"
+          + " body_sha256 = EXCLUDED.body_sha256, signature_key_id = EXCLUDED.signature_key_id,"
+          + " seller_id = EXCLUDED.seller_id, state = 'RECEIVED', attempts = 0,"
+          + " next_attempt_at = EXCLUDED.next_attempt_at, last_code = '', last_rule_id = '',"
+          + " received_at = EXCLUDED.received_at, updated_at = EXCLUDED.updated_at,"
+          + " due_since = EXCLUDED.due_since"
+          + " WHERE e.state IN ('"
+          + InboundState.RECEIVED.name()
+          + "','"
+          + InboundState.REFUSED_VERSION_SKEW.name()
+          + "') AND e.api_version <> ? AND EXCLUDED.api_version = ?"
+          + " AND e.event_type = EXCLUDED.event_type AND e.object_id = EXCLUDED.object_id"
+          + " AND e.livemode = EXCLUDED.livemode"
+          + " AND e.stripe_account_id = EXCLUDED.stripe_account_id"
+          + " RETURNING cure_generation, cured_from_api_version";
+
+  /**
+   * The stored identity, read in the record's own transaction when its statement returned no row
+   * (D-SKEW-5). Safe because no statement writes these four columns after the insert.
+   */
+  static final String IDENTITY =
+      "SELECT event_type, object_id, livemode, stripe_account_id FROM einvoice_inbound_event"
+          + " WHERE event_id = ?";
 
   static final String FIND =
       "SELECT " + COLUMNS + " FROM einvoice_inbound_event WHERE event_id = ?";
@@ -74,8 +121,11 @@ public final class JdbcInboundEventStore implements InboundEventStore {
           + " ELSE due_since END"
           + " WHERE event_id = ?";
 
-  /** {@link #TRANSITION} with the compare in the statement: the state the move was decided on. */
-  static final String TRANSITION_FROM = TRANSITION + " AND state = ?";
+  /**
+   * {@link #TRANSITION} with the compare in the statement: the state and the cure generation the
+   * move was decided on (D-PR9-F1, D-SKEW-2).
+   */
+  static final String TRANSITION_FROM = TRANSITION + " AND state = ? AND cure_generation = ?";
 
   /**
    * Which clock a running row is measured against (QUESTIONS 29): the parked limit for a parked row
@@ -137,7 +187,7 @@ public final class JdbcInboundEventStore implements InboundEventStore {
    */
   static final String STAMP_ATTEMPT =
       "UPDATE einvoice_inbound_event SET attempts = attempts + 1, next_attempt_at = ?,"
-          + " updated_at = ? WHERE event_id = ? AND state = ?";
+          + " updated_at = ? WHERE event_id = ? AND state = ? AND cure_generation = ?";
 
   /**
    * D-SRE-7: a row whose invoice holds an open number (numbered, archiving or failed archive: the
@@ -308,7 +358,11 @@ public final class JdbcInboundEventStore implements InboundEventStore {
 
   @Override
   public Optional<InboundEvent> stampAttempt(
-      String eventId, InboundState expected, Instant now, Duration retryIn) {
+      String eventId,
+      InboundState expected,
+      int expectedGeneration,
+      Instant now,
+      Duration retryIn) {
     Objects.requireNonNull(expected, "expected");
     Objects.requireNonNull(retryIn, "retryIn");
     return unitOfWork.inTransaction(
@@ -320,6 +374,7 @@ public final class JdbcInboundEventStore implements InboundEventStore {
             ps.setObject(2, ts(when));
             ps.setString(3, eventId);
             ps.setString(4, expected.name());
+            ps.setInt(5, expectedGeneration);
             if (ps.executeUpdate() != 1) {
               return Optional.<InboundEvent>empty();
             }
@@ -329,35 +384,96 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   }
 
   @Override
-  public boolean record(InboundEvent event, byte[] body) {
+  public Recorded record(InboundEvent event, byte[] body, String pinnedApiVersion) {
+    Objects.requireNonNull(event, "event");
+    if (pinnedApiVersion == null || pinnedApiVersion.isBlank()) {
+      // D-SKEW-10: a blank pin would cure rows to a blank version. Refused before any statement.
+      throw new EInvoiceException(
+          ErrorCodes.CONFIG, "an inbound event is recorded only against a pinned API version");
+    }
+    try {
+      return recordOnce(event, body, pinnedApiVersion, true);
+    } catch (SnapshotLost first) {
+      // D-SKEW-4, the rule of move: at REPEATABLE READ or SERIALIZABLE the statement sees a copy
+      // another transaction committed as 40001. A fresh transaction sees it and answers as READ
+      // COMMITTED does. A second 40001 is an unavailable store.
+      return recordOnce(event, body, pinnedApiVersion, false);
+    }
+  }
+
+  private Recorded recordOnce(
+      InboundEvent event, byte[] body, String pinnedApiVersion, boolean mayRetry) {
     return unitOfWork.inTransaction(
         unit -> {
-          try (PreparedStatement ps = unit.connection().prepareStatement(INSERT)) {
-            int i = 1;
-            ps.setString(i++, event.eventId());
-            ps.setString(i++, event.type());
-            ps.setString(i++, event.objectId());
-            ps.setString(i++, event.apiVersion());
-            ps.setBoolean(i++, event.livemode());
-            ps.setString(i++, event.stripeAccountId());
-            ps.setString(i++, event.sellerId());
-            ps.setString(i++, event.mode().wire());
-            ps.setString(i++, event.signatureKeyId());
-            ps.setObject(i++, ts(event.receivedAt()));
-            ps.setObject(i++, ts(event.updatedAt()));
-            ps.setString(i++, event.state().name());
-            ps.setInt(i++, event.attempts());
-            ps.setObject(i++, ts(event.nextAttemptAt()));
-            ps.setString(i++, event.lastCode());
-            ps.setString(i++, "");
-            ps.setBytes(i++, body);
-            ps.setString(i++, event.bodySha256());
-            ps.setObject(i, ts(event.dueSinceInstant().orElse(event.receivedAt())));
-            // ON CONFLICT DO NOTHING: a redelivery of an event we already hold is a no-op that is
-            // still answered 200. Stripe delivers at least once and says so.
-            return ps.executeUpdate() == 1;
+          try {
+            return recordIn(unit.connection(), event, body, pinnedApiVersion);
+          } catch (SQLException e) {
+            if (mayRetry && !unit.joined() && "40001".equals(e.getSQLState())) {
+              throw new SnapshotLost();
+            }
+            throw e;
           }
         });
+  }
+
+  private static Recorded recordIn(
+      Connection c, InboundEvent event, byte[] body, String pinnedApiVersion) throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(INSERT)) {
+      int i = 1;
+      ps.setString(i++, event.eventId());
+      ps.setString(i++, event.type());
+      ps.setString(i++, event.objectId());
+      ps.setString(i++, event.apiVersion());
+      ps.setBoolean(i++, event.livemode());
+      ps.setString(i++, event.stripeAccountId());
+      ps.setString(i++, event.sellerId());
+      ps.setString(i++, event.mode().wire());
+      ps.setString(i++, event.signatureKeyId());
+      ps.setObject(i++, ts(event.receivedAt()));
+      ps.setObject(i++, ts(event.updatedAt()));
+      ps.setString(i++, event.state().name());
+      ps.setInt(i++, event.attempts());
+      ps.setObject(i++, ts(event.nextAttemptAt()));
+      ps.setString(i++, event.lastCode());
+      ps.setString(i++, "");
+      ps.setBytes(i++, body);
+      ps.setString(i++, event.bodySha256());
+      ps.setObject(i++, ts(event.dueSinceInstant().orElse(event.receivedAt())));
+      ps.setString(i++, pinnedApiVersion);
+      ps.setString(i, pinnedApiVersion);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          // D-SKEW-7: a fresh insert always writes generation 0, a cure always writes more.
+          if (rs.getInt(1) == 0) {
+            return Recorded.FIRST;
+          }
+          log.info(
+              "einvoice: event {} recorded at API version {} was replaced by its copy at the"
+                  + " pinned version {} and runs again",
+              event.eventId(),
+              rs.getString(2),
+              event.apiVersion());
+          return Recorded.CURED;
+        }
+      }
+    }
+    // No row: rule A was false. A redelivery, which Stripe documents, or a copy with another
+    // identity, which it never sends. Decided here, in the same transaction, at any version.
+    try (PreparedStatement ps = c.prepareStatement(IDENTITY)) {
+      ps.setString(1, event.eventId());
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          // Purged by retention between the two statements: the copy is older than retention.
+          return Recorded.DUPLICATE;
+        }
+        boolean same =
+            event.type().equals(rs.getString(1))
+                && event.objectId().equals(rs.getString(2))
+                && event.livemode() == rs.getBoolean(3)
+                && event.stripeAccountId().equals(rs.getString(4));
+        return same ? Recorded.DUPLICATE : Recorded.IDENTITY_MISMATCH;
+      }
+    }
   }
 
   @Override
@@ -398,7 +514,7 @@ public final class JdbcInboundEventStore implements InboundEventStore {
       String ruleId,
       Instant now,
       Duration retryIn) {
-    return move(eventId, Optional.empty(), next, code, ruleId, now, retryIn)
+    return move(eventId, Optional.empty(), 0, next, code, ruleId, now, retryIn)
         .orElseThrow(
             () ->
                 new EInvoiceException(
@@ -409,13 +525,15 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   public Optional<InboundEvent> transitionFrom(
       String eventId,
       InboundState expected,
+      int expectedGeneration,
       InboundState next,
       String code,
       String ruleId,
       Instant now,
       Duration retryIn) {
     Objects.requireNonNull(expected, "expected");
-    return move(eventId, Optional.of(expected), next, code, ruleId, now, retryIn);
+    return move(
+        eventId, Optional.of(expected), expectedGeneration, next, code, ruleId, now, retryIn);
   }
 
   /**
@@ -433,15 +551,17 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   private Optional<InboundEvent> move(
       String eventId,
       Optional<InboundState> expected,
+      int expectedGeneration,
       InboundState next,
       String code,
       String ruleId,
       Instant now,
       Duration retryIn) {
     try {
-      return attempt(eventId, expected, next, code, ruleId, now, retryIn, true);
+      return attempt(eventId, expected, expectedGeneration, next, code, ruleId, now, retryIn, true);
     } catch (SnapshotLost first) {
-      return attempt(eventId, expected, next, code, ruleId, now, retryIn, false);
+      return attempt(
+          eventId, expected, expectedGeneration, next, code, ruleId, now, retryIn, false);
     }
   }
 
@@ -457,6 +577,7 @@ public final class JdbcInboundEventStore implements InboundEventStore {
   private Optional<InboundEvent> attempt(
       String eventId,
       Optional<InboundState> expected,
+      int expectedGeneration,
       InboundState next,
       String code,
       String ruleId,
@@ -466,7 +587,8 @@ public final class JdbcInboundEventStore implements InboundEventStore {
     return unitOfWork.inTransaction(
         unit -> {
           try {
-            return run(unit, eventId, expected, next, code, ruleId, now, retryIn);
+            return run(
+                unit, eventId, expected, expectedGeneration, next, code, ruleId, now, retryIn);
           } catch (SQLException e) {
             if (mayRetry && !unit.joined() && "40001".equals(e.getSQLState())) {
               throw new SnapshotLost();
@@ -480,6 +602,7 @@ public final class JdbcInboundEventStore implements InboundEventStore {
       JdbcUnitOfWork.Unit unit,
       String eventId,
       Optional<InboundState> expected,
+      int expectedGeneration,
       InboundState next,
       String code,
       String ruleId,
@@ -494,7 +617,10 @@ public final class JdbcInboundEventStore implements InboundEventStore {
                     new EInvoiceException(
                         ErrorCodes.INBOUND_UNREADABLE,
                         "no inbound event is recorded under that id"));
-    if (expected.isPresent() && current.state() != expected.get()) {
+    if (expected.isPresent()
+        && (current.state() != expected.get() || current.cureGeneration() != expectedGeneration)) {
+      // D-SKEW-2: a cure between this run's read and this write raised the generation. The state
+      // may be the expected one again; the row is still not the one the move was decided on.
       return Optional.<InboundEvent>empty();
     }
     // Refused in the enum, here, for the same reason the issuance transition is: a worker
@@ -529,7 +655,8 @@ public final class JdbcInboundEventStore implements InboundEventStore {
       ps.setString(i++, eventId);
       // The row is locked, so this repeats the compare above rather than racing it: the
       // statement itself refuses a row whose state is not the one the move was decided on.
-      ps.setString(i, current.state().name());
+      ps.setString(i++, current.state().name());
+      ps.setInt(i, current.cureGeneration());
       if (ps.executeUpdate() != 1) {
         throw new EInvoiceException(
             ErrorCodes.INBOUND_UNREADABLE, "the inbound event changed under its own row lock");
@@ -803,7 +930,8 @@ public final class JdbcInboundEventStore implements InboundEventStore {
         rs.getString("last_code"),
         rs.getString("body_sha256"),
         rs.getBoolean("body_present"),
-        instant(rs.getObject("due_since", OffsetDateTime.class)));
+        instant(rs.getObject("due_since", OffsetDateTime.class)),
+        rs.getInt("cure_generation"));
   }
 
   @Override

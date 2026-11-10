@@ -59,7 +59,7 @@ class RunningLimitStoreTest {
   private static String receivedAt(JdbcInboundEventStore store, Instant at) {
     String id = freshId();
     EventIdentity identity = new EventIdentity(id, "invoice.finalized", PIN, true, "", "in_" + id);
-    store.record(InboundEvent.received(identity, Mode.LIVE, "primary", BODY, at), BODY);
+    store.record(InboundEvent.received(identity, Mode.LIVE, "primary", BODY, at), BODY, PIN);
     return id;
   }
 
@@ -192,7 +192,7 @@ class RunningLimitStoreTest {
 
     assertThat(
             store.transitionFrom(
-                id, InboundState.RECEIVED, InboundState.FETCHED, "", null, moved, null))
+                id, InboundState.RECEIVED, 0, InboundState.FETCHED, "", null, moved, null))
         .isPresent();
 
     assertThat(store.find(id).orElseThrow().dueSinceInstant()).contains(moved);
@@ -288,7 +288,8 @@ class RunningLimitStoreTest {
       store.record(
           InboundEvent.received(
               identity, Mode.LIVE, "primary", BODY, NOW.minus(Duration.ofDays(400))),
-          BODY);
+          BODY,
+          PIN);
       PostgresSupport.executeOn(
           legacy,
           "UPDATE einvoice_inbound_event SET due_since = NULL WHERE event_id = '" + id + "'");

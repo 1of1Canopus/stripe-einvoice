@@ -1,6 +1,6 @@
 package com.housedevinci.einvoice.autoconfigure;
 
-import com.housedevinci.einvoice.application.InboundEventStore;
+import com.housedevinci.einvoice.application.InboundIntake;
 import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.EventIdentity;
@@ -52,7 +52,7 @@ public class StripeWebhookController {
 
   private static final Logger log = LoggerFactory.getLogger(StripeWebhookController.class);
 
-  private final InboundEventStore inbound;
+  private final InboundIntake intake;
   private final IssuanceWorker worker;
   private final Map<String, String> webhookSecrets;
   private final Duration tolerance;
@@ -60,15 +60,19 @@ public class StripeWebhookController {
   private final Mode mode;
   private final Clock clock;
 
+  /**
+   * @param intake records the event at the configured pin and reports an identity mismatch
+   *     (D-PR60-2); the controller only decides whether to hand the row to the worker
+   */
   public StripeWebhookController(
-      InboundEventStore inbound,
+      InboundIntake intake,
       IssuanceWorker worker,
       Map<String, String> webhookSecrets,
       Duration tolerance,
       int maxBodyBytes,
       Mode mode,
       Clock clock) {
-    this.inbound = inbound;
+    this.intake = java.util.Objects.requireNonNull(intake, "intake");
     this.worker = worker;
     this.webhookSecrets = Map.copyOf(webhookSecrets);
     this.tolerance = tolerance;
@@ -113,10 +117,12 @@ public class StripeWebhookController {
     }
 
     try {
-      boolean first =
-          inbound.record(
-              InboundEvent.received(identity, mode, signatureKeyId, body, clock.instant()), body);
-      if (first) {
+      // A first record and a cure (D-PR60-2) both leave a row that runs now. A duplicate and an
+      // identity mismatch are answered 200 too: a 400 would let Stripe disable the endpoint.
+      if (intake
+          .record(
+              InboundEvent.received(identity, mode, signatureKeyId, body, clock.instant()), body)
+          .runs()) {
         // Handed over after the commit, and a rejection past capacity simply leaves the row
         // RECEIVED for the sweeper: back-pressure costs latency and never an event.
         worker.submit(identity.eventId());

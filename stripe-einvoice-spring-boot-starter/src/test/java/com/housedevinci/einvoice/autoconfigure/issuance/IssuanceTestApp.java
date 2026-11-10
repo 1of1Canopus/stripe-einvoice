@@ -57,8 +57,15 @@ public class IssuanceTestApp {
 
     private final Map<String, SourceInvoice> invoices = new LinkedHashMap<>();
     private final AtomicInteger fetches = new AtomicInteger();
+    private final String pin;
 
     public RecordingStripeSource() {
+      this(PINNED_VERSION);
+    }
+
+    /** A source whose pin is the test's own: a host pin that is not the SDK's (D-SKEW-10). */
+    public RecordingStripeSource(String pin) {
+      this.pin = pin;
       add("in_1");
     }
 
@@ -90,7 +97,7 @@ public class IssuanceTestApp {
 
     @Override
     public String pinnedApiVersion() {
-      return PINNED_VERSION;
+      return pin;
     }
 
     private static SourceInvoice invoice(String invoiceId) {

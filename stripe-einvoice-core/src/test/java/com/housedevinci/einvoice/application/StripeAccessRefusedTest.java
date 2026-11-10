@@ -172,7 +172,7 @@ class StripeAccessRefusedTest {
     String eventId = threeRefused(harness, "in_sre_stamped_").get(0);
     InboundEvent stopped = RetryEdgeFixture.row(harness, eventId);
     // A live run's stamp: the row keeps its state and gets a next attempt one hour away.
-    harness.inbound().stampAttempt(eventId, stopped.state(), harness.now(), Duration.ofHours(1));
+    harness.inbound().stampAttempt(eventId, stopped.state(), 0, harness.now(), Duration.ofHours(1));
     InboundEvent stamped = RetryEdgeFixture.row(harness, eventId);
 
     harness.unitOfWork().rearmAccessRefused();

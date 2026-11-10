@@ -195,7 +195,11 @@ public final class ReconciliationSweep {
     this.clock = clock;
     this.settings = settings;
     this.configuration = configuration;
+    this.intake = new InboundIntake(inbound, findings, configuration, clock);
   }
+
+  /** The webhook's own intake, so a reconciliation row cures at the same pin (D-SKEW-3). */
+  private final InboundIntake intake;
 
   /**
    * One pass. Every check runs in every pass, each on its own (D-PR51-1): a check whose dependency
@@ -780,7 +784,19 @@ public final class ReconciliationSweep {
       InboundEvent event =
           InboundEvent.received(
               identity, configuration.mode(), RECONCILIATION_SOURCE, new byte[0], now);
-      inbound.record(event, null);
+      // D-SKEW-3: a recon- row refused for version skew after a deploy is cured here, at the pin
+      // the route reads, with its null body kept null. Every answer is handled: FIRST and CURED
+      // leave a due row for the sweeper, DUPLICATE is nothing, and IDENTITY_MISMATCH has already
+      // been reported by the intake.
+      // A switch expression, so a new answer fails to compile until it is given one here.
+      String answer =
+          switch (intake.record(event, null)) {
+            case FIRST -> "enqueued";
+            case CURED -> "cured at the pinned API version";
+            case DUPLICATE -> "already enqueued";
+            case IDENTITY_MISMATCH -> "refused: another identity is recorded under that id";
+          };
+      log.debug("einvoice: reconciliation row {}: {}", event.eventId(), answer);
     } catch (EInvoiceException e) {
       log.warn(
           "einvoice: reconciliation could not enqueue an invoice it found unissued ({})", e.code());

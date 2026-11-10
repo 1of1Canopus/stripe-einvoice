@@ -63,7 +63,9 @@ class DocumentDatesWiringTest {
         new EventIdentity(
             eventId, "invoice.finalized", source.pinnedApiVersion(), true, "", "in_1");
     inbound.record(
-        InboundEvent.received(identity, Mode.LIVE, "primary", body, Instant.now()), body);
+        InboundEvent.received(identity, Mode.LIVE, "primary", body, Instant.now()),
+        body,
+        source.pinnedApiVersion());
     context.getBean(IssuanceUnitOfWork.class).process(eventId);
     return inbound.find(eventId).orElseThrow();
   }

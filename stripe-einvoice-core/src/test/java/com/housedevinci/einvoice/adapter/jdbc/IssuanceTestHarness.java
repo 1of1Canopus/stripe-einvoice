@@ -194,6 +194,20 @@ public final class IssuanceTestHarness {
         configurationFor("DEFAULT", pinnedApiVersion));
   }
 
+  /**
+   * Moves this harness's pin (a deploy): every unit of work, sweep and receive built after this
+   * call uses {@code apiVersion}.
+   */
+  public IssuanceTestHarness pinnedTo(String apiVersion) {
+    this.pinnedApiVersion = apiVersion;
+    return this;
+  }
+
+  /** The pin this harness's units of work and sweeps use. */
+  public String pinnedApiVersion() {
+    return pinnedApiVersion;
+  }
+
   public static IssuanceTestHarness create() {
     return new IssuanceTestHarness(TestValidators.passing(), Optional.empty(), "Europe/Paris");
   }
@@ -472,7 +486,9 @@ public final class IssuanceTestHarness {
     EventIdentity identity =
         new EventIdentity(eventId, type, FakeStripeSource.PINNED, true, "", objectId);
     inbound.record(
-        InboundEvent.received(identity, Mode.LIVE, "primary", body, clock.instant()), body);
+        InboundEvent.received(identity, Mode.LIVE, "primary", body, clock.instant()),
+        body,
+        pinnedApiVersion);
     return eventId;
   }
 
@@ -483,7 +499,9 @@ public final class IssuanceTestHarness {
     EventIdentity identity =
         new EventIdentity(eventId, type, apiVersion, livemode, account, objectId);
     inbound.record(
-        InboundEvent.received(identity, Mode.LIVE, "primary", body, clock.instant()), body);
+        InboundEvent.received(identity, Mode.LIVE, "primary", body, clock.instant()),
+        body,
+        pinnedApiVersion);
     return eventId;
   }
 

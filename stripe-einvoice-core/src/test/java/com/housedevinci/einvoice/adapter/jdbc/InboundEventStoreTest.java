@@ -47,10 +47,12 @@ class InboundEventStoreTest {
   void the_first_delivery_is_recorded_with_its_body_and_a_duplicate_is_a_no_op() {
     JdbcInboundEventStore store = store();
     String id = freshId();
-    assertThat(store.record(received(id), BODY)).isTrue();
+    assertThat(store.record(received(id), BODY, "2026-03-31.clover"))
+        .isEqualTo(com.housedevinci.einvoice.application.InboundEventStore.Recorded.FIRST);
     // At-least-once delivery is Stripe's documented behaviour, so a redelivery is normal traffic:
     // it must be a no-op that the endpoint still answers 200 to, never a second row or an error.
-    assertThat(store.record(received(id), BODY)).isFalse();
+    assertThat(store.record(received(id), BODY, "2026-03-31.clover"))
+        .isEqualTo(com.housedevinci.einvoice.application.InboundEventStore.Recorded.DUPLICATE);
 
     InboundEvent stored = store.find(id).orElseThrow();
     assertThat(stored.state()).isEqualTo(InboundState.RECEIVED);
@@ -66,7 +68,7 @@ class InboundEventStoreTest {
     // the event can still run, and the SHA-256 outlives it so what arrived stays provable.
     JdbcInboundEventStore store = store();
     String id = freshId();
-    store.record(received(id), BODY);
+    store.record(received(id), BODY, "2026-03-31.clover");
     store.transition(id, InboundState.FETCHED, "", NOW, null);
     assertThat(store.body(id)).contains(BODY);
 
@@ -80,7 +82,7 @@ class InboundEventStoreTest {
   void a_refused_event_keeps_its_body_so_it_can_be_replayed_after_the_pin_is_updated() {
     JdbcInboundEventStore store = store();
     String id = freshId();
-    store.record(received(id), BODY);
+    store.record(received(id), BODY, "2026-03-31.clover");
     InboundEvent refused =
         store.transition(
             id, InboundState.REFUSED_VERSION_SKEW, ErrorCodes.API_VERSION_SKEW, NOW, null);
@@ -98,7 +100,7 @@ class InboundEventStoreTest {
   void a_backwards_transition_is_refused_by_the_state_machine_not_by_the_column() {
     JdbcInboundEventStore store = store();
     String id = freshId();
-    store.record(received(id), BODY);
+    store.record(received(id), BODY, "2026-03-31.clover");
     store.transition(id, InboundState.COMPLETED, "", NOW, null);
     assertThatThrownBy(() -> store.transition(id, InboundState.FETCHED, "", NOW, null))
         .isInstanceOf(EInvoiceException.class)
@@ -112,7 +114,7 @@ class InboundEventStoreTest {
     // expects RECEIVED, so it must leave A's row exactly as it is: state, code, attempts, body.
     JdbcInboundEventStore store = store();
     String id = freshId();
-    store.record(received(id), BODY);
+    store.record(received(id), BODY, "2026-03-31.clover");
     store.transition(id, InboundState.FETCHED, "", NOW, null);
     InboundEvent moved = store.transition(id, InboundState.MAPPED, "", NOW, null);
 
@@ -120,6 +122,7 @@ class InboundEventStoreTest {
             store.transitionFrom(
                 id,
                 InboundState.RECEIVED,
+                0,
                 InboundState.FETCHED,
                 ErrorCodes.STRIPE_UNAVAILABLE,
                 "rule-x",
@@ -140,12 +143,13 @@ class InboundEventStoreTest {
   void a_compare_and_set_on_the_expected_state_moves_the_row_like_a_transition() {
     JdbcInboundEventStore store = store();
     String id = freshId();
-    store.record(received(id), BODY);
+    store.record(received(id), BODY, "2026-03-31.clover");
     InboundEvent moved =
         store
             .transitionFrom(
                 id,
                 InboundState.RECEIVED,
+                0,
                 InboundState.FAILED_FETCH,
                 ErrorCodes.STRIPE_UNAVAILABLE,
                 "",
@@ -163,12 +167,12 @@ class InboundEventStoreTest {
     // A match with an illegal edge is the caller's own bug, not a race: it stays loud.
     JdbcInboundEventStore store = store();
     String id = freshId();
-    store.record(received(id), BODY);
+    store.record(received(id), BODY, "2026-03-31.clover");
     store.transition(id, InboundState.COMPLETED, "", NOW, null);
     assertThatThrownBy(
             () ->
                 store.transitionFrom(
-                    id, InboundState.COMPLETED, InboundState.FETCHED, "", "", NOW, null))
+                    id, InboundState.COMPLETED, 0, InboundState.FETCHED, "", "", NOW, null))
         .isInstanceOf(EInvoiceException.class)
         .extracting("code")
         .isEqualTo(ErrorCodes.INBOUND_ILLEGAL_TRANSITION);
@@ -178,6 +182,7 @@ class InboundEventStoreTest {
                     .transitionFrom(
                         "evt_does_not_exist",
                         InboundState.RECEIVED,
+                        0,
                         InboundState.FETCHED,
                         "",
                         "",
@@ -195,10 +200,10 @@ class InboundEventStoreTest {
     String retryable = freshId();
     String finalFailure = freshId();
     String completed = freshId();
-    store.record(received(running), BODY);
-    store.record(received(retryable), BODY);
-    store.record(received(finalFailure), BODY);
-    store.record(received(completed), BODY);
+    store.record(received(running), BODY, "2026-03-31.clover");
+    store.record(received(retryable), BODY, "2026-03-31.clover");
+    store.record(received(finalFailure), BODY, "2026-03-31.clover");
+    store.record(received(completed), BODY, "2026-03-31.clover");
     store.transition(
         retryable,
         InboundState.FAILED_FETCH,
@@ -228,7 +233,7 @@ class InboundEventStoreTest {
   void a_retryable_terminal_is_not_re_picked_before_its_time_or_after_the_ceiling() {
     JdbcInboundEventStore store = store();
     String id = freshId();
-    store.record(received(id), BODY);
+    store.record(received(id), BODY, "2026-03-31.clover");
     store.transition(
         id, InboundState.FAILED_FETCH, ErrorCodes.STRIPE_UNAVAILABLE, NOW, Duration.ofHours(1));
 
@@ -270,7 +275,7 @@ class InboundEventStoreTest {
   void the_resolved_seller_is_bound_from_the_account_and_never_from_the_payload() {
     JdbcInboundEventStore store = store();
     String id = freshId();
-    store.record(received(id), BODY);
+    store.record(received(id), BODY, "2026-03-31.clover");
     assertThat(store.find(id).orElseThrow().sellerId()).isEmpty();
     assertThat(store.bindSeller(id, "acme", NOW).sellerId()).isEqualTo("acme");
   }
@@ -279,7 +284,7 @@ class InboundEventStoreTest {
   void the_failing_validation_rule_is_recorded_so_the_operator_void_can_name_it() {
     JdbcInboundEventStore store = store();
     String id = freshId();
-    store.record(received(id), BODY);
+    store.record(received(id), BODY, "2026-03-31.clover");
     store.transition(id, InboundState.FETCHED, "", NOW, null);
     store.transition(
         id, InboundState.FAILED_ISSUANCE, ErrorCodes.VALIDATION_REFUSED, "BR-CO-10", NOW, null);
@@ -293,7 +298,7 @@ class InboundEventStoreTest {
     String recent = freshId();
     // Own invoice ids: in the shared database "in_1" holds open numbers of other tests, and the
     // purge keeps the row of an open number (D-SRE-7), under any seller.
-    store.record(received(old, "in_purge_" + old), BODY);
+    store.record(received(old, "in_purge_" + old), BODY, "2026-03-31.clover");
     // The purge takes the oldest rows first, LIMIT 100, over the shared test database. Every
     // harness test leaves events dated in January 2026, so a row only 90 days before NOW was not
     // among the first 100 once enough of them existed (order-dependent). The old row is dated
@@ -303,7 +308,7 @@ class InboundEventStoreTest {
             + " WHERE event_id = '"
             + old
             + "'");
-    store.record(received(recent, "in_purge_" + recent), BODY);
+    store.record(received(recent, "in_purge_" + recent), BODY, "2026-03-31.clover");
 
     // Both rows and the cutoff hang off the fixed NOW. The wall clock made this a date bomb:
     // from 2026-10-15 the "recent" row (received at NOW) was older than now() - 30 days.
@@ -316,7 +321,7 @@ class InboundEventStoreTest {
   @Test
   void the_counts_by_state_carry_no_buyer_field() {
     JdbcInboundEventStore store = store();
-    store.record(received(freshId()), BODY);
+    store.record(received(freshId()), BODY, "2026-03-31.clover");
     assertThat(store.countsByState())
         .isNotEmpty()
         .allSatisfy(count -> assertThat(count.count()).isPositive());

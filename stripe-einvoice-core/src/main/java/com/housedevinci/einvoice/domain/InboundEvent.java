@@ -18,6 +18,8 @@ import java.util.Optional;
  * @param dueSince when the row last made progress, the clock of its time limit ({@link
  *     RunningLimit}); null only for a row written by 0.1.0 during the upgrade, which is read as
  *     "not past any limit", never as the epoch
+ * @param cureGeneration how many times a copy at the pin cured this row (D-PR60-2); 0 for a row
+ *     never cured. It only goes up, so a run that read the row before a cure can tell
  */
 public record InboundEvent(
     String eventId,
@@ -37,7 +39,50 @@ public record InboundEvent(
     String lastCode,
     String bodySha256,
     boolean bodyPresent,
-    Instant dueSince) {
+    Instant dueSince,
+    int cureGeneration) {
+
+  /** The shape before the skew cure: a row never cured. */
+  public InboundEvent(
+      String eventId,
+      String type,
+      String objectId,
+      String apiVersion,
+      boolean livemode,
+      String stripeAccountId,
+      String sellerId,
+      Mode mode,
+      String signatureKeyId,
+      Instant receivedAt,
+      Instant updatedAt,
+      InboundState state,
+      int attempts,
+      Instant nextAttemptAt,
+      String lastCode,
+      String bodySha256,
+      boolean bodyPresent,
+      Instant dueSince) {
+    this(
+        eventId,
+        type,
+        objectId,
+        apiVersion,
+        livemode,
+        stripeAccountId,
+        sellerId,
+        mode,
+        signatureKeyId,
+        receivedAt,
+        updatedAt,
+        state,
+        attempts,
+        nextAttemptAt,
+        lastCode,
+        bodySha256,
+        bodyPresent,
+        dueSince,
+        0);
+  }
 
   /** The 0.1.0 shape, kept for source compatibility: the clock starts at arrival. */
   public InboundEvent(
@@ -86,6 +131,10 @@ public record InboundEvent(
     if (state == null || mode == null || receivedAt == null) {
       throw new EInvoiceException(
           ErrorCodes.INVALID, "an inbound event needs a state, a mode and an arrival time");
+    }
+    if (cureGeneration < 0) {
+      throw new EInvoiceException(
+          ErrorCodes.INVALID, "an inbound event's cure generation is never negative");
     }
     apiVersion = apiVersion == null ? "" : apiVersion;
     stripeAccountId = stripeAccountId == null ? "" : stripeAccountId;
