@@ -24,7 +24,10 @@ class CipherProbePr60SdkTest {
   @Test
   void probe_the_pin_is_the_compiled_sdk_version_not_the_one_on_the_classpath() throws Exception {
     System.out.println(
-        "PR60-SDK compiled=" + StripeApiInvoiceSource.SDK_API_VERSION + " runtime=" + runtimeSdkVersion());
+        "PR60-SDK compiled="
+            + StripeApiInvoiceSource.SDK_API_VERSION
+            + " runtime="
+            + runtimeSdkVersion());
     assertThat(StripeApiInvoiceSource.SDK_API_VERSION).isEqualTo(runtimeSdkVersion());
   }
 

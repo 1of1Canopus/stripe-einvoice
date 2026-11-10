@@ -14,17 +14,18 @@ import java.util.UUID;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.springframework.boot.test.system.CapturedOutput;
-import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 /**
  * Security review, PR 60. D-PR60-5 and the reconciliation cushion. The probes for D-PR60-1 (a code
- * path that does not exist; the fix is text) and D-PR60-2 (design stop) are not in this file. Context: D-PR60-1: the upgrade note says an event refused at
- * the previous pin "replays once the versions match". The row records the version the event was
- * sent at, the pin can only be the SDK's, so a row recorded at 2026-08-26.dahlia never matches on
- * 34.0.0 and is never re-picked by the due query.
+ * path that does not exist; the fix is text) and D-PR60-2 (design stop) are not in this file.
+ * Context: D-PR60-1: the upgrade note says an event refused at the previous pin "replays once the
+ * versions match". The row records the version the event was sent at, the pin can only be the
+ * SDK's, so a row recorded at 2026-08-26.dahlia never matches on 34.0.0 and is never re-picked by
+ * the due query.
  */
 @ExtendWith(OutputCaptureExtension.class)
 class CipherProbePr60Test {
@@ -44,7 +45,9 @@ class CipherProbePr60Test {
             "einvoice.chain.hmac-secret=ZWludm9pY2UtdGVzdC1jaGFpbi1zZWNyZXQtMDAwMSE=",
             "einvoice.chain.hmac-key-id=k1",
             "einvoice.archive.type=filesystem",
-            "einvoice.archive.root=" + System.getProperty("java.io.tmpdir") + "/einvoice-pr60-probe",
+            "einvoice.archive.root="
+                + System.getProperty("java.io.tmpdir")
+                + "/einvoice-pr60-probe",
             "einvoice.stripe.webhook-secrets.primary=whsec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "einvoice.issuance.sweep-interval=24h")
         .withPropertyValues(properties);
@@ -75,14 +78,16 @@ class CipherProbePr60Test {
    */
   @Test
   void probe_switching_reconciliation_off_is_silent_at_start_up(CapturedOutput out) {
-    runner("einvoice.reconcile.enabled=false")
-        .run(context -> assertThat(context).hasNotFailed());
+    runner("einvoice.reconcile.enabled=false").run(context -> assertThat(context).hasNotFailed());
     assertThat(out.getOut() + out.getErr())
         .as("a WARN that names einvoice.reconcile.enabled=false")
         .contains("einvoice.reconcile.enabled=false");
   }
 
-  /** PASSES: the cushion. With reconciliation on (the default) the invoice is re-enqueued at the SDK pin. */
+  /**
+   * PASSES: the cushion. With reconciliation on (the default) the invoice is re-enqueued at the SDK
+   * pin.
+   */
   @Test
   void check_reconciliation_re_enqueues_the_invoice_a_previous_pin_row_left_unissued() {
     runner()
@@ -124,7 +129,10 @@ class CipherProbePr60Test {
                                 InboundState.REFUSED_ACCOUNT,
                                 InboundState.DROPPED);
                         System.out.println(
-                            "PR60-CHECK recon row state=" + recon.state() + " code=" + recon.lastCode());
+                            "PR60-CHECK recon row state="
+                                + recon.state()
+                                + " code="
+                                + recon.lastCode());
                       });
               assertThat(inbound.find(eventId).orElseThrow().state())
                   .isEqualTo(InboundState.REFUSED_VERSION_SKEW);
