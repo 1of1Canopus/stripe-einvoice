@@ -57,6 +57,13 @@ import org.springframework.web.client.RestClient;
     })
 class StripeWebhookEndpointTest {
 
+  /**
+   * The Stripe API version the CHANGELOG upgrade note and the README name. Kept in one place. A
+   * stripe-java bump that moves the pin fails the test below until the note is written and this
+   * literal is updated.
+   */
+  private static final String PIN_NAMED_IN_THE_UPGRADE_NOTE = "2026-10-28.endive";
+
   private static final String PRIMARY = "whsec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   private static final String RETIRING = "whsec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -278,9 +285,19 @@ class StripeWebhookEndpointTest {
   }
 
   @Test
+  void the_sdk_pin_is_the_one_the_upgrade_note_names() {
+    assertThat(com.stripe.Stripe.API_VERSION)
+        .as(
+            "stripe-java moved the Stripe API version. Write the CHANGELOG upgrade note and update"
+                + " the README, then update PIN_NAMED_IN_THE_UPGRADE_NOTE")
+        .isEqualTo(PIN_NAMED_IN_THE_UPGRADE_NOTE);
+  }
+
+  @Test
   void an_event_carrying_the_sdk_api_version_is_accepted_and_issued() {
-    // Pin watch: the version the SDK sends is the version the module accepts. When a stripe-java
-    // bump moves Stripe.API_VERSION, this and the next test show it in CI, not in production.
+    // The version the SDK sends is the version the module accepts. This test is written in terms
+    // of the SDK constant, so it cannot see a pin move. The test the_sdk_pin_is_the_one_the_
+    // upgrade_note_names does.
     String eventId = freshId();
     byte[] body =
         realShapedBody(eventId, com.stripe.Stripe.API_VERSION).getBytes(StandardCharsets.UTF_8);

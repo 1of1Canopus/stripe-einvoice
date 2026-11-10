@@ -12,6 +12,9 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+        # A stripe-java bump can move the pinned Stripe API version, which needs an upgrade note.
+        # It arrives alone so that note is written for that bump.
+        exclude-patterns: ["com.stripe:stripe-java"]
     labels: ["dependencies"]
     ignore:
       # central-publishing-maven-plugin 0.11.0 builds a bundle the Central Portal refuses on Maven
