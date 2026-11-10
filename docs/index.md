@@ -376,6 +376,24 @@ once. The refused events are on `einvoice_inbound_event` with their bodies intac
    operator to look at.
 3. Watch the findings list empty out.
 
+**Two endpoints, two versions.** When you re-pin by adding a second webhook endpoint at the new
+version, each event can reach both, each copy rendered at its own endpoint's version (this is
+Stripe's documented behaviour; the module is safe if it is not, a cure then simply never happens). The copy at the
+old version is recorded first and refused (`DEI-201`); the copy at the pin then replaces it in the
+same row, which runs at once. Nothing to do. A copy at the pin replaces only a row that is
+`RECEIVED` or `REFUSED_VERSION_SKEW` at another version, with the same event type, invoice, mode
+and account; it never touches a row that went further. The row keeps a trace: `cure_generation`,
+`cured_from_api_version`, `cured_from_body_sha256`, `cured_from_received_at` and `cured_at`.
+
+**A row stuck before this release.** Its right copy was answered as a duplicate and Stripe will not
+send it again. Resend the event from the Stripe Dashboard to the re-pinned endpoint (the resend is
+at that endpoint's version and cures the row), or let reconciliation enqueue the invoice inside its
+window.
+
+**A copy with another identity** under a recorded event id (another type, invoice, mode or account)
+is never applied: the endpoint answers 200, a WARN names the event id with `DEI-223`, and a finding
+`DEI-223` is raised on it. Stripe does not reuse event ids, so look for a leaked signing secret.
+
 ## Reconciliation, health and findings
 
 The sweep runs every `einvoice.reconcile.interval` and runs each check on its own: a finalised Stripe

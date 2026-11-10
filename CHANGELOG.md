@@ -119,6 +119,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **BREAKING CHANGE: `InboundEventStore` (D-PR60-2, D-SKEW-6).** Three methods change for
+  implementers, and none has a default, so a store of your own fails to compile instead of losing
+  the check:
+  - `record(InboundEvent, byte[])` returning `boolean` becomes `record(InboundEvent, byte[], String
+    pinnedApiVersion)` returning `InboundEventStore.Recorded` (`FIRST`, `DUPLICATE`, `CURED`,
+    `IDENTITY_MISMATCH`). A null or blank pin is refused with `DEI-100` before any SQL.
+  - `transitionFrom(eventId, expected, next, ...)` becomes `transitionFrom(eventId, expected,
+    expectedGeneration, next, ...)`.
+  - `stampAttempt(eventId, expected, now, retryIn)` becomes `stampAttempt(eventId, expected,
+    expectedGeneration, now, retryIn)`.
+
+  `expectedGeneration` is the new `InboundEvent.cureGeneration()` of the row the run decided on; the
+  write lands only if the row still has it. `InboundEvent` gains the component `cureGeneration`
+  (the earlier constructors are kept, with 0). `StripeWebhookController`'s constructor takes an
+  `InboundIntake` instead of the store. This is a 0.x release, so the break ships in a minor version.
 - **BREAKING CHANGE: `ArchiveStore.listAfter` and `IssuanceReader.knownKeys` (D-PR52-3).** Two new
   abstract methods for implementers. `listAfter(prefix, startAfter, limit)` returns an
   `ArchiveListing(keys, endOfFolder)`: keys strictly after `startAfter`, in UTF-8 byte order, and
@@ -254,6 +269,35 @@ All notable changes to this project are documented here. The format follows
   remain and mean an invoice.
 
 ### Fixed
+
+- **A copy of an event at the pinned API version is no longer dropped when the same event was
+  first seen at another version (D-PR60-2).** Example: the module moves its pin from
+  `2026-08-26.dahlia` to `2026-10-28.endive`; `evt_1` reaches the old endpoint at
+  `2026-08-26.dahlia` (recorded and refused as `DEI-201`) and the re-pinned endpoint at
+  `2026-10-28.endive`. Before, the second copy was answered 200 as a duplicate and the sale stayed
+  refused for ever. Now the copy at the pin replaces the refused row in one statement: the row is `RECEIVED` again, due now, with the new body and
+  version. A cure happens only while the stored row is `RECEIVED` or `REFUSED_VERSION_SKEW` (no
+  number is ever held in either), only when the copy is at the pin and the stored row is not, and
+  only when the event type, Stripe object, mode and account are the same. Two copies at once give
+  one cure, at every isolation level. A run that read the row before the cure loses its next write
+  (a new `cure_generation` that only goes up) and logs one INFO line, not the "writer outside its
+  run lock" WARN. The same applies to a reconciliation row (`recon-<invoice>`) refused for skew
+  after a deploy: the next pass cures it.
+  - Upgrade note: five new nullable or defaulted columns on `einvoice_inbound_event`
+    (`cure_generation`, `cured_from_api_version`, `cured_from_body_sha256`,
+    `cured_from_received_at`, `cured_at`), added by the schema script; no backfill. A cured row
+    keeps what it replaced in those columns: the version, the SHA-256 of the old body and the first
+    arrival; the old body itself is not kept. Retention, the retry ceiling and the time limit start
+    again at the cure.
+  - Rows already stuck at an old version are not cured by the upgrade, because their right copy
+    was answered 200 long ago. Two repairs: resend the event from the Stripe Dashboard to the
+    re-pinned endpoint, or let reconciliation enqueue the invoice inside its window.
+  - New code `DEI-223` (`INBOUND_IDENTITY_MISMATCH`): a signed copy under a recorded event id with
+    another event type, object, mode or account. Nothing is written, the endpoint answers 200, a
+    WARN names the event id and a finding is raised on it.
+  - Rolling upgrade: a node still on the previous release does not compare the generation. It runs
+    the copy it read at its own pin; the run lock and the one-number-per-invoice key still give one
+    number.
 
 - **The orphan check examines every key, against every row (D-PR52-3, D-PR51-5).** Up to 0.1.x
   the check compared the newest `page-size` rows of the window's series years with the first
