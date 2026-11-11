@@ -149,7 +149,7 @@ All notable changes to this project are documented here. The format follows
   Events that arrive in between are recorded as version skew (`DEI-201`, state
   `REFUSED_VERSION_SKEW`) with the new version, and the sweeper replays them after the deploy.
   Rows recorded at `2026-08-26.dahlia` are never replayed. A copy of the same event at
-  `2026-10-28.endive` cures such a row (see the skew cure entry above). Otherwise reconciliation
+  `2026-10-28.endive` cures such a row (see the skew cure entry below). Otherwise reconciliation
   issues their invoices: it must be on (`einvoice.reconcile.enabled`, the default) and the invoice must be inside
   its window. A property `einvoice.stripe.api-version=2026-08-26.dahlia` now refuses at start-up.
   Remove it or set it to `2026-10-28.endive`. The application must also declare a stripe-java
