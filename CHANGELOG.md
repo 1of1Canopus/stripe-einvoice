@@ -138,6 +138,25 @@ All notable changes to this project are documented here. The format follows
   (D-PR62-3).** The application now fails at startup when a host `StripeInvoiceSource` answers a
   blank pin. Before, it started, and every correctly signed webhook was answered 400 and recorded
   nowhere. The store keeps its own check.
+- **Upgrade note: stripe-java 34.1.0 moves the pinned Stripe API version.** The module now expects
+  Stripe API version `2026-10-28.endive` (it was `2026-08-26.dahlia`). A Stripe webhook endpoint
+  keeps the version it was created with, so you cannot change it. Do the steps in this order:
+  1. Create a new webhook endpoint at the new version.
+  2. Add its signing secret to `einvoice.stripe.webhook-secrets`, next to the old one.
+  3. Disable the old endpoint.
+  4. Deploy this version.
+
+  Events that arrive in between are recorded as version skew (`DEI-201`, state
+  `REFUSED_VERSION_SKEW`) with the new version, and the sweeper replays them after the deploy.
+  Rows recorded at `2026-08-26.dahlia` are never replayed. A copy of the same event at
+  `2026-10-28.endive` cures such a row (see the skew cure entry above). Otherwise reconciliation
+  issues their invoices: it must be on (`einvoice.reconcile.enabled`, the default) and the invoice must be inside
+  its window. A property `einvoice.stripe.api-version=2026-08-26.dahlia` now refuses at start-up.
+  Remove it or set it to `2026-10-28.endive`. The application must also declare a stripe-java
+  that speaks `2026-10-28.endive`. This release is built and tested with `34.1.0`. A stripe-java that
+  speaks another Stripe API version is refused at start-up. The steps are in the README, "Operating it",
+  row "Stripe moved its API version".
+
 - **BREAKING CHANGE: `ArchiveStore.listAfter` and `IssuanceReader.knownKeys` (D-PR52-3).** Two new
   abstract methods for implementers. `listAfter(prefix, startAfter, limit)` returns an
   `ArchiveListing(keys, endOfFolder)`: keys strictly after `startAfter`, in UTF-8 byte order, and

@@ -75,6 +75,16 @@ public final class StripeApiInvoiceSource implements StripeInvoiceSource {
    */
   public StripeApiInvoiceSource(
       StripeClient client, String pinnedApiVersion, Duration listLookback) {
+    this(client, pinnedApiVersion, listLookback, sdkApiVersionOf(Stripe.class));
+  }
+
+  /** Test seam: the version the classpath SDK speaks is passed in. */
+  StripeApiInvoiceSource(
+      StripeClient client,
+      String pinnedApiVersion,
+      Duration listLookback,
+      String runtimeSdkApiVersion) {
+    requireClasspathSdk(SDK_API_VERSION, runtimeSdkApiVersion);
     this.client = Objects.requireNonNull(client, "client");
     this.pinnedApiVersion = Objects.requireNonNull(pinnedApiVersion, "pinnedApiVersion");
     this.listLookback = Objects.requireNonNull(listLookback, "listLookback");
@@ -85,6 +95,33 @@ public final class StripeApiInvoiceSource implements StripeInvoiceSource {
               + " generated for one version and the SDK sends that version on every request, so a"
               + " pin naming another would be a claim the code cannot keep. Either upgrade the"
               + " module or remove the override.");
+    }
+  }
+
+  /**
+   * {@code Stripe.API_VERSION} is a compile-time constant, so {@link #SDK_API_VERSION} is the
+   * version of the stripe-java this module was compiled against. The host declares stripe-java
+   * itself, so the SDK that runs can be another one. That would send and parse one API version
+   * while the module claims another. Refused.
+   */
+  static void requireClasspathSdk(String compiled, String runtime) {
+    if (!Objects.equals(compiled, runtime)) {
+      throw new EInvoiceException(
+          ErrorCodes.CONFIG,
+          "The stripe-java on the classpath speaks Stripe API version "
+              + runtime
+              + " but this module was built for "
+              + compiled
+              + ". Align the stripe-java version of the application with the one named in the"
+              + " README.");
+    }
+  }
+
+  static String sdkApiVersionOf(Class<?> stripeClass) {
+    try {
+      return (String) stripeClass.getField("API_VERSION").get(null);
+    } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+      return "unreadable (" + e.getClass().getSimpleName() + ")";
     }
   }
 

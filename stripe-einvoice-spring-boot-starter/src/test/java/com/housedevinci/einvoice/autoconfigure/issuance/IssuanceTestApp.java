@@ -27,7 +27,7 @@ import org.springframework.context.annotation.Configuration;
 public class IssuanceTestApp {
 
   public static final String SELLER = "acme";
-  public static final String PINNED_VERSION = "2026-03-31.clover";
+  public static final String PINNED_VERSION = com.stripe.Stripe.API_VERSION;
   public static final Instant FINALIZED_AT = Instant.parse("2026-01-15T23:30:00Z");
 
   @Bean(destroyMethod = "")

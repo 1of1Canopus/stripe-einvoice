@@ -341,6 +341,19 @@ exact bytes received is its authentication:
 </dependency>
 ```
 
+stripe-java is an optional dependency: your application declares it. This release is
+built and tested with stripe-java `34.1.0`. The module checks the SDK on the classpath at start-up. It refuses to start
+if that SDK speaks another Stripe API version than `2026-10-28.endive`, because the SDK decides
+which Stripe API version is sent and read.
+
+```xml
+<dependency>
+  <groupId>com.stripe</groupId>
+  <artifactId>stripe-java</artifactId>
+  <version>34.1.0</version>
+</dependency>
+```
+
 ```yaml
 einvoice:
   mode: live                    # 'test' WARNs at every startup and uses a separate series
@@ -408,7 +421,7 @@ authorization.
 |---|---|
 | Is anything wrong right now? | `GET /actuator/health/einvoice` - operational conditions only: a silent sweeper, a stale reconciliation, a chain that does not verify. It is deliberately outside `readiness` and `liveness`, so a business condition can never take your application out of the load balancer |
 | What needs a human? | `GET /actuator/einvoicefindings` - open issuance findings with their codes and subjects. Acknowledge one through `IssuanceFindingService`, with a reason that is recorded; the finding is never deleted |
-| Stripe moved its API version | The refused events are on `einvoice_inbound_event` with their bodies. Update the pin to match, restart, and the sweeper's due query re-picks exactly the rows whose recorded version now equals it, and replays them through the same path |
+| Stripe moved its API version | Two cases. **Stripe is ahead of the module** (events arrive at a newer version and are recorded as `DEI-201`): upgrade the module to the release built for that version, and deploy. The sweeper then re-picks the refused rows whose recorded version equals the new pin and replays them. **The module is ahead of your endpoint** (after an upgrade that moves the pin): create a new Stripe webhook endpoint at the new version, add its signing secret to `einvoice.stripe.webhook-secrets` next to the old one, disable the old endpoint, then deploy. Rows recorded at the old version are never replayed. A copy of the same event at the new version cures such a row (next row). Otherwise reconciliation issues them |
 | The same event arrived at the old and the new version | Nothing to do. The copy at the pin replaces the refused row and runs once. A row stuck since before this release is repaired by resending the event from the Stripe Dashboard to the re-pinned endpoint, or by reconciliation inside its window. A copy with another invoice or account under the same event id is never applied and raises `DEI-223` |
 | A document failed validation | The number stays allocated with the failing rule id recorded on the row and in the hash chain, so the gap it leaves is explained by the tamper-evident record. An operator voids it through `IssuanceVoidService` with a reason, and the series report explains the hole |
 | A number was voided | **The void is final, and it is final inside this module.** That Stripe invoice will never carry a document here: one invoice maps to one number for all time, so every later event for it is recorded with `DEI-122` and nothing is retried. To document the sale, correct the data upstream and raise a **new** Stripe invoice, which takes the next number through the ordinary path - and if the sale is already paid, that needs a credit note, which this edition does not produce |

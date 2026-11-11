@@ -112,7 +112,12 @@ class RunningLimitStarterTest {
               inbound.record(
                   InboundEvent.received(
                       new EventIdentity(
-                          eventId, "invoice.finalized", "2026-08-26.dahlia", true, "", "in_q29"),
+                          eventId,
+                          "invoice.finalized",
+                          com.stripe.Stripe.API_VERSION,
+                          true,
+                          "",
+                          "in_q29"),
                       Mode.LIVE,
                       "primary",
                       body,

@@ -81,7 +81,7 @@ class IssuanceOperationsTest {
                       new EventIdentity(
                           eventId,
                           "invoice.finalized",
-                          "2026-08-26.dahlia",
+                          com.stripe.Stripe.API_VERSION,
                           true,
                           "",
                           invoiceOf(eventId)),
@@ -131,7 +131,7 @@ class IssuanceOperationsTest {
                       new EventIdentity(
                           eventId,
                           "invoice.finalized",
-                          "2026-08-26.dahlia",
+                          com.stripe.Stripe.API_VERSION,
                           true,
                           "",
                           invoiceOf(eventId)),
@@ -404,7 +404,7 @@ class IssuanceOperationsTest {
                       new EventIdentity(
                           eventId,
                           "invoice.finalized",
-                          "2026-08-26.dahlia",
+                          com.stripe.Stripe.API_VERSION,
                           true,
                           "",
                           invoiceOf(eventId)),
