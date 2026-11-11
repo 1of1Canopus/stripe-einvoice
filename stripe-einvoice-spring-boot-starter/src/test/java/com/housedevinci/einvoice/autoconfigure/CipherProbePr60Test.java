@@ -67,7 +67,8 @@ class CipherProbePr60Test {
             "primary",
             body,
             Instant.now()),
-        body);
+        body,
+        com.housedevinci.einvoice.autoconfigure.issuance.IssuanceTestApp.PINNED_VERSION);
     return invoiceId;
   }
 
