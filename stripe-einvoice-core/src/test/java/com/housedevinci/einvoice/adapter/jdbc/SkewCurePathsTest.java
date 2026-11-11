@@ -6,6 +6,7 @@ import com.housedevinci.einvoice.application.FakeStripeSource;
 import com.housedevinci.einvoice.application.InboundEventStore.Recorded;
 import com.housedevinci.einvoice.application.ReconciliationSweep;
 import com.housedevinci.einvoice.application.TestInvoices;
+import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.EventIdentity;
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.InboundState;
@@ -107,6 +108,48 @@ class SkewCurePathsTest {
     assertThat(h.unitOfWork().process(reconId).state()).isEqualTo(InboundState.COMPLETED);
     h.sweep(settings()).sweep();
     assertThat(numbered(h, invoice)).isEqualTo(1);
+  }
+
+  // ------------------------------------------------------------------------------ D-PR62-4
+
+  /**
+   * D-PR62-4, the reconciliation path of an identity mismatch. A {@code recon-<invoice>} row is
+   * stored with another account than the one the pass is configured for. The pass leaves the row as
+   * it was, raises one DEI-223 finding on its id, and carries on with the next invoice.
+   */
+  @Test
+  void a_reconciliation_row_with_another_identity_is_left_alone_with_one_finding() {
+    IssuanceTestHarness h = IssuanceTestHarness.create().pinnedTo(NEW);
+    String clashing = "in_recon_clash_" + System.nanoTime();
+    String next = "in_recon_next_" + System.nanoTime();
+    String clashId = "recon-" + clashing;
+    h.source().with(TestInvoices.finalised(clashing));
+    h.source().with(TestInvoices.finalised(next));
+    InboundEvent foreign =
+        InboundEvent.received(
+            new EventIdentity(clashId, "invoice.finalized", NEW, true, "acct_other", clashing),
+            Mode.LIVE,
+            ReconciliationSweep.RECONCILIATION_SOURCE,
+            new byte[0],
+            h.now());
+    assertThat(h.inbound().record(foreign, null, NEW)).isEqualTo(Recorded.FIRST);
+    InboundEvent before = h.inbound().find(clashId).orElseThrow();
+
+    h.sweep(settings()).sweep();
+
+    InboundEvent after = h.inbound().find(clashId).orElseThrow();
+    assertThat(after.stripeAccountId()).isEqualTo("acct_other");
+    assertThat(after.state()).isEqualTo(before.state());
+    assertThat(after.apiVersion()).isEqualTo(before.apiVersion());
+    assertThat(after.receivedAt()).isEqualTo(before.receivedAt());
+    assertThat(after.cureGeneration()).isEqualTo(before.cureGeneration());
+    assertThat(h.openFindings())
+        .filteredOn(f -> f.code().equals(ErrorCodes.INBOUND_IDENTITY_MISMATCH))
+        .singleElement()
+        .satisfies(f -> assertThat(f.subjectId()).isEqualTo(clashId));
+    assertThat(h.inbound().find("recon-" + next))
+        .as("the pass carries on after the mismatch")
+        .isPresent();
   }
 
   private static ReconciliationSweep.Settings settings() {
