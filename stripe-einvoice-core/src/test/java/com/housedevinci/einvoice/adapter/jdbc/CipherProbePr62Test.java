@@ -1,12 +1,15 @@
 package com.housedevinci.einvoice.adapter.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.housedevinci.einvoice.application.FakeStripeSource;
 import com.housedevinci.einvoice.application.InboundEventStore.Recorded;
+import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
 import com.housedevinci.einvoice.application.SourceInvoice;
 import com.housedevinci.einvoice.application.TestInvoices;
 import com.housedevinci.einvoice.domain.DateGapCause;
+import com.housedevinci.einvoice.domain.EInvoiceException;
 import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.EventIdentity;
 import com.housedevinci.einvoice.domain.InboundEvent;
@@ -20,6 +23,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -173,5 +177,39 @@ class CipherProbePr62Test {
     assertThat(instantColumn(id, "cured_from_received_at"))
         .as("the first arrival of the event, kept across every cure")
         .isEqualTo(t0);
+  }
+
+  // ------------------------------------------------------------------------------ D-PR62-3
+
+  private static IssuanceUnitOfWork.Configuration configurationPinnedTo(String pin) {
+    return new IssuanceUnitOfWork.Configuration(
+        "seller-1",
+        "",
+        Mode.LIVE,
+        "INV",
+        false,
+        ZoneId.of("Europe/Paris"),
+        pin,
+        "fr-2026.1",
+        Duration.ofMinutes(1),
+        Duration.ofHours(1),
+        Optional.empty(),
+        false);
+  }
+
+  /**
+   * D-PR62-3. A blank pin is refused when the configuration is built, so the application does not
+   * start. The store keeps its own check (D-SKEW-10), but no signed webhook reaches it with a blank
+   * pin and gets a 400.
+   */
+  @Test
+  void a_blank_pin_is_refused_when_the_configuration_is_built() {
+    for (String pin : new String[] {"", " ", "\t", null}) {
+      assertThatThrownBy(() -> configurationPinnedTo(pin))
+          .as("pin [%s]", pin)
+          .isInstanceOf(EInvoiceException.class)
+          .extracting(e -> ((EInvoiceException) e).code())
+          .isEqualTo(ErrorCodes.CONFIG);
+    }
   }
 }

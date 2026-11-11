@@ -134,6 +134,10 @@ All notable changes to this project are documented here. The format follows
   write lands only if the row still has it. `InboundEvent` gains the component `cureGeneration`
   (the earlier constructors are kept, with 0). `StripeWebhookController`'s constructor takes an
   `InboundIntake` instead of the store. This is a 0.x release, so the break ships in a minor version.
+- **`IssuanceUnitOfWork.Configuration` refuses a null or blank `pinnedApiVersion` with `DEI-100`
+  (D-PR62-3).** The application now fails at startup when a host `StripeInvoiceSource` answers a
+  blank pin. Before, it started, and every correctly signed webhook was answered 400 and recorded
+  nowhere. The store keeps its own check.
 - **BREAKING CHANGE: `ArchiveStore.listAfter` and `IssuanceReader.knownKeys` (D-PR52-3).** Two new
   abstract methods for implementers. `listAfter(prefix, startAfter, limit)` returns an
   `ArchiveListing(keys, endOfFolder)`: keys strictly after `startAfter`, in UTF-8 byte order, and

@@ -143,6 +143,12 @@ public final class IssuanceUnitOfWork {
       Objects.requireNonNull(mode, "mode");
       Objects.requireNonNull(taxZone, "taxZone");
       Objects.requireNonNull(closedYearCutoff, "closedYearCutoff");
+      // D-PR62-3: a blank pin fails the start. Accepted here, every signed webhook would reach
+      // the store's own check (DEI-100) and be answered 400, recorded nowhere.
+      if (pinnedApiVersion == null || pinnedApiVersion.isBlank()) {
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG, "the pinned Stripe API version is required and must not be blank");
+      }
       stripeAccountId = stripeAccountId == null ? "" : stripeAccountId;
       rulePackVersion = rulePackVersion == null ? "" : rulePackVersion;
       retryBackoff = retryBackoff == null ? Duration.ofMinutes(1) : retryBackoff;
