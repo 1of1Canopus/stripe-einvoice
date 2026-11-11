@@ -132,8 +132,9 @@ All notable changes to this project are documented here. The format follows
   Rows recorded at `2026-08-26.dahlia` are never replayed. Reconciliation is what issues their
   invoices: it must be on (`einvoice.reconcile.enabled`, the default) and the invoice must be inside
   its window. A property `einvoice.stripe.api-version=2026-08-26.dahlia` now refuses at start-up.
-  Remove it or set it to `2026-10-28.endive`. The application must also declare stripe-java
-  `34.1.0`: any other version is refused at start-up. The steps are in the README, "Operating it",
+  Remove it or set it to `2026-10-28.endive`. The application must also declare a stripe-java
+  that speaks `2026-10-28.endive`. This release is built and tested with `34.1.0`. A stripe-java that
+  speaks another Stripe API version is refused at start-up. The steps are in the README, "Operating it",
   row "Stripe moved its API version".
 
 - **BREAKING CHANGE: `ArchiveStore.listAfter` and `IssuanceReader.knownKeys` (D-PR52-3).** Two new
