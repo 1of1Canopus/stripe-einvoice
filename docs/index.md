@@ -388,8 +388,32 @@ order:
 
 Events that arrive in between are held as `DEI-201` with the new version, and the sweeper replays
 them after the deploy. A row recorded at the old version is never replayed, because its version
-never equals the new pin. Reconciliation is what issues those invoices. It must be on
+never equals the new pin. A copy of the same event at the new version cures it (see "Two
+endpoints, two versions" below). Otherwise reconciliation issues those invoices. It must be on
 (`einvoice.reconcile.enabled`, the default), and the invoice must be inside its window.
+
+**Two endpoints, two versions.** When you re-pin by adding a second webhook endpoint at the new
+version, each event can reach both, each copy rendered at its own endpoint's version (this is
+Stripe's documented behaviour; the module is safe if it is not, a cure then simply never happens). The copy at the
+old version is recorded first and refused (`DEI-201`); the copy at the pin then replaces it in the
+same row, which runs at once. Nothing to do. A copy at the pin replaces only a row that is
+`RECEIVED` or `REFUSED_VERSION_SKEW` at another version, with the same event type, invoice, mode
+and account; it never touches a row that went further. The row keeps a trace: `cure_generation`,
+`cured_from_api_version`, `cured_from_body_sha256`, `cured_from_received_at` and `cured_at`.
+`cured_from_received_at` is the first arrival of the event, kept across every cure.
+`cured_from_api_version` and `cured_from_body_sha256` describe the copy the last cure replaced.
+A cure restarts retention, the retry ceiling and the time limit. It does not change why a late
+invoice is explained: the date-gap cause reads the first arrival, so a webhook that came on the
+supply day and was cured later is never recorded as `LATE_WEBHOOK`.
+
+**A row stuck before this release.** Its right copy was answered as a duplicate and Stripe will not
+send it again. Resend the event from the Stripe Dashboard to the re-pinned endpoint (the resend is
+at that endpoint's version and cures the row), or let reconciliation enqueue the invoice inside its
+window.
+
+**A copy with another identity** under a recorded event id (another type, invoice, mode or account)
+is never applied: the endpoint answers 200, a WARN names the event id with `DEI-223`, and a finding
+`DEI-223` is raised on it. Stripe does not reuse event ids, so look for a leaked signing secret.
 
 ## Reconciliation, health and findings
 

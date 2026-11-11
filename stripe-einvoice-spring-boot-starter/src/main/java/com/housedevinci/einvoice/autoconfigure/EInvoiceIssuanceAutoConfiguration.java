@@ -14,6 +14,7 @@ import com.housedevinci.einvoice.application.DocumentRenderer;
 import com.housedevinci.einvoice.application.DocumentValidator;
 import com.housedevinci.einvoice.application.FindingStore;
 import com.housedevinci.einvoice.application.InboundEventStore;
+import com.housedevinci.einvoice.application.InboundIntake;
 import com.housedevinci.einvoice.application.InboundRunLock;
 import com.housedevinci.einvoice.application.IssuanceChainVerifier;
 import com.housedevinci.einvoice.application.IssuanceReprocess;
@@ -519,6 +520,8 @@ public class EInvoiceIssuanceAutoConfiguration {
   @ConditionalOnProperty(prefix = "einvoice.webhook", name = "enabled", matchIfMissing = true)
   public StripeWebhookController einvoiceWebhookController(
       InboundEventStore inbound,
+      FindingStore findings,
+      IssuanceUnitOfWork unitOfWork,
       IssuanceWorker worker,
       EInvoiceProperties properties,
       Clock clock) {
@@ -532,8 +535,10 @@ public class EInvoiceIssuanceAutoConfiguration {
         webhook.getPath(),
         properties.getStripe().getWebhookSecrets().size(),
         webhook.getMaxBodyBytes());
+    // Built here, not a bean, like the D-PR36-6 controls: the pin it passes is the one the route
+    // reads (D-SKEW-10), and a host bean could not be checked to do the same.
     return new StripeWebhookController(
-        inbound,
+        new InboundIntake(inbound, findings, unitOfWork.configuration(), clock),
         worker,
         properties.getStripe().getWebhookSecrets(),
         webhook.getTolerance(),

@@ -21,12 +21,58 @@ import java.util.Optional;
 public interface InboundEventStore {
 
   /**
-   * Records one verified event with its raw body.
+   * Records one verified event with its raw body, or cures the row a version skew left behind
+   * (D-PR60-2).
    *
-   * @return false when this event id was already recorded - a duplicate delivery, which is a no-op
-   *     and still answered 200
+   * <p>A cure: the event id is already recorded, the stored row is {@code RECEIVED} or {@code
+   * REFUSED_VERSION_SKEW} at a version other than {@code pinnedApiVersion}, this copy is at {@code
+   * pinnedApiVersion}, and the four identity columns ({@code event_type}, {@code object_id}, {@code
+   * livemode}, {@code stripe_account_id}) are equal. The row then becomes what a fresh insert of
+   * this copy would be: {@code RECEIVED}, due now, with this copy's version and body. Its {@code
+   * cure_generation} goes up by one, so a run that decided on the row before the cure loses its
+   * next compare ({@link #transitionFrom}, {@link #stampAttempt}). A row that holds a number is
+   * never curable: neither state ever holds one.
+   *
+   * <p>When the event id is recorded and this copy is not a cure, the stored identity is compared
+   * with this copy's in the same transaction, at any version. The read is safe because no statement
+   * writes those four columns after the insert.
+   *
+   * <p>No default implementation: a store that only knew the old duplicate rule would drop every
+   * copy that should cure.
+   *
+   * <p>Isolation: at REPEATABLE READ or SERIALIZABLE the statement can raise SQLState {@code 40001}
+   * when another copy of the same event commits first. When the store owns the connection, the
+   * bundled implementation runs the statement once more in a fresh transaction, so the answer is
+   * the one READ COMMITTED gives. Inside a host transaction the failure passes through as {@code
+   * DEI-102}.
+   *
+   * @param pinnedApiVersion the version the route accepts, from the same configuration the route
+   *     reads; never blank
+   * @return what the call did
+   * @throws com.housedevinci.einvoice.domain.EInvoiceException {@code DEI-100} when {@code
+   *     pinnedApiVersion} is null or blank, before any statement runs
    */
-  boolean record(InboundEvent event, byte[] body);
+  Recorded record(InboundEvent event, byte[] body, String pinnedApiVersion);
+
+  /** The answer of {@link #record}. */
+  enum Recorded {
+    /** A new row. */
+    FIRST,
+    /** The event id was recorded with the same identity; nothing was written. */
+    DUPLICATE,
+    /** A row refused for version skew (or still waiting at another version) was cured. */
+    CURED,
+    /**
+     * The event id was recorded with another event type, object, mode or account. Nothing was
+     * written; the caller raises the finding.
+     */
+    IDENTITY_MISMATCH;
+
+    /** Whether this answer left a row that should run now. */
+    public boolean runs() {
+      return this == FIRST || this == CURED;
+    }
+  }
 
   Optional<InboundEvent> find(String eventId);
 
@@ -71,15 +117,21 @@ public interface InboundEventStore {
    * lands). When the transaction is the host's, the failure passes through unchanged ({@code
    * DEI-102}): that transaction is already aborted and the host retries it.
    *
+   * <p>A cure ({@link #record}) between the read and this write raises the row's cure generation.
+   * The write then answers empty, even if the state is the expected one again (D-SKEW-2).
+   *
    * @param expected the state this run last read or wrote
-   * @return the moved row, or empty when the row no longer holds {@code expected} and nothing was
-   *     written
+   * @param expectedGeneration the {@link InboundEvent#cureGeneration()} of the row this run decided
+   *     on
+   * @return the moved row, or empty when the row no longer holds {@code expected} and {@code
+   *     expectedGeneration} and nothing was written
    * @throws com.housedevinci.einvoice.domain.EInvoiceException {@code DEI-210} when the row holds
    *     {@code expected} and {@code next} is not an edge from it: the caller's own bug, not a race
    */
   Optional<InboundEvent> transitionFrom(
       String eventId,
       InboundState expected,
+      int expectedGeneration,
       InboundState next,
       String code,
       String ruleId,
@@ -99,11 +151,12 @@ public interface InboundEventStore {
    * <p>No default implementation: a stamp built from {@link #find} and {@link #transition} would
    * move the state machine, and a store that cannot stamp must not pass silently.
    *
-   * @return the stamped row, or empty when the row no longer holds {@code expected} and nothing was
-   *     written
+   * @param expectedGeneration the {@link InboundEvent#cureGeneration()} of the row this run read
+   * @return the stamped row, or empty when the row no longer holds {@code expected} and {@code
+   *     expectedGeneration} and nothing was written
    */
   Optional<InboundEvent> stampAttempt(
-      String eventId, InboundState expected, Instant now, Duration retryIn);
+      String eventId, InboundState expected, int expectedGeneration, Instant now, Duration retryIn);
 
   /** The failing validation rule recorded with the last transition, when there was one. */
   Optional<String> lastRuleId(String eventId);

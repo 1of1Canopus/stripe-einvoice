@@ -61,7 +61,10 @@ class JoinedRunRefusalSpringTest {
     EventIdentity identity =
         new EventIdentity(eventId, "invoice.finalized", "", false, "", "in_pr49joined_" + suffix);
     byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
-    inbound.record(InboundEvent.received(identity, Mode.TEST, "primary", body, now), body);
+    inbound.record(
+        InboundEvent.received(identity, Mode.TEST, "primary", body, now),
+        body,
+        "2026-03-31.clover");
     inbound.transition(eventId, InboundState.FETCHED, "", now, null);
     inbound.transition(
         eventId, InboundState.FAILED_MAPPING, ErrorCodes.SELLER_PROFILE_INCOMPLETE, now, null);

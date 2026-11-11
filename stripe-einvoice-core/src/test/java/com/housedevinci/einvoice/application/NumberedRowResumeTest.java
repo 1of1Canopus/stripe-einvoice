@@ -175,7 +175,9 @@ class NumberedRowResumeTest {
     String eventId = stoppedWith(harness, "in_sre_stale", RetryEdgeFixture.ACCESS_REFUSED);
     InboundEvent asRead = RetryEdgeFixture.row(harness, eventId);
     // Another run moved the row after this call read it: the stamp adds an attempt.
-    harness.inbound().stampAttempt(eventId, asRead.state(), harness.now(), Duration.ofMinutes(1));
+    harness
+        .inbound()
+        .stampAttempt(eventId, asRead.state(), 0, harness.now(), Duration.ofMinutes(1));
 
     var seq =
         harness

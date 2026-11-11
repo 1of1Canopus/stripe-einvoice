@@ -143,6 +143,12 @@ public final class IssuanceUnitOfWork {
       Objects.requireNonNull(mode, "mode");
       Objects.requireNonNull(taxZone, "taxZone");
       Objects.requireNonNull(closedYearCutoff, "closedYearCutoff");
+      // D-PR62-3: a blank pin fails the start. Accepted here, every signed webhook would reach
+      // the store's own check (DEI-100) and be answered 400, recorded nowhere.
+      if (pinnedApiVersion == null || pinnedApiVersion.isBlank()) {
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG, "the pinned Stripe API version is required and must not be blank");
+      }
       stripeAccountId = stripeAccountId == null ? "" : stripeAccountId;
       rulePackVersion = rulePackVersion == null ? "" : rulePackVersion;
       retryBackoff = retryBackoff == null ? Duration.ofMinutes(1) : retryBackoff;
@@ -397,7 +403,11 @@ public final class IssuanceUnitOfWork {
     // this run dies. Every conclusion overwrites it.
     Optional<InboundEvent> stamped =
         inbound.stampAttempt(
-            eventId, read.state(), clock.instant(), backoffAfter(read.attempts() + 1));
+            eventId,
+            read.state(),
+            read.cureGeneration(),
+            clock.instant(),
+            backoffAfter(read.attempts() + 1));
     if (stamped.isEmpty()) {
       return concludedElsewhere(read);
     }
@@ -1553,6 +1563,7 @@ public final class IssuanceUnitOfWork {
         .transitionFrom(
             event.eventId(),
             read.get(),
+            event.cureGeneration(),
             pending.state(),
             pending.code(),
             pending.ruleId(),
@@ -1604,7 +1615,15 @@ public final class IssuanceUnitOfWork {
       return new Outcome(updated.eventId(), updated.state(), code, legalNumber);
     }
     return inbound
-        .transitionFrom(event.eventId(), read.get(), state, code, "", clock.instant(), retryIn)
+        .transitionFrom(
+            event.eventId(),
+            read.get(),
+            event.cureGeneration(),
+            state,
+            code,
+            "",
+            clock.instant(),
+            retryIn)
         .map(updated -> new Outcome(updated.eventId(), updated.state(), code, legalNumber))
         .orElseGet(() -> concludedElsewhere(event));
   }
@@ -1617,7 +1636,7 @@ public final class IssuanceUnitOfWork {
    * COMPLETED}, and B returns {@code COMPLETED} with that number.
    */
   private Outcome concludedElsewhere(InboundEvent event) {
-    return storedOutcome(reread(event));
+    return storedOutcome(event, reread(event));
   }
 
   /**
@@ -1631,11 +1650,19 @@ public final class IssuanceUnitOfWork {
     // The step keeps a next attempt one backoff away, like the stamp: a run that dies after this
     // step is not due again at once (D-PR45-1). Every conclusion overwrites it.
     if (inbound
-        .transitionFrom(event.eventId(), read, next, "", "", clock.instant(), backoffFor(event))
+        .transitionFrom(
+            event.eventId(),
+            read,
+            event.cureGeneration(),
+            next,
+            "",
+            "",
+            clock.instant(),
+            backoffFor(event))
         .isPresent()) {
       return Optional.empty();
     }
-    return Optional.of(storedOutcome(reread(event)));
+    return Optional.of(storedOutcome(event, reread(event)));
   }
 
   private InboundEvent reread(InboundEvent event) {
@@ -1647,16 +1674,31 @@ public final class IssuanceUnitOfWork {
                     ErrorCodes.INBOUND_UNREADABLE, "no inbound event is recorded under that id"));
   }
 
-  private Outcome storedOutcome(InboundEvent stored) {
+  /**
+   * @param read the row this run decided on
+   * @param stored the row as it is now
+   */
+  private Outcome storedOutcome(InboundEvent read, InboundEvent stored) {
     Optional<LegalNumber> number =
         reader
             .findBySource(configuration.sellerId(), configuration.mode(), stored.objectId())
             .map(Issuance::legalNumber);
-    log.warn(
-        "einvoice: event {} was moved to {} by a writer outside its run lock; this run stops and"
-            + " writes nothing",
-        stored.eventId(),
-        stored.state());
+    if (stored.cureGeneration() != read.cureGeneration()) {
+      // D-SKEW-9: a copy at the pin cured the row after this run read it (D-PR60-2). An expected
+      // path, not a bug: the cure does not take the run lock, and the cured row runs next.
+      log.info(
+          "einvoice: event {} was cured by its copy at API version {} after this run read it at {};"
+              + " this run stops and writes nothing, and the cured row runs next",
+          stored.eventId(),
+          stored.apiVersion(),
+          read.apiVersion());
+    } else {
+      log.warn(
+          "einvoice: event {} was moved to {} by a writer outside its run lock; this run stops and"
+              + " writes nothing",
+          stored.eventId(),
+          stored.state());
+    }
     return outcome(stored, number);
   }
 

@@ -122,7 +122,8 @@ class RunningLimitStarterTest {
                       "primary",
                       body,
                       now.minus(Duration.ofDays(4))),
-                  body);
+                  body,
+                  com.housedevinci.einvoice.autoconfigure.issuance.IssuanceTestApp.PINNED_VERSION);
 
               sweeper.sweepOnce();
 

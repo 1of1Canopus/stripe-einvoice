@@ -81,9 +81,23 @@ class CipherProbeIssuanceStarterTest {
     return "evt_" + UUID.randomUUID().toString().replace("-", "");
   }
 
-  private StripeWebhookController controller(InboundEventStore inbound, IssuanceWorker worker) {
-    return new StripeWebhookController(
+  private static com.housedevinci.einvoice.application.InboundIntake intake(
+      org.springframework.context.ApplicationContext context, InboundEventStore inbound) {
+    return new com.housedevinci.einvoice.application.InboundIntake(
         inbound,
+        context.getBean(com.housedevinci.einvoice.application.FindingStore.class),
+        context
+            .getBean(com.housedevinci.einvoice.application.IssuanceUnitOfWork.class)
+            .configuration(),
+        CLOCK);
+  }
+
+  private StripeWebhookController controller(
+      org.springframework.context.ApplicationContext context,
+      InboundEventStore inbound,
+      IssuanceWorker worker) {
+    return new StripeWebhookController(
+        intake(context, inbound),
         worker,
         Map.of("primary", SECRET),
         Duration.ofMinutes(5),
@@ -99,7 +113,7 @@ class CipherProbeIssuanceStarterTest {
             context -> {
               InboundEventStore inbound = context.getBean(InboundEventStore.class);
               StripeWebhookController controller =
-                  controller(inbound, context.getBean(IssuanceWorker.class));
+                  controller(context, inbound, context.getBean(IssuanceWorker.class));
               String eventId = freshId();
               byte[] payload = body(eventId).getBytes(StandardCharsets.UTF_8);
 
@@ -118,7 +132,7 @@ class CipherProbeIssuanceStarterTest {
             context -> {
               InboundEventStore inbound = context.getBean(InboundEventStore.class);
               StripeWebhookController controller =
-                  controller(inbound, context.getBean(IssuanceWorker.class));
+                  controller(context, inbound, context.getBean(IssuanceWorker.class));
               String eventId = freshId();
               byte[] payload = body(eventId).getBytes(StandardCharsets.UTF_8);
 
@@ -149,7 +163,7 @@ class CipherProbeIssuanceStarterTest {
               InboundEventStore inbound = context.getBean(InboundEventStore.class);
               StripeWebhookController controller =
                   new StripeWebhookController(
-                      inbound,
+                      intake(context, inbound),
                       context.getBean(IssuanceWorker.class),
                       Map.of("primary", SECRET),
                       Duration.ofMinutes(5),
@@ -196,7 +210,7 @@ class CipherProbeIssuanceStarterTest {
             context -> {
               InboundEventStore inbound = context.getBean(InboundEventStore.class);
               StripeWebhookController controller =
-                  controller(inbound, context.getBean(IssuanceWorker.class));
+                  controller(context, inbound, context.getBean(IssuanceWorker.class));
               String eventId = freshId();
               byte[] payload =
                   ("{\"id\":\""
@@ -248,7 +262,8 @@ class CipherProbeIssuanceStarterTest {
                                     "primary",
                                     body(eventId).getBytes(StandardCharsets.UTF_8),
                                     NOW),
-                                body(eventId).getBytes(StandardCharsets.UTF_8));
+                                body(eventId).getBytes(StandardCharsets.UTF_8),
+                                IssuanceTestApp.PINNED_VERSION);
                             return eventId;
                           })
                       .toList();

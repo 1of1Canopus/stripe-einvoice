@@ -119,6 +119,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **BREAKING CHANGE: `InboundEventStore` (D-PR60-2, D-SKEW-6).** Three methods change for
+  implementers, and none has a default, so a store of your own fails to compile instead of losing
+  the check:
+  - `record(InboundEvent, byte[])` returning `boolean` becomes `record(InboundEvent, byte[], String
+    pinnedApiVersion)` returning `InboundEventStore.Recorded` (`FIRST`, `DUPLICATE`, `CURED`,
+    `IDENTITY_MISMATCH`). A null or blank pin is refused with `DEI-100` before any SQL.
+  - `transitionFrom(eventId, expected, next, ...)` becomes `transitionFrom(eventId, expected,
+    expectedGeneration, next, ...)`.
+  - `stampAttempt(eventId, expected, now, retryIn)` becomes `stampAttempt(eventId, expected,
+    expectedGeneration, now, retryIn)`.
+
+  `expectedGeneration` is the new `InboundEvent.cureGeneration()` of the row the run decided on; the
+  write lands only if the row still has it. `InboundEvent` gains the component `cureGeneration`
+  (the earlier constructors are kept, with 0). `StripeWebhookController`'s constructor takes an
+  `InboundIntake` instead of the store. This is a 0.x release, so the break ships in a minor version.
+- **`IssuanceUnitOfWork.Configuration` refuses a null or blank `pinnedApiVersion` with `DEI-100`
+  (D-PR62-3).** The application now fails at startup when a host `StripeInvoiceSource` answers a
+  blank pin. Before, it started, and every correctly signed webhook was answered 400 and recorded
+  nowhere. The store keeps its own check.
 - **Upgrade note: stripe-java 34.1.0 moves the pinned Stripe API version.** The module now expects
   Stripe API version `2026-10-28.endive` (it was `2026-08-26.dahlia`). A Stripe webhook endpoint
   keeps the version it was created with, so you cannot change it. Do the steps in this order:
@@ -129,8 +148,9 @@ All notable changes to this project are documented here. The format follows
 
   Events that arrive in between are recorded as version skew (`DEI-201`, state
   `REFUSED_VERSION_SKEW`) with the new version, and the sweeper replays them after the deploy.
-  Rows recorded at `2026-08-26.dahlia` are never replayed. Reconciliation is what issues their
-  invoices: it must be on (`einvoice.reconcile.enabled`, the default) and the invoice must be inside
+  Rows recorded at `2026-08-26.dahlia` are never replayed. A copy of the same event at
+  `2026-10-28.endive` cures such a row (see the skew cure entry below). Otherwise reconciliation
+  issues their invoices: it must be on (`einvoice.reconcile.enabled`, the default) and the invoice must be inside
   its window. A property `einvoice.stripe.api-version=2026-08-26.dahlia` now refuses at start-up.
   Remove it or set it to `2026-10-28.endive`. The application must also declare a stripe-java
   that speaks `2026-10-28.endive`. This release is built and tested with `34.1.0`. A stripe-java that
@@ -272,6 +292,37 @@ All notable changes to this project are documented here. The format follows
   remain and mean an invoice.
 
 ### Fixed
+
+- **A copy of an event at the pinned API version is no longer dropped when the same event was
+  first seen at another version (D-PR60-2).** Example: the module moves its pin from
+  `2026-08-26.dahlia` to `2026-10-28.endive`; `evt_1` reaches the old endpoint at
+  `2026-08-26.dahlia` (recorded and refused as `DEI-201`) and the re-pinned endpoint at
+  `2026-10-28.endive`. Before, the second copy was answered 200 as a duplicate and the sale stayed
+  refused for ever. Now the copy at the pin replaces the refused row in one statement: the row is `RECEIVED` again, due now, with the new body and
+  version. A cure happens only while the stored row is `RECEIVED` or `REFUSED_VERSION_SKEW` (no
+  number is ever held in either), only when the copy is at the pin and the stored row is not, and
+  only when the event type, Stripe object, mode and account are the same. Two copies at once give
+  one cure, at every isolation level. A run that read the row before the cure loses its next write
+  (a new `cure_generation` that only goes up) and logs one INFO line, not the "writer outside its
+  run lock" WARN. The same applies to a reconciliation row (`recon-<invoice>`) refused for skew
+  after a deploy: the next pass cures it.
+  - Upgrade note: five new nullable or defaulted columns on `einvoice_inbound_event`
+    (`cure_generation`, `cured_from_api_version`, `cured_from_body_sha256`,
+    `cured_from_received_at`, `cured_at`), added by the schema script; no backfill. A cured row
+    keeps a trace in those columns: the version and the SHA-256 of the body of the copy it
+    replaced, and the first arrival of the event, kept across every cure. The old body itself is
+    not kept. Retention, the retry ceiling and the time limit start again at the cure. The date-gap
+    cause on the issuance reads the first arrival: a webhook that came on the supply day, was
+    refused for skew and was then cured, is never recorded as `LATE_WEBHOOK`.
+  - Rows already stuck at an old version are not cured by the upgrade, because their right copy
+    was answered 200 long ago. Two repairs: resend the event from the Stripe Dashboard to the
+    re-pinned endpoint, or let reconciliation enqueue the invoice inside its window.
+  - New code `DEI-223` (`INBOUND_IDENTITY_MISMATCH`): a signed copy under a recorded event id with
+    another event type, object, mode or account. Nothing is written, the endpoint answers 200, a
+    WARN names the event id and a finding is raised on it.
+  - Rolling upgrade: a node still on the previous release does not compare the generation. It runs
+    the copy it read at its own pin; the run lock and the one-number-per-invoice key still give one
+    number.
 
 - **The orphan check examines every key, against every row (D-PR52-3, D-PR51-5).** Up to 0.1.x
   the check compared the newest `page-size` rows of the window's series years with the first

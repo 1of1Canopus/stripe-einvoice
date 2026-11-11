@@ -262,6 +262,14 @@ public final class ErrorCodes {
   /** An amount or a percentage is outside the magnitude or scale this module will carry. */
   public static final String AMOUNT_OUT_OF_BOUNDS = "DEI-222";
 
+  /**
+   * A signed event arrived under an event id already recorded with another event type, Stripe
+   * object, mode or account (D-PR60-2, D-SKEW-5). Nothing was written, the endpoint answered 200,
+   * and a finding names the event id. Stripe never reuses an event id, so this is a forged copy
+   * signed with a leaked secret, or a bug upstream.
+   */
+  public static final String INBOUND_IDENTITY_MISMATCH = "DEI-223";
+
   /** The archived bytes no longer hash to the {@code document_sha256} recorded with them. */
   public static final String ARCHIVED_DOCUMENT_TAMPERED = "DEI-230";
 

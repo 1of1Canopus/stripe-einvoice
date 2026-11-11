@@ -69,7 +69,8 @@ class CipherProbePr45IsolationTest {
               "primary",
               body,
               NOW),
-          body);
+          body,
+          "2026-03-31.clover");
 
       // Run A: holds the row lock and moves the row, not yet committed.
       a.setAutoCommit(false);
@@ -84,7 +85,7 @@ class CipherProbePr45IsolationTest {
           pool.submit(
               () ->
                   store.transitionFrom(
-                      id, InboundState.RECEIVED, InboundState.FETCHED, "", "", NOW, null));
+                      id, InboundState.RECEIVED, 0, InboundState.FETCHED, "", "", NOW, null));
       awaitLockWaiter(a);
       a.commit();
 

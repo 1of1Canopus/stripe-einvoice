@@ -53,7 +53,8 @@ class JdbcInboundEventStoreSnapshotTest {
             "primary",
             body,
             NOW),
-        body);
+        body,
+        "2026-03-31.clover");
     return id;
   }
 
@@ -81,7 +82,7 @@ class JdbcInboundEventStoreSnapshotTest {
           pool.submit(
               () ->
                   store.transitionFrom(
-                      id, InboundState.RECEIVED, InboundState.FETCHED, "", "", NOW, null));
+                      id, InboundState.RECEIVED, 0, InboundState.FETCHED, "", "", NOW, null));
       awaitLockWaiter();
       a.commit();
 
@@ -117,7 +118,7 @@ class JdbcInboundEventStoreSnapshotTest {
       assertThatThrownBy(
               () ->
                   store.transitionFrom(
-                      id, InboundState.RECEIVED, InboundState.FETCHED, "", "", NOW, null))
+                      id, InboundState.RECEIVED, 0, InboundState.FETCHED, "", "", NOW, null))
           .isInstanceOf(EInvoiceException.class)
           .satisfies(
               e -> {
