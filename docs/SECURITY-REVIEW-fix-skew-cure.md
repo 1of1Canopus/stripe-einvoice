@@ -181,3 +181,74 @@ Internal probe folder, `D-PR62-CipherProbePr62Test.java.txt` (core, package
 `com.housedevinci.einvoice.adapter.jdbc`) and `D-PR62-CipherProbePr62StarterTest.java.txt`
 (starter, package `com.housedevinci.einvoice.autoconfigure`). The fix pass adds them to the suite
 before touching production code.
+
+## 2026-11-11, pass 2
+
+On 21c0a97. Scope: the three fix commits (a4406d1, 35ce8bb, 21c0a97) and the lines they change.
+The rest of the PR was not reviewed again.
+
+**Verdict: MERGE.** The four pass 1 findings are closed. No new finding.
+
+### Build and probe suite
+
+`./mvnw -B clean verify`, Docker up, on 21c0a97. One run, no Docker restart needed.
+
+| Module | Tests | Failed | Errors | Skipped |
+|---|---|---|---|---|
+| core | 1197 | 0 | 0 | 3 |
+| starter | 169 | 0 | 0 | 0 |
+| sample | 9 | 0 | 0 | 0 |
+
+The three skips are the known Linux-only filename tests; they run on the Linux CI runner. Every
+`CipherProbe*` test in the tree ran inside this verify and passed.
+
+`CIPHER_PROBE_MAVEN=1 tools/cipher-probe-release-pipeline.sh`: exit 0, 131 FIXED, 0 WEAK.
+
+### Pass 1 findings
+
+The pass 1 probe files were copied unchanged from the internal folder over the promoted tests and
+run on the head, then the tree was restored.
+
+| Finding | Fix | How it was verified | Status |
+|---|---|---|---|
+| D-PR62-1 (LOW) | `JdbcDateGapCauses.HISTORY` reads `min(coalesce(cured_from_received_at, received_at))` | pass 1 probe `probe_a_cured_row_is_recorded_as_a_late_webhook`: red on 9661643, green on the head. Control `guard_a_skew_row_replayed_by_a_pin_move_is_not_a_late_webhook` green. Promoted as `a_cured_row_is_not_recorded_as_a_late_webhook` (asserts `UNRECORDED`) | closed |
+| D-PR62-2 (INFO) | `INSERT` keeps `cured_from_received_at = coalesce(e.cured_from_received_at, e.received_at)` | pass 1 probe `probe_a_second_cure_loses_the_first_arrival`: red, now green. Promoted as `a_second_cure_keeps_the_first_arrival`. Javadoc, docs page and CHANGELOG say the version and body hash are the copy just replaced | closed |
+| D-PR62-3 (LOW) | `IssuanceUnitOfWork.Configuration` refuses a null or blank pin with `DEI-100`; the store keeps its own check | core probe `probe_a_blank_pin_is_accepted_when_the_configuration_is_built` green for `""`, `" "`, tab, null. The starter probe `probe_a_blank_pin_answers_a_signed_event_with_400` now cannot build its controller: the configuration throws `DEI-100`, which is the fix (pass 1 predicted this). Its replacement, a context-runner test with a host source pinned to `""`, `" "` and tab, fails the context with `DEI-100` | closed |
+| D-PR62-4 (INFO) | endpoint guard promoted; core test in `SkewCurePathsTest` for a `recon-` row with another identity | guard green in the starter suite; the new core test green in the verify above (row untouched, one `DEI-223`, the pass carries on) | closed |
+
+### Attacks on the changed lines
+
+New internal probe file `D-PR62-CipherProbePr62Pass2Test.java.txt` (core, three guards, all
+green on the head). They are guards, not findings.
+
+- **Two cures at the same pin, contending.** A separate transaction holds the row lock with
+  `FOR UPDATE`. Two cures start and are seen waiting on the lock in `pg_stat_activity`. The lock
+  is released. Answers: one `CURED`, one `DUPLICATE`; `cure_generation` is 1;
+  `cured_from_received_at` is the first arrival.
+- **Two cures at two pins, contending.** The same set-up, one copy at each of two pins. Rule A
+  holds for both in turn, so both cure; `cure_generation` is 2 and `cured_from_received_at` is
+  still the first arrival. `ON CONFLICT DO UPDATE` evaluates the `SET` on the row the first cure
+  committed, so `coalesce` sees the kept value. Mutation (the review's own, restored): with
+  `cured_from_received_at = e.received_at` this guard is red.
+- **Pins from each configuration path.** Property: `einvoice.stripe.api-version` blank or spaces
+  means the SDK's own version (`StripeClientFactory`, by design). Constructor: the bundled
+  `StripeApiInvoiceSource` refuses any pin other than the SDK's own, spaces included, with
+  `DEI-100`. Starter auto-configuration: a host source is read once into the configuration
+  record, which now refuses blank; the configuration is built only in
+  `EInvoiceIssuanceAutoConfiguration.configuration` and is not a bean a host can replace.
+- **Pins that are not blank and not a version.** Padded (`" <pin> "`), NO-BREAK SPACE and ZERO
+  WIDTH SPACE pass `isBlank()`. The configuration and the store agree and accept them, so a
+  signed event is recorded and later refused for skew, replayable after the pin is fixed. That is
+  the pre-PR behaviour for a wrong pin, never a 400 recorded nowhere, so it is not the D-PR62-3
+  class.
+
+### Not tried
+
+- Contending cures under REPEATABLE READ or SERIALIZABLE (the guards ran at READ COMMITTED, the
+  store's own connection). The pass 1 note on a commit-time `40001` still stands.
+- A `null` value for `einvoice.stripe.api-version` from a property source that keeps nulls.
+  Spring's binder treats it as absent; not run.
+- The other readers of the reset columns were checked against the design page's reader table
+  (the third fix bullet of D-PR62-1, done). Retention, the retry ceiling and the time limit run
+  from the cure, by design and documented in the CHANGELOG. Each reader was not probed one by one.
+- Everything pass 1 listed as not tried.
