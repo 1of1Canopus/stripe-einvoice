@@ -458,7 +458,7 @@ Two signals, and the difference matters:
 | `einvoice.issuance.retry-ceiling` | `72h` | - |
 | `einvoice.issuance.alert-after` | `6h` | - |
 | `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision. A row whose invoice holds an open number (numbered, archiving or failed archive) is kept past it until the number resolves |
-| `einvoice.reconcile.interval` / `.window` / `.grace` | `15m` / `2d` / `15m` | `enabled=false` removes the only watcher there is |
+| `einvoice.reconcile.interval` / `.window` / `.grace` | `15m` / `2d` / `15m` | `enabled=false` removes the only watcher there is. The window must be at least twice the interval, or start-up is refused: invoices finalised between two passes would never be checked |
 | `einvoice.reconcile.drift-sample` | `10` | `0` stops re-hashing archived documents |
 | `einvoice.reconcile.orphan-pages` | `4` | 1 to 100; fewer pages make a cycle longer |
 | `einvoice.reconcile.orphan-cycle-alert` | `7d` | a longer alert reports a stalled walk later |

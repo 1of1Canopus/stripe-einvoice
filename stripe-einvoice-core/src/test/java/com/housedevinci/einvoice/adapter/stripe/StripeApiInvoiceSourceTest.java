@@ -247,6 +247,46 @@ class StripeApiInvoiceSourceTest {
   }
 
   @Test
+  void a_source_over_another_classpath_sdk_is_refused_at_construction() {
+    StripeClient client = StripeClient.builder().setApiKey("rk_test_" + "0".repeat(24)).build();
+    assertThatThrownBy(
+            () ->
+                new StripeApiInvoiceSource(
+                    client,
+                    StripeApiInvoiceSource.SDK_API_VERSION,
+                    Duration.ofDays(30),
+                    "2026-11-30.fig"))
+        .isInstanceOf(EInvoiceException.class)
+        .extracting("code")
+        .isEqualTo(ErrorCodes.CONFIG);
+  }
+
+  @Test
+  void an_unreadable_classpath_sdk_is_refused() {
+    for (Class<?> shape : java.util.List.of(NoField.class, IntegerField.class, NullField.class)) {
+      String runtime = StripeApiInvoiceSource.sdkApiVersionOf(shape);
+      assertThatThrownBy(
+              () ->
+                  StripeApiInvoiceSource.requireClasspathSdk(
+                      StripeApiInvoiceSource.SDK_API_VERSION, runtime))
+          .as(shape.getSimpleName())
+          .isInstanceOf(EInvoiceException.class);
+    }
+    assertThat(StripeApiInvoiceSource.sdkApiVersionOf(com.stripe.Stripe.class))
+        .isEqualTo(StripeApiInvoiceSource.SDK_API_VERSION);
+  }
+
+  static final class NoField {}
+
+  static final class IntegerField {
+    public static final Integer API_VERSION = 7;
+  }
+
+  static final class NullField {
+    public static String API_VERSION = null;
+  }
+
+  @Test
   void the_classpath_sdk_is_the_compiled_one() throws Exception {
     assertThat(com.stripe.Stripe.class.getField("API_VERSION").get(null))
         .isEqualTo(StripeApiInvoiceSource.SDK_API_VERSION);

@@ -108,6 +108,12 @@ public final class ReconciliationSweep {
 
     public Settings {
       window = window == null ? Duration.ofDays(2) : window;
+      if (window.isNegative() || window.isZero()) {
+        throw new EInvoiceException(
+            ErrorCodes.CONFIG,
+            "einvoice.reconcile.window must be positive: a window of zero or less covers no"
+                + " invoice, so reconciliation would check nothing");
+      }
       grace = grace == null ? Duration.ofMinutes(15) : grace;
       alertAfter = alertAfter == null ? Duration.ofHours(6) : alertAfter;
       driftSample = driftSample <= 0 ? 10 : driftSample;

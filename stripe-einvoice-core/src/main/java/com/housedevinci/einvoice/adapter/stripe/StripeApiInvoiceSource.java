@@ -75,7 +75,16 @@ public final class StripeApiInvoiceSource implements StripeInvoiceSource {
    */
   public StripeApiInvoiceSource(
       StripeClient client, String pinnedApiVersion, Duration listLookback) {
-    requireClasspathSdk(SDK_API_VERSION, runtimeSdkApiVersion());
+    this(client, pinnedApiVersion, listLookback, sdkApiVersionOf(Stripe.class));
+  }
+
+  /** Test seam: the version the classpath SDK speaks is passed in. */
+  StripeApiInvoiceSource(
+      StripeClient client,
+      String pinnedApiVersion,
+      Duration listLookback,
+      String runtimeSdkApiVersion) {
+    requireClasspathSdk(SDK_API_VERSION, runtimeSdkApiVersion);
     this.client = Objects.requireNonNull(client, "client");
     this.pinnedApiVersion = Objects.requireNonNull(pinnedApiVersion, "pinnedApiVersion");
     this.listLookback = Objects.requireNonNull(listLookback, "listLookback");
@@ -108,9 +117,9 @@ public final class StripeApiInvoiceSource implements StripeInvoiceSource {
     }
   }
 
-  private static String runtimeSdkApiVersion() {
+  static String sdkApiVersionOf(Class<?> stripeClass) {
     try {
-      return (String) Stripe.class.getField("API_VERSION").get(null);
+      return (String) stripeClass.getField("API_VERSION").get(null);
     } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
       return "unreadable (" + e.getClass().getSimpleName() + ")";
     }
