@@ -384,6 +384,11 @@ same row, which runs at once. Nothing to do. A copy at the pin replaces only a r
 `RECEIVED` or `REFUSED_VERSION_SKEW` at another version, with the same event type, invoice, mode
 and account; it never touches a row that went further. The row keeps a trace: `cure_generation`,
 `cured_from_api_version`, `cured_from_body_sha256`, `cured_from_received_at` and `cured_at`.
+`cured_from_received_at` is the first arrival of the event, kept across every cure.
+`cured_from_api_version` and `cured_from_body_sha256` describe the copy the last cure replaced.
+A cure restarts retention, the retry ceiling and the time limit. It does not change why a late
+invoice is explained: the date-gap cause reads the first arrival, so a webhook that came on the
+supply day and was cured later is never recorded as `LATE_WEBHOOK`.
 
 **A row stuck before this release.** Its right copy was answered as a duplicate and Stripe will not
 send it again. Resend the event from the Stripe Dashboard to the re-pinned endpoint (the resend is

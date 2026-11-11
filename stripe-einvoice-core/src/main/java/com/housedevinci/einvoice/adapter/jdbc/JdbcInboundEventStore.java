@@ -55,8 +55,10 @@ public final class JdbcInboundEventStore implements InboundEventStore {
    * at another version than the pin, this copy at the pin, and the same four identity columns.
    * Neither state ever holds a number. Rule B then makes the row what a fresh insert of the copy
    * is, except {@code mode}, {@code parked_at} and {@code retried_at} (kept) and the trace. On the
-   * right of a {@code SET}, {@code e.} is the row before this statement. No row is returned when
-   * rule A is false: a duplicate or an identity mismatch, which the caller tells apart.
+   * right of a {@code SET}, {@code e.} is the row before this statement. The trace keeps the first
+   * arrival of the event across every cure ({@code cured_from_received_at}, D-PR62-2), and the
+   * version and body hash of the copy just replaced. No row is returned when rule A is false: a
+   * duplicate or an identity mismatch, which the caller tells apart.
    *
    * <p>{@code ON CONFLICT DO UPDATE} locks the conflicting row, so two copies at the pin at once
    * give one cure: the second re-checks rule A on the cured row, at the pin, and gets no row.
@@ -71,7 +73,8 @@ public final class JdbcInboundEventStore implements InboundEventStore {
           + " ON CONFLICT (event_id) DO UPDATE SET"
           + " cure_generation = e.cure_generation + 1,"
           + " cured_from_api_version = e.api_version, cured_from_body_sha256 = e.body_sha256,"
-          + " cured_from_received_at = e.received_at, cured_at = EXCLUDED.received_at,"
+          + " cured_from_received_at = coalesce(e.cured_from_received_at, e.received_at),"
+          + " cured_at = EXCLUDED.received_at,"
           + " api_version = EXCLUDED.api_version, body = EXCLUDED.body,"
           + " body_sha256 = EXCLUDED.body_sha256, signature_key_id = EXCLUDED.signature_key_id,"
           + " seller_id = EXCLUDED.seller_id, state = 'RECEIVED', attempts = 0,"

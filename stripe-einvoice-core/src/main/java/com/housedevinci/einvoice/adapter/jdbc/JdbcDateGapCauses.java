@@ -19,6 +19,10 @@ import java.time.ZoneId;
  * park and retry marks, its source, and the reprocess ledger. Nothing a caller passes takes part,
  * which an ArchUnit rule holds. Precedence when several apply: {@code REPROCESS}, {@code SWEEP},
  * {@code PARK}, {@code RETRY}, {@code LATE_WEBHOOK}, then {@code UNRECORDED}.
+ *
+ * <p>The late-webhook test reads the first arrival of each row: {@code cured_from_received_at} when
+ * a cure replaced the row, since a cure restarts {@code received_at} (D-PR62-1). A webhook that
+ * came on the supply day, was refused for skew and was then cured did not come late.
  */
 final class JdbcDateGapCauses {
 
@@ -30,7 +34,7 @@ final class JdbcDateGapCauses {
           + " coalesce(bool_or(signature_key_id = ?), false) AS swept,"
           + " coalesce(bool_or(parked_at IS NOT NULL), false) AS parked,"
           + " coalesce(bool_or(retried_at IS NOT NULL), false) AS retried,"
-          + " min(received_at) AS first_received"
+          + " min(coalesce(cured_from_received_at, received_at)) AS first_received"
           + " FROM einvoice_inbound_event"
           + " WHERE seller_id = ? AND mode = ? AND object_id = ?";
 

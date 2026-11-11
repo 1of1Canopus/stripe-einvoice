@@ -286,9 +286,11 @@ All notable changes to this project are documented here. The format follows
   - Upgrade note: five new nullable or defaulted columns on `einvoice_inbound_event`
     (`cure_generation`, `cured_from_api_version`, `cured_from_body_sha256`,
     `cured_from_received_at`, `cured_at`), added by the schema script; no backfill. A cured row
-    keeps what it replaced in those columns: the version, the SHA-256 of the old body and the first
-    arrival; the old body itself is not kept. Retention, the retry ceiling and the time limit start
-    again at the cure.
+    keeps a trace in those columns: the version and the SHA-256 of the body of the copy it
+    replaced, and the first arrival of the event, kept across every cure. The old body itself is
+    not kept. Retention, the retry ceiling and the time limit start again at the cure. The date-gap
+    cause on the issuance reads the first arrival: a webhook that came on the supply day, was
+    refused for skew and was then cured, is never recorded as `LATE_WEBHOOK`.
   - Rows already stuck at an old version are not cured by the upgrade, because their right copy
     was answered 200 long ago. Two repairs: resend the event from the Stripe Dashboard to the
     re-pinned endpoint, or let reconciliation enqueue the invoice inside its window.
