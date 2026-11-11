@@ -57,6 +57,13 @@ import org.springframework.web.client.RestClient;
     })
 class StripeWebhookEndpointTest {
 
+  /**
+   * The Stripe API version the CHANGELOG upgrade note and the README name. Kept in one place. A
+   * stripe-java bump that moves the pin fails the test below until the note is written and this
+   * literal is updated.
+   */
+  private static final String PIN_NAMED_IN_THE_UPGRADE_NOTE = "2026-10-28.endive";
+
   private static final String PRIMARY = "whsec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   private static final String RETIRING = "whsec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -275,6 +282,71 @@ class StripeWebhookEndpointTest {
     assertThat(refused.lastCode()).isEqualTo(ErrorCodes.API_VERSION_SKEW);
     // Replayable: the body is still there for when the operator re-pins.
     assertThat(refused.bodyPresent()).isTrue();
+  }
+
+  @Test
+  void the_sdk_pin_is_the_one_the_upgrade_note_names() {
+    assertThat(com.stripe.Stripe.API_VERSION)
+        .as(
+            "stripe-java moved the Stripe API version. Write the CHANGELOG upgrade note and update"
+                + " the README, then update PIN_NAMED_IN_THE_UPGRADE_NOTE")
+        .isEqualTo(PIN_NAMED_IN_THE_UPGRADE_NOTE);
+  }
+
+  @Test
+  void an_event_carrying_the_sdk_api_version_is_accepted_and_issued() {
+    // The version the SDK sends is the version the module accepts. This test is written in terms
+    // of the SDK constant, so it cannot see a pin move. The test the_sdk_pin_is_the_one_the_
+    // upgrade_note_names does.
+    String eventId = freshId();
+    byte[] body =
+        realShapedBody(eventId, com.stripe.Stripe.API_VERSION).getBytes(StandardCharsets.UTF_8);
+
+    assertThat(post(body, signature(PRIMARY, body), MediaType.APPLICATION_JSON).getStatusCode())
+        .isEqualTo(HttpStatus.OK);
+    await()
+        .atMost(Duration.ofSeconds(20))
+        .untilAsserted(
+            () ->
+                assertThat(inbound.find(eventId).orElseThrow().state())
+                    .isEqualTo(InboundState.COMPLETED));
+  }
+
+  @Test
+  void an_event_still_on_the_previous_api_version_is_recorded_as_version_skew() {
+    // 2026-08-26.dahlia was the pin of stripe-java 33.x. A webhook endpoint not yet re-pinned
+    // sends it, and the module must record DEI-201 and answer 200, never process it.
+    String previousPin = "2026-08-26.dahlia";
+    assertThat(com.stripe.Stripe.API_VERSION).isNotEqualTo(previousPin);
+    String eventId = freshId();
+    byte[] body = realShapedBody(eventId, previousPin).getBytes(StandardCharsets.UTF_8);
+
+    assertThat(post(body, signature(PRIMARY, body), MediaType.APPLICATION_JSON).getStatusCode())
+        .isEqualTo(HttpStatus.OK);
+    await()
+        .atMost(Duration.ofSeconds(20))
+        .untilAsserted(
+            () ->
+                assertThat(inbound.find(eventId).orElseThrow().state())
+                    .isEqualTo(InboundState.REFUSED_VERSION_SKEW));
+    InboundEvent refused = inbound.find(eventId).orElseThrow();
+    assertThat(refused.lastCode()).isEqualTo(ErrorCodes.API_VERSION_SKEW);
+    assertThat(refused.bodyPresent()).isTrue();
+  }
+
+  /** The envelope Stripe sends for invoice.finalized, with the fields the module ignores too. */
+  private String realShapedBody(String eventId, String apiVersion) {
+    String invoiceId = invoiceOf(eventId);
+    stripeSource.add(invoiceId);
+    return "{\"id\":\""
+        + eventId
+        + "\",\"object\":\"event\",\"api_version\":\""
+        + apiVersion
+        + "\",\"created\":1790000000,\"livemode\":true,\"pending_webhooks\":1,"
+        + "\"request\":{\"id\":null,\"idempotency_key\":null},"
+        + "\"type\":\"invoice.finalized\",\"data\":{\"object\":{\"id\":\""
+        + invoiceId
+        + "\",\"object\":\"invoice\",\"status\":\"open\",\"currency\":\"eur\"}}}";
   }
 
   @Test

@@ -64,8 +64,8 @@ class CipherProbeActuatorTest {
     assertThat(sanitize("einvoice.numbering.prefix", "INV-{fiscalYear}-"))
         .isEqualTo("INV-{fiscalYear}-");
     assertThat(sanitize("einvoice.mode", "live")).isEqualTo("live");
-    assertThat(sanitize("einvoice.stripe.api-version", "2026-08-26.dahlia"))
-        .isEqualTo("2026-08-26.dahlia");
+    assertThat(sanitize("einvoice.stripe.api-version", "2026-10-28.endive"))
+        .isEqualTo("2026-10-28.endive");
   }
 
   private Object sanitize(String key, String value) {

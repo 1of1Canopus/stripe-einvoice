@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 /** The authoritative source, under the test's control rather than Stripe's. */
 public final class FakeStripeSource implements StripeInvoiceSource {
 
-  public static final String PINNED = "2026-03-31.clover";
+  public static final String PINNED = com.stripe.Stripe.API_VERSION;
 
   private final Map<String, SourceInvoice> invoices = new LinkedHashMap<>();
   private final AtomicInteger fetches = new AtomicInteger();

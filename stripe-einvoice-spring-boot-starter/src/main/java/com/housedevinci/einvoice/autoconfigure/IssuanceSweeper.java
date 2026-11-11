@@ -5,6 +5,8 @@ import com.housedevinci.einvoice.application.IssuanceChainVerifier;
 import com.housedevinci.einvoice.application.IssuanceUnitOfWork;
 import com.housedevinci.einvoice.application.ReconciliationSweep;
 import com.housedevinci.einvoice.application.StrandedInboundSweep;
+import com.housedevinci.einvoice.domain.EInvoiceException;
+import com.housedevinci.einvoice.domain.ErrorCodes;
 import com.housedevinci.einvoice.domain.InboundEvent;
 import com.housedevinci.einvoice.domain.RunningLimit;
 import java.time.Clock;
@@ -91,6 +93,25 @@ public final class IssuanceSweeper
   @Override
   public void afterPropertiesSet() {
     warnAboutWeakLimits(stranded.runningLimit());
+    if (properties.getReconcile().isEnabled()
+        && properties
+                .getReconcile()
+                .getWindow()
+                .compareTo(properties.getReconcile().getInterval().multipliedBy(2))
+            < 0) {
+      throw new EInvoiceException(
+          ErrorCodes.CONFIG,
+          "einvoice.reconcile.window must be at least twice einvoice.reconcile.interval."
+              + " Invoices finalised between two passes would never be checked.");
+    }
+    if (!properties.getReconcile().isEnabled()) {
+      log.warn(
+          "einvoice: einvoice.reconcile.enabled=false. Reconciliation is switched off, so sales"
+              + " with no document are no longer found, and events refused at a previous Stripe"
+              + " API version are no longer re-enqueued. After a Stripe API version move,"
+              + " reconciliation is the only path that issues those invoices. Keep it on unless"
+              + " another control finds missing documents.");
+    }
     Duration sweep = properties.getIssuance().getSweepInterval();
     scheduler.scheduleWithFixedDelay(
         this::sweepOnce, sweep.toMillis(), sweep.toMillis(), TimeUnit.MILLISECONDS);

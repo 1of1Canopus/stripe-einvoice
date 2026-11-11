@@ -363,18 +363,33 @@ One Stripe event becomes one archived document, or none, and there is a record e
 
 ## Replaying a refused event
 
-An API version skew is Stripe's move, not yours, and it applies to every event on the account at
-once. The refused events are on `einvoice_inbound_event` with their bodies intact and
-`last_code = DEI-201`.
+An API version skew is a difference between the version an event was sent at and the version this
+module is pinned to. The refused events are on `einvoice_inbound_event` with their bodies intact and
+`last_code = DEI-201`. There are two cases.
+
+**Stripe is ahead of the module.** Events arrive at a newer version than the pin.
 
 1. Upgrade the module (the pin is the SDK's own version and is refused if configuration names
    another).
-2. Restart. The sweeper's due query re-picks exactly the `REFUSED_VERSION_SKEW` rows whose own
-   recorded `api_version` now equals the pin this application starts under, and drives them through
-   the same path. `REFUSED_MODE` and `REFUSED_ACCOUNT` are never re-picked this way - neither is
-   cured by an upgrade, and re-running either silently would be worse than leaving it for an
-   operator to look at.
+2. Restart. A refused row is re-picked only if its own recorded `api_version` equals the pin this
+   application starts under. `REFUSED_MODE` and `REFUSED_ACCOUNT` are never re-picked this way:
+   neither is cured by an upgrade, and re-running either silently would be worse than leaving it
+   for an operator to look at.
 3. Watch the findings list empty out.
+
+**The module is ahead of your webhook endpoint.** This happens after an upgrade that moves the pin.
+Stripe fixes an endpoint's version when the endpoint is created, so you cannot move it. Do this in
+order:
+
+1. Create a new webhook endpoint at the new version.
+2. Add its signing secret to `einvoice.stripe.webhook-secrets`, next to the old one.
+3. Disable the old endpoint.
+4. Deploy the new version.
+
+Events that arrive in between are held as `DEI-201` with the new version, and the sweeper replays
+them after the deploy. A row recorded at the old version is never replayed, because its version
+never equals the new pin. Reconciliation is what issues those invoices. It must be on
+(`einvoice.reconcile.enabled`, the default), and the invoice must be inside its window.
 
 ## Reconciliation, health and findings
 
@@ -443,7 +458,7 @@ Two signals, and the difference matters:
 | `einvoice.issuance.retry-ceiling` | `72h` | - |
 | `einvoice.issuance.alert-after` | `6h` | - |
 | `einvoice.inbound.retention` | `30d` | longer is allowed and is a PII retention decision. A row whose invoice holds an open number (numbered, archiving or failed archive) is kept past it until the number resolves |
-| `einvoice.reconcile.interval` / `.window` / `.grace` | `15m` / `2d` / `15m` | `enabled=false` removes the only watcher there is |
+| `einvoice.reconcile.interval` / `.window` / `.grace` | `15m` / `2d` / `15m` | `enabled=false` removes the only watcher there is. The window must be at least twice the interval, or start-up is refused: invoices finalised between two passes would never be checked |
 | `einvoice.reconcile.drift-sample` | `10` | `0` stops re-hashing archived documents |
 | `einvoice.reconcile.orphan-pages` | `4` | 1 to 100; fewer pages make a cycle longer |
 | `einvoice.reconcile.orphan-cycle-alert` | `7d` | a longer alert reports a stalled walk later |
